@@ -1,0 +1,116 @@
+# jobpulse configuration. Copy to config.yaml (gitignored) and edit.
+# Secrets (ntfy topic, Discord webhook, dashboard password, API keys) go in .env, never here.
+
+# Sent in the User-Agent to the ATS APIs so their operators can reach you.
+contact_email: you@example.com
+
+# Used for digest times and display. Storage is always UTC.
+timezone: America/Los_Angeles
+
+# DATABASE_URL in .env overrides this. SQLite runs in WAL mode.
+database_url: sqlite:///data/jobpulse.db
+
+http:
+  timeout_seconds: 20
+  max_attempts: 4               # per request, with exponential backoff and full jitter
+  host_limits:                  # concurrent requests per host; unlisted hosts get 2
+    boards-api.greenhouse.io: 4
+    api.lever.co: 4
+    api.eu.lever.co: 4
+    api.ashbyhq.com: 4
+    raw.githubusercontent.com: 1
+    www.linkedin.com: 1
+
+schedules:
+  watchlist: {every_minutes: 30, jitter_seconds: 120}
+  simplify: {every_minutes: 30, jitter_seconds: 120}     # Milestone 2
+  job_boards: {every_minutes: 75, jitter_seconds: 900}   # 60–90 min, Milestone 2
+  digest_times: ["09:00", "18:00"]                       # in `timezone`, Milestone 3
+
+detection:
+  freshness_hours: 48           # notify only for postings younger than this
+  closure_missing_polls: 2      # complete polls a job must be missing from before it closes
+  fingerprint_window_days: 30   # how far back a company+title+location match merges
+
+filters:
+  title:
+    include:                    # at least one must match; the weight feeds the title score
+      - {pattern: '\bback[- ]?end\b', weight: 1.0}
+      - {pattern: '\bplatform\b', weight: 0.8}
+      - {pattern: '\binfrastructure\b', weight: 0.8}
+      - {pattern: '\bapi\b', weight: 0.7}
+      - {pattern: '\bsoftware engineer\b', weight: 0.6}
+    exclude:                    # any match rejects the posting
+      - '\bmanager\b'
+      - '\bintern(ship)?\b'
+      - '\bfront[- ]?end\b'
+      - '\bsales\b'
+      - '\brecruit'
+  level:
+    include: ["<SET ME>"]       # level words you want, e.g. 'senior' or '\bii\b'; a title match adds a bonus
+    exclude: ['\bstaff\b', '\bprincipal\b']   # EXAMPLE ONLY; a title match rejects the posting
+  description:
+    max_years_experience: null  # e.g. 5; null turns the check off
+    years_mode: penalize        # penalize (drops to the digest) or exclude
+    level_phrases_exclude: []   # e.g. 'staff-level'
+    stack_keywords:             # regex: weight, matched against the description
+      '\bpython\b': 1.0
+      '\bgo(lang)?\b': 1.0
+      '\bpostgres(ql)?\b': 0.5
+      '\bkubernetes\b': 0.5
+  locations:
+    include: []                 # regexes over normalized labels, e.g. '^Remote \(US\)$'; empty = anywhere
+    exclude: []
+    aliases:                    # your abbreviations, on top of the built-in table
+      SF: San Francisco, CA
+      NYC: New York, NY
+    unknown_location_passes: true
+
+scoring:
+  weights:
+    freshness: 0.25
+    company_priority: 0.20
+    title: 0.30
+    stack: 0.25
+    level_mismatch: 0.50        # subtracted
+    applicants: 0.10            # only when known
+  priority_cap: 10              # watchlist priority is scaled to 0..1 against this
+  instant_threshold: 0.55       # at or above: instant push; below (but passing filters): digest
+
+notify:
+  channels: [ntfy]              # ntfy and/or discord; their secrets go in .env
+  ntfy:
+    base_url: https://ntfy.sh   # or your self-hosted server
+    priority: 4
+    tags: [briefcase]
+  max_instant_per_cycle: 10     # the rest go to the digest with one "N more" push
+  dashboard_url: null           # e.g. your Tailscale URL, linked from digests
+
+# EXAMPLES: replace with the companies you care about. Tokens verified on 2026-10-23.
+# Greenhouse: job-boards.greenhouse.io/<token> · Lever: jobs.lever.co/<token>
+# (region: eu for jobs.eu.lever.co) · Ashby: jobs.ashbyhq.com/<token>
+watchlist:
+  - {name: Stripe, ats: greenhouse, token: stripe, priority: 5}
+  - {name: Discord, ats: greenhouse, token: discord, priority: 3}
+  - {name: Figma, ats: greenhouse, token: figma, priority: 3}
+  - {name: GitLab, ats: greenhouse, token: gitlab, priority: 2}
+  - {name: Cloudflare, ats: greenhouse, token: cloudflare, priority: 3}
+  - {name: Spotify, ats: lever, token: spotify, priority: 2}
+  - {name: Zoox, ats: lever, token: zoox, priority: 1}
+  - {name: Palantir, ats: lever, token: palantir, priority: 2}
+  - {name: Linear, ats: ashby, token: linear, priority: 4}
+  - {name: Ramp, ats: ashby, token: ramp, priority: 4}
+  - {name: Supabase, ats: ashby, token: supabase, priority: 3}
+
+# Indeed/LinkedIn searches through JobSpy (Milestone 2).
+searches: []
+#  - {name: backend-us-remote, site: indeed, search_term: "backend engineer", location: "United States", is_remote: true}
+#  - {name: backend-sf, site: linkedin, search_term: "backend engineer", location: "San Francisco, CA"}
+
+linkedin:
+  delay_min_seconds: 4          # pause between LinkedIn requests, chosen at random in this range
+  delay_max_seconds: 8
+
+dashboard:
+  host: 127.0.0.1               # keep it local; reach it remotely through Tailscale
+  port: 8000

@@ -1,0 +1,25 @@
+# Secrets and local state: never commit these
+.env
+config.yaml
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# Editors and OS
+.DS_Store
+.idea/
+.vscode/
