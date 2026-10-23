@@ -5,6 +5,9 @@ from pathlib import Path
 
 from alembic import command
 from alembic.config import Config
+from alembic.runtime.migration import MigrationContext
+from alembic.script import ScriptDirectory
+from sqlalchemy import Engine
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
@@ -35,3 +38,11 @@ def upgrade(database_url: str, revision: str = "head") -> None:
 
 def show_current(database_url: str) -> None:
     command.current(alembic_config(database_url))
+
+
+def schema_revisions(engine: Engine) -> tuple[str | None, str | None]:
+    """The database's migration revision and the newest one this code ships."""
+    head = ScriptDirectory.from_config(Config(str(find_alembic_ini()))).get_current_head()
+    with engine.connect() as connection:
+        current = MigrationContext.configure(connection).get_current_revision()
+    return current, head

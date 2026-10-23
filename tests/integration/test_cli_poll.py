@@ -127,6 +127,18 @@ def test_a_source_option_polls_only_that_source(cli: tuple[list[str], str]) -> N
     assert "linkedin/backend-sf" not in output
 
 
+def test_poll_on_an_outdated_schema_says_what_to_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'old.db'}")
+    base = ["--config", str(CONFIG), "--env-file", str(tmp_path / ".env")]
+    assert runner.invoke(app, [*base, "db", "upgrade", "0001"]).exit_code == 0
+    result = runner.invoke(app, [*base, "poll", "--dry-run"])
+    assert result.exit_code == 2
+    assert "0001" in result.output
+    assert "jobpulse db upgrade" in result.output
+
+
 def test_unknown_source_is_rejected(cli: tuple[list[str], str]) -> None:
     base, _ = cli
     result = runner.invoke(app, [*base, "poll", "--dry-run", "--source", "monster"])

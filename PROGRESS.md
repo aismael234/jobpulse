@@ -142,4 +142,5 @@ LinkedIn applicant enrichment, the Workday adapter and the LLM scoring layer are
   - **A test helper changed:** `Env.add_search` used to insert a `searches` row. Searches now come from config, so it adds a config entry that the next poll syncs. The M1 tests that use it are otherwise unchanged.
   - **Real dry run** with the example watchlist on an empty scratch database: 12 baselines (3,095 open Simplify listings), nothing to push, 9–10 boards that discovery would add, 422 candidates left for later cycles. It took 24 s; one run took 87 s because Anduril's 2,800-job Greenhouse list timed out on all 4 attempts.
   - **Fixed after that run:** gh_jid pages are read only while the validation cap has room, so a cycle never reads a page whose board it can't validate.
+  - **Schema check:** the CLI and worker refuse to run on a database behind the newest migration, with a message to run `jobpulse db upgrade`. An M1 database (at 0001) used to crash on the first query that touched a new column.
   - **For M3:** the dashboard's paste flow can call `AtsDetector.detect` with page fetches on; the health page can read `runs` and `health_incidents`.

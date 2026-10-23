@@ -11,6 +11,7 @@ from sqlalchemy import inspect
 from sqlalchemy.orm import Session, sessionmaker
 
 from jobpulse.config import AppConfig, Settings, location_aliases
+from jobpulse.db import migrate
 from jobpulse.db.session import create_engine_for, display_url, make_session_factory
 from jobpulse.discovery import Discoverer
 from jobpulse.httpclient import HttpClient, RetryPolicy, build_user_agent
@@ -45,6 +46,16 @@ def open_database(url: str) -> sessionmaker[Session]:
         engine.dispose()
         raise DatabaseNotReady(
             f"{display_url(url)} has no jobpulse tables yet; run `jobpulse db upgrade` first"
+        )
+    try:
+        current, head = migrate.schema_revisions(engine)
+    except FileNotFoundError:  # no alembic.ini next to this install: nothing to compare with
+        current = head = None
+    if current is not None and current != head:
+        engine.dispose()
+        raise DatabaseNotReady(
+            f"{display_url(url)} is at migration {current}, but this version needs {head}; "
+            "run `jobpulse db upgrade` first"
         )
     return make_session_factory(engine)
 

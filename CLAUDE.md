@@ -13,7 +13,7 @@ Personal job-posting watcher. Read PROGRESS.md first: milestone checklists, deci
 - `uv run jobpulse --config tests/fixtures/scenarios/config.yaml poll --once --dry-run --fixtures tests/fixtures/scenarios/first_poll` — the same over recorded responses, JobSpy rows included (set `DATABASE_URL` to a scratch DB and run `db upgrade` first; `second_poll` after a live `first_poll` shows a merge)
 - `uv run jobpulse worker` — the scheduler (needs `NTFY_TOPIC` when ntfy is enabled)
 - `uv run jobpulse companies list` / `companies sync`, `uv run jobpulse notify test`
-- `uv run alembic upgrade head` or `uv run jobpulse db upgrade` — migrate the database
+- `uv run alembic upgrade head` or `uv run jobpulse db upgrade` — migrate the database (the CLI refuses to run on one that is behind)
 
 ## Conventions
 
