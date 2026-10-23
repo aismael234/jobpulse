@@ -1,4 +1,5 @@
-"""M1 acceptance: ``poll --once --dry-run`` over recorded responses prints the expected lines."""
+"""M1 and M2 acceptance: ``poll --once --dry-run`` over recorded responses prints the expected
+lines, and a LinkedIn copy of a Greenhouse job is merged rather than pushed."""
 
 from pathlib import Path
 
@@ -51,8 +52,15 @@ def test_dry_run_of_a_first_poll_prints_baseline_lines_and_saves_nothing(
     assert "greenhouse/acme: baseline: 5 postings would be stored silently" in output
     assert "lever/beta: baseline: 3 postings would be stored silently" in output
     assert "ashby/gamma: baseline: 3 postings would be stored silently" in output
+    assert "simplify/new-grad: baseline: 7 postings would be stored silently" in output
+    assert "linkedin/backend-sf: baseline: 1 posting would be stored silently" in output
+    assert (
+        "discovery: would add lever/delta (Delta, 2 jobs) from "
+        "https://jobs.lever.co/delta/98959f08-1d1b-4b75-919e-833f825394b0/apply"
+    ) in output
+    assert "discovery: 4 more candidates wait for later cycles" in output
     assert "would notify: nothing" in output
-    for name in ("postings", "runs", "companies"):
+    for name in ("postings", "runs", "companies", "searches", "source_state"):
         assert count_rows(db_url, name) == 0
 
 
@@ -76,6 +84,29 @@ def test_dry_run_after_a_baseline_prints_the_push_it_would_send(
     assert count_rows(db_url, "runs") == runs_before
 
 
+def test_dry_run_merges_a_linkedin_copy_onto_its_greenhouse_row(
+    cli: tuple[list[str], str],
+) -> None:
+    """M2 acceptance: the copy merges by fingerprint (LinkedIn rows have no job_url_direct)
+    and is not pushed; a LinkedIn-only job still is."""
+    base, _ = cli
+    poll(base, "first_poll")
+
+    output = poll(base, "second_poll", "--dry-run")
+
+    assert "linkedin/backend-sf: 3 fetched, 2 new, 1 merged" in output
+    assert (
+        "  merged: Acme, Inc. · Backend Engineer – Payments (linkedin 4101100002) "
+        "into greenhouse 4012345007 by fingerprint"
+    ) in output
+    assert "would notify: Northwind · Backend Engineer, Search · Seattle · posted today" in output
+    assert "Payments" not in "".join(line for line in output.splitlines() if "notify" in line)
+    assert "simplify/new-grad: unchanged since the last fetch (304)" in output
+    assert (
+        "lever/delta: baseline: 2 postings would be stored silently (1 took over an earlier copy)"
+    ) in output
+
+
 def test_poll_without_a_migrated_database_says_what_to_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -86,6 +117,14 @@ def test_poll_without_a_migrated_database_says_what_to_run(
     )
     assert result.exit_code == 2
     assert "jobpulse db upgrade" in result.output
+
+
+def test_a_source_option_polls_only_that_source(cli: tuple[list[str], str]) -> None:
+    base, _ = cli
+    output = poll(base, "first_poll", "--dry-run", "--source", "simplify")
+    assert "simplify/new-grad: baseline: 7 postings would be stored silently" in output
+    assert "greenhouse/acme" not in output
+    assert "linkedin/backend-sf" not in output
 
 
 def test_unknown_source_is_rejected(cli: tuple[list[str], str]) -> None:

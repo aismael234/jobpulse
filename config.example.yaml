@@ -23,8 +23,8 @@ http:
 
 schedules:
   watchlist: {every_minutes: 30, jitter_seconds: 120}
-  simplify: {every_minutes: 30, jitter_seconds: 120}     # Milestone 2
-  job_boards: {every_minutes: 75, jitter_seconds: 900}   # 60–90 min, Milestone 2
+  simplify: {every_minutes: 30, jitter_seconds: 120}     # the feed changes about every 30 min
+  job_boards: {every_minutes: 75, jitter_seconds: 900}   # 60–90 min; searches ask for the last 3 h
   digest_times: ["09:00", "18:00"]                       # in `timezone`, Milestone 3
 
 detection:
@@ -102,14 +102,40 @@ watchlist:
   - {name: Ramp, ats: ashby, token: ramp, priority: 4}
   - {name: Supabase, ats: ashby, token: supabase, priority: 3}
 
-# Indeed/LinkedIn searches through JobSpy (Milestone 2).
+# Indeed and LinkedIn searches through JobSpy. Each asks for jobs posted in the last
+# hours_old (3) hours on every run, so a late or failed run leaves no gap. The first run of a
+# new (or changed) search is a silent baseline. LinkedIn ignores is_remote; put "Remote" in
+# the location instead. Keep LinkedIn searches few and results_wanted low.
 searches: []
 #  - {name: backend-us-remote, site: indeed, search_term: "backend engineer", location: "United States", is_remote: true}
-#  - {name: backend-sf, site: linkedin, search_term: "backend engineer", location: "San Francisco, CA"}
+#  - {name: backend-sf, site: linkedin, search_term: "backend engineer", location: "San Francisco, CA", results_wanted: 25}
 
 linkedin:
   delay_min_seconds: 4          # pause between LinkedIn requests, chosen at random in this range
   delay_max_seconds: 8
+  cooldown_minutes: 30          # after a 429, LinkedIn searches wait this long
+
+# The SimplifyJobs New-Grad list. Each fetch sends the stored ETag, so an unchanged feed costs
+# one tiny request. Its first successful fetch is a silent baseline.
+simplify:
+  enabled: true
+  url: https://raw.githubusercontent.com/SimplifyJobs/New-Grad-Positions/dev/.github/scripts/listings.json
+
+# Greenhouse, Lever and Ashby boards linked from the feed or from job-board postings are
+# checked with one API call and added to the watchlist (source auto, priority 0). A new
+# board's first poll is a silent baseline. Boards you removed from config are never re-added.
+discovery:
+  enabled: true
+  max_validations_per_cycle: 10
+  max_page_fetches_per_cycle: 5 # gh_jid links on company sites: the page is read once for the board
+
+# One push when a source keeps failing or a busy one goes quiet, and one more when it recovers.
+health:
+  enabled: true
+  consecutive_failures: 3
+  busy_min: 5                   # "busy": a 7-day median of at least this many postings per run
+  busy_window_days: 7
+  zero_hours: 24                # only empty successful runs for this long: suspicious
 
 dashboard:
   host: 127.0.0.1               # keep it local; reach it remotely through Tailscale

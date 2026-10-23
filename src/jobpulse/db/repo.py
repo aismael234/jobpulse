@@ -11,19 +11,22 @@ from datetime import datetime
 from typing import Any, cast
 from urllib.parse import urlsplit
 
-from sqlalchemy import func, select, update
+from sqlalchemy import case, func, or_, select, update
 from sqlalchemy.dialects import postgresql, sqlite
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
-from jobpulse.config import WatchlistEntry
+from jobpulse.config import SearchEntry, SimplifyConfig, WatchlistEntry
 from jobpulse.core.atsurls import gh_jid
 from jobpulse.core.dedupe import canonicalize_url, merge_also_seen
 from jobpulse.core.detection import PresencePlan, PresenceRow
 from jobpulse.core.models import (
     ATS_SOURCES,
+    DEDUPE_SOURCES,
     AtsName,
     CompanyTarget,
     Decision,
+    FeedTarget,
     FetchResult,
     Posting,
     Precision,
@@ -34,11 +37,14 @@ from jobpulse.core.models import (
     Target,
     Tier,
 )
-from jobpulse.db.tables import Company, PostingRow, Run, Search
+from jobpulse.db.tables import Company, HealthIncident, PostingRow, Run, Search, SourceState
 
 CHUNK = 500
 MAX_ERROR_CHARS = 2000
 _ATS_KEY_PREFIXES = tuple(f"{ats}:" for ats in sorted(ATS_SOURCES))
+# When several stored rows match, the ATS row is the primary.
+_ATS_ROWS_FIRST = case((PostingRow.source.in_(sorted(ATS_SOURCES)), 0), else_=1)
+_MATCH_TIERS = frozenset({"instant", "digest"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,9 +67,19 @@ class SyncReport:
     deactivated: tuple[str, ...] = ()
 
 
-def _chunks(ids: Sequence[int]) -> Iterator[Sequence[int]]:
-    for start in range(0, len(ids), CHUNK):
-        yield ids[start : start + CHUNK]
+@dataclass(frozen=True, slots=True)
+class Adoption:
+    """A new ATS row took over a copy of the same job that a feed or job board had first."""
+
+    primary_id: int
+    copy_id: int
+    copy_source: str
+    how: str
+
+
+def _chunks[T](items: Sequence[T]) -> Iterator[Sequence[T]]:
+    for start in range(0, len(items), CHUNK):
+        yield items[start : start + CHUNK]
 
 
 # --- watchlist ---------------------------------------------------------------------------
@@ -201,10 +217,168 @@ def mark_baseline_done(session: Session, target: Target, *, now: datetime) -> No
         session.execute(
             update(Company).where(Company.id == target.company_id).values(baseline_done_at=now)
         )
-    else:
+    elif isinstance(target, SearchTarget):
         session.execute(
             update(Search).where(Search.id == target.search_id).values(baseline_done_at=now)
         )
+    else:
+        session.execute(
+            update(SourceState)
+            .where(SourceState.source == target.feed, SourceState.target == target.name)
+            .values(baseline_done_at=now, updated_at=now)
+        )
+
+
+def _search_params(entry: SearchEntry) -> dict[str, Any]:
+    return {
+        "results_wanted": entry.results_wanted,
+        "is_remote": entry.is_remote,
+        "country_indeed": entry.country_indeed,
+        "linkedin_company_ids": list(entry.linkedin_company_ids),
+    }
+
+
+def _search_identity(
+    site: str, search_term: str, location: str | None, params: dict[str, Any]
+) -> tuple[Any, ...]:
+    """What decides which jobs a search finds; when it changes, the baseline starts over."""
+    return (
+        site,
+        search_term,
+        location,
+        params.get("is_remote"),
+        params.get("country_indeed"),
+        tuple(params.get("linkedin_company_ids") or ()),
+    )
+
+
+def sync_searches(session: Session, entries: Sequence[SearchEntry], *, now: datetime) -> SyncReport:
+    """Idempotent upsert of the config searches on their name. A search whose definition
+    changed gets a new silent baseline; searches that left config are deactivated."""
+    by_name = {search.name: search for search in session.scalars(select(Search))}
+    added: list[str] = []
+    updated: list[str] = []
+    for entry in entries:
+        params = _search_params(entry)
+        search = by_name.get(entry.name)
+        if search is None:
+            session.add(
+                Search(
+                    name=entry.name,
+                    site=entry.site,
+                    search_term=entry.search_term,
+                    location=entry.location,
+                    hours_old=entry.hours_old,
+                    params=params,
+                    active=entry.active,
+                    created_at=now,
+                )
+            )
+            added.append(entry.name)
+            continue
+        before = _search_identity(
+            search.site, search.search_term, search.location, dict(search.params or {})
+        )
+        if before != _search_identity(entry.site, entry.search_term, entry.location, params):
+            search.baseline_done_at = None
+        wanted: dict[str, Any] = {
+            "site": entry.site,
+            "search_term": entry.search_term,
+            "location": entry.location,
+            "hours_old": entry.hours_old,
+            "params": params,
+            "active": entry.active,
+        }
+        if any(getattr(search, field) != value for field, value in wanted.items()):
+            for field, value in wanted.items():
+                setattr(search, field, value)
+            updated.append(entry.name)
+    configured = {entry.name for entry in entries}
+    deactivated: list[str] = []
+    for name, search in by_name.items():
+        if name not in configured and search.active:
+            search.active = False
+            deactivated.append(name)
+    session.flush()
+    return SyncReport(tuple(added), tuple(updated), tuple(deactivated))
+
+
+def feed_targets(
+    session: Session, feed: SimplifyConfig, *, name: str | None = None
+) -> list[FeedTarget]:
+    """The SimplifyJobs feed with its stored ETag and baseline. A new URL starts over."""
+    if name is not None and name != feed.name:
+        return []
+    state = session.scalars(
+        select(SourceState).where(SourceState.source == "simplify", SourceState.target == feed.name)
+    ).first()
+    if state is None:
+        state = SourceState(source="simplify", target=feed.name, url=feed.url)
+        session.add(state)
+        session.flush()
+    elif state.url != feed.url:
+        state.url = feed.url
+        state.etag = None
+        state.baseline_done_at = None
+        session.flush()
+    return [
+        FeedTarget(
+            feed="simplify",
+            name=state.target,
+            url=state.url,
+            etag=state.etag,
+            baseline_done=state.baseline_done_at is not None,
+        )
+    ]
+
+
+def save_feed_etag(
+    session: Session, target: FeedTarget, *, etag: str | None, now: datetime
+) -> None:
+    session.execute(
+        update(SourceState)
+        .where(SourceState.source == target.feed, SourceState.target == target.name)
+        .values(etag=etag, updated_at=now)
+    )
+
+
+def known_companies(session: Session) -> set[tuple[str, str]]:
+    """(ats, lowercase token) of every stored company, active or not."""
+    return {
+        (ats, token.lower())
+        for ats, token in session.execute(select(Company.ats_type, Company.token))
+    }
+
+
+def add_discovered_company(
+    session: Session,
+    *,
+    ats: str,
+    token: str,
+    region: str,
+    name: str,
+    discovered_from: str,
+    now: datetime,
+) -> bool:
+    """Add a board found by discovery (priority 0, baseline pending). False if it existed."""
+    statement = (
+        _dialect_insert(session)(Company)
+        .values(
+            name=name,
+            ats_type=ats,
+            token=token,
+            region=region,
+            priority=0,
+            active=True,
+            source_of_discovery="auto",
+            discovered_from=discovered_from,
+            created_at=now,
+            updated_at=now,
+        )
+        .on_conflict_do_nothing(index_elements=["ats_type", "token"])
+        .returning(Company.id)
+    )
+    return session.execute(statement).scalar_one_or_none() is not None
 
 
 # --- presence and closures --------------------------------------------------------------
@@ -265,6 +439,26 @@ def apply_presence(session: Session, plan: PresencePlan, *, now: datetime) -> No
             )
     for chunk in _chunks(plan.closed_ids):
         session.execute(update(PostingRow).where(PostingRow.id.in_(chunk)).values(closed_at=now))
+
+
+def close_reported(
+    session: Session, *, source: str, external_ids: Sequence[str], now: datetime
+) -> int:
+    """Close stored open postings that the source itself reports closed (Simplify's
+    ``active: false``). Returns how many were open."""
+    closed = 0
+    for chunk in _chunks(list(dict.fromkeys(external_ids))):
+        result = session.execute(
+            update(PostingRow)
+            .where(
+                PostingRow.source == source,
+                PostingRow.external_id.in_(chunk),
+                PostingRow.closed_at.is_(None),
+            )
+            .values(closed_at=now)
+        )
+        closed += cast(CursorResult[Any], result).rowcount
+    return closed
 
 
 # --- inserting and deduplicating --------------------------------------------------------
@@ -368,7 +562,7 @@ def find_merge_target(
                 PostingRow.merged_into_id.is_(None),
                 PostingRow.id != exclude_id,
             )
-            .order_by(PostingRow.first_seen_at, PostingRow.id)
+            .order_by(_ATS_ROWS_FIRST, PostingRow.first_seen_at, PostingRow.id)
             .limit(1)
         ).first()
         if row is not None:
@@ -394,7 +588,7 @@ def find_merge_target(
             PostingRow.id != exclude_id,
             PostingRow.last_seen_at >= since,
         )
-        .order_by(PostingRow.first_seen_at, PostingRow.id)
+        .order_by(_ATS_ROWS_FIRST, PostingRow.first_seen_at, PostingRow.id)
         .limit(1)
     ).first()
     if row is not None:
@@ -437,6 +631,119 @@ def merge_into(
             tier="merged",
             tier_reason=f"duplicate of posting {primary.id} ({how})",
         )
+    )
+
+
+def adopt_copies(
+    session: Session,
+    *,
+    inserted: Sequence[tuple[int, Posting, str]],
+    since: datetime,
+    now: datetime,
+    baseline: bool,
+) -> list[Adoption]:
+    """The reverse link: new ATS rows ``(row_id, posting, fingerprint)`` take over unmerged
+    feed and job-board copies of the same job (same ATS key, ``gh_jid`` or fingerprint seen
+    since ``since``), so the ATS row is the primary and the job is never pushed twice.
+
+    The ATS row inherits the copy's notification and digest marks, status, applicant data
+    and any field it lacks; in a baseline it also takes over a match tier and score, so a
+    pushed job doesn't vanish into a silent baseline. Rows merged into the copy follow it.
+    """
+    by_key: dict[str, int] = {}
+    by_fingerprint: dict[str, int] = {}
+    by_job_id: dict[str, int] = {}
+    for row_id, posting, fingerprint in inserted:
+        if posting.canonical_url.startswith(_ATS_KEY_PREFIXES):
+            by_key.setdefault(posting.canonical_url, row_id)
+        by_fingerprint.setdefault(fingerprint, row_id)
+        if posting.source == "greenhouse":
+            by_job_id.setdefault(posting.external_id, row_id)
+    if not by_fingerprint:
+        return []
+
+    copies: dict[int, PostingRow] = {}
+    unmerged_copies = select(PostingRow).where(
+        PostingRow.source.in_(sorted(DEDUPE_SOURCES)), PostingRow.merged_into_id.is_(None)
+    )
+    for keys in _chunks(list(by_key)):
+        query = unmerged_copies.where(PostingRow.canonical_url.in_(keys))
+        copies.update({row.id: row for row in session.scalars(query)})
+    for fingerprints in _chunks(list(by_fingerprint)):
+        query = unmerged_copies.where(
+            PostingRow.fingerprint.in_(fingerprints), PostingRow.last_seen_at >= since
+        )
+        copies.update({row.id: row for row in session.scalars(query)})
+    if by_job_id:  # copies whose gh_jid link was on a domain not yet mapped to a token
+        query = unmerged_copies.where(
+            PostingRow.canonical_url.contains("gh_jid="), PostingRow.last_seen_at >= since
+        )
+        copies.update({row.id: row for row in session.scalars(query)})
+
+    adoptions: list[Adoption] = []
+    for copy in sorted(copies.values(), key=lambda row: row.id):
+        job_id = gh_jid(copy.canonical_url) or (gh_jid(copy.apply_url) if copy.apply_url else None)
+        if copy.canonical_url in by_key:
+            primary_id, how = by_key[copy.canonical_url], "canonical url"
+        elif job_id is not None and job_id in by_job_id:
+            primary_id, how = by_job_id[job_id], "gh_jid"
+        elif copy.fingerprint in by_fingerprint:
+            primary_id, how = by_fingerprint[copy.fingerprint], "fingerprint"
+        else:
+            continue
+        primary = session.get(PostingRow, primary_id)
+        if primary is None:
+            continue
+        _adopt(session, primary, copy, how=how, baseline=baseline)
+        adoptions.append(Adoption(primary.id, copy.id, copy.source, how))
+    return adoptions
+
+
+_INHERITED = (
+    "notified_at",
+    "digest_sent_at",
+    "applicant_label",
+    "applicant_min",
+    "applicant_max",
+    "description_text",
+    "department",
+    "compensation",
+)
+
+
+def _adopt(
+    session: Session, primary: PostingRow, copy: PostingRow, *, how: str, baseline: bool
+) -> None:
+    seen = merge_also_seen(
+        primary.also_seen_on,
+        {
+            "source": copy.source,
+            "external_id": copy.external_id,
+            "url": copy.url,
+            "matched_by": how,
+            "seen_at": copy.first_seen_at.isoformat(),
+        },
+    )
+    for entry in copy.also_seen_on or []:
+        seen = merge_also_seen(seen, entry)
+    primary.also_seen_on = seen
+    for field in _INHERITED:
+        if getattr(primary, field) is None and getattr(copy, field) is not None:
+            setattr(primary, field, getattr(copy, field))
+    if primary.status == "New" and copy.status != "New":
+        primary.status = copy.status
+    if baseline and copy.tier in _MATCH_TIERS:
+        primary.tier = copy.tier
+        primary.tier_reason = f"{copy.tier_reason} (first seen on {copy.source})"
+        primary.score = copy.score
+        primary.score_breakdown = copy.score_breakdown
+    copy.merged_into_id = primary.id
+    copy.tier = "merged"
+    copy.tier_reason = f"duplicate of posting {primary.id} ({how}), seen before it"
+    session.execute(
+        update(PostingRow)
+        .where(PostingRow.merged_into_id == copy.id)
+        .values(merged_into_id=primary.id)
     )
 
 
@@ -507,6 +814,7 @@ def instant_unnotified(session: Session, *, since: datetime) -> list[PostingRow]
             .where(
                 PostingRow.tier == "instant",
                 PostingRow.notified_at.is_(None),
+                PostingRow.digest_sent_at.is_(None),
                 PostingRow.merged_into_id.is_(None),
                 PostingRow.first_seen_at >= since,
             )
@@ -539,6 +847,7 @@ def start_run(
         fetched_count=len(result.postings),
         error=result.error[:MAX_ERROR_CHARS] if result.error else None,
         error_kind=result.error_kind,
+        not_modified=result.not_modified,
         warnings=list(result.warnings) or None,
     )
     session.add(run)
@@ -554,6 +863,100 @@ def finish_run(
         .where(Run.id == run_id)
         .values(finished_at=finished_at, new_count=new_count, stats=stats)
     )
+
+
+# --- health -------------------------------------------------------------------------------
+
+
+def recent_runs(
+    session: Session,
+    *,
+    source: str,
+    target: str,
+    limit: int | None = None,
+    since: datetime | None = None,
+) -> list[Run]:
+    """One target's runs, newest first."""
+    query = (
+        select(Run)
+        .where(Run.source == source, Run.target == target)
+        .order_by(Run.started_at.desc(), Run.id.desc())
+    )
+    if since is not None:
+        query = query.where(Run.started_at >= since)
+    if limit is not None:
+        query = query.limit(limit)
+    return list(session.scalars(query))
+
+
+def latest_counted_run(session: Session, *, source: str, target: str) -> Run | None:
+    """The newest successful run that brought a body (a 304 says nothing about counts)."""
+    return session.scalars(
+        select(Run)
+        .where(
+            Run.source == source,
+            Run.target == target,
+            Run.ok.is_(True),
+            Run.not_modified.is_(False),
+        )
+        .order_by(Run.started_at.desc(), Run.id.desc())
+        .limit(1)
+    ).first()
+
+
+def open_incidents(session: Session, *, source: str, target: str) -> dict[str, HealthIncident]:
+    rows = session.scalars(
+        select(HealthIncident).where(
+            HealthIncident.source == source,
+            HealthIncident.target == target,
+            HealthIncident.resolved_at.is_(None),
+        )
+    )
+    return {row.kind: row for row in rows}
+
+
+def open_incident(
+    session: Session,
+    *,
+    source: str,
+    target: str,
+    kind: str,
+    opened_at: datetime,
+    title: str,
+    detail: str,
+) -> HealthIncident:
+    incident = HealthIncident(
+        source=source, target=target, kind=kind, opened_at=opened_at, title=title, detail=detail
+    )
+    session.add(incident)
+    session.flush()
+    return incident
+
+
+def incidents_due(session: Session) -> list[HealthIncident]:
+    """Open incidents whose alert hasn't gone out, and resolved ones whose alert did but
+    whose recovery message hasn't."""
+    return list(
+        session.scalars(
+            select(HealthIncident)
+            .where(
+                or_(
+                    HealthIncident.resolved_at.is_(None) & HealthIncident.alerted_at.is_(None),
+                    HealthIncident.resolved_at.is_not(None)
+                    & HealthIncident.alerted_at.is_not(None)
+                    & HealthIncident.recovery_sent_at.is_(None),
+                )
+            )
+            .order_by(HealthIncident.id)
+        )
+    )
+
+
+def mark_incident_sent(
+    session: Session, incident_id: int, *, recovery: bool, now: datetime
+) -> None:
+    values = {"recovery_sent_at": now} if recovery else {"alerted_at": now}
+    session.execute(update(HealthIncident).where(HealthIncident.id == incident_id).values(**values))
 
 
 def row_to_posting(row: PostingRow, *, company_token: str | None = None) -> Posting:

@@ -1,0 +1,42 @@
+{
+  "rows": [
+    {
+      "id": "li-4101100001",
+      "site": "linkedin",
+      "job_url": "https://www.linkedin.com/jobs/view/4101100001",
+      "job_url_direct": null,
+      "title": "Backend Engineer",
+      "company": "Northwind",
+      "location": "Seattle, WA, USA",
+      "date_posted": "2026-10-23",
+      "is_remote": false,
+      "company_url": "https://www.linkedin.com/company/northwind"
+    },
+    {
+      "id": "li-4101100002",
+      "site": "linkedin",
+      "job_url": "https://www.linkedin.com/jobs/view/4101100002",
+      "job_url_direct": null,
+      "title": "Backend Engineer – Payments",
+      "company": "Acme, Inc.",
+      "location": "San Francisco, CA, USA",
+      "date_posted": "2026-10-23",
+      "is_remote": false,
+      "company_url": "https://www.linkedin.com/company/acme"
+    },
+    {
+      "id": "li-4101100003",
+      "site": "linkedin",
+      "job_url": "https://www.linkedin.com/jobs/view/4101100003",
+      "job_url_direct": null,
+      "title": "Backend Engineer, Search",
+      "company": "Northwind",
+      "location": "Seattle, WA, USA",
+      "date_posted": "2026-10-23",
+      "is_remote": false,
+      "company_url": "https://www.linkedin.com/company/northwind"
+    }
+  ],
+  "errors": {},
+  "warnings": {}
+}

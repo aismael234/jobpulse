@@ -83,6 +83,12 @@ _WORD_SEPARATOR = re.compile(r"\s+(?:or|&)\s+", re.IGNORECASE)
 _CHAR_SEPARATORS = (";", "|", "•", "\n", "/")
 _CITY_STATE_PAIRS = re.compile(r"(?:[^,]+,\s*[A-Z]{2}\s*,\s*)+[^,]+,\s*[A-Z]{2}")
 _CITY_STATE_PAIR = re.compile(r"([^,]+,\s*[A-Z]{2})\s*(?:,|$)")
+# "San Francisco, CA, USA" (JobSpy) or "Austin, Texas, United States": the city and state
+# are enough, and match how the ATS boards write US locations.
+_US_COUNTRY_SUFFIX = re.compile(
+    r"(?P<place>[^,]+,[^,]+?)\s*,\s*(?:USA|US|U\.S\.A?\.?|United States(?: of America)?)",
+    re.IGNORECASE,
+)
 _PUNCTUATION = re.compile(r"[^\w\s]")
 
 
@@ -166,6 +172,8 @@ def normalize_location(
         text = collapse_whitespace(_HYBRID.sub(" ", text)).strip(_EDGE_CHARS).strip()
         if not text:
             return None
+    if match := _US_COUNTRY_SUFFIX.fullmatch(text):
+        text = match["place"].strip()
     alias = aliases.get(text.casefold())
     return NormalizedLocation(alias or text, False)
 

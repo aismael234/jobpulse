@@ -4,14 +4,22 @@ Adapters never raise for HTTP problems: a non-2xx response, a timeout or a parse
 becomes ``FetchResult(ok=False)``, never an empty success.
 """
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from datetime import datetime
 from typing import Any, Protocol
 
 import httpx
 
 from jobpulse.core.locations import DEFAULT_ALIASES
-from jobpulse.core.models import CompanyTarget, ErrorKind, FetchResult, Posting, Target
+from jobpulse.core.models import (
+    CompanyTarget,
+    ErrorKind,
+    FeedTarget,
+    FetchResult,
+    Posting,
+    SearchTarget,
+    Target,
+)
 from jobpulse.core.timeparse import parse_iso, utcnow
 from jobpulse.httpclient import HttpClient
 
@@ -49,6 +57,18 @@ def error_kind_for_status(status: int) -> ErrorKind:
 def require_company(target: Target) -> CompanyTarget:
     if not isinstance(target, CompanyTarget):
         raise FetchError("other", f"{type(target).__name__} is not a company board target")
+    return target
+
+
+def require_search(target: Target) -> SearchTarget:
+    if not isinstance(target, SearchTarget):
+        raise FetchError("other", f"{type(target).__name__} is not a job-board search target")
+    return target
+
+
+def require_feed(target: Target) -> FeedTarget:
+    if not isinstance(target, FeedTarget):
+        raise FetchError("other", f"{type(target).__name__} is not a feed target")
     return target
 
 
@@ -91,17 +111,26 @@ class HttpAdapter:
     async def enrich(self, posting: Posting) -> Posting:
         return posting
 
-    async def get_json(self, url: str, *, use_etag_cache: bool = False) -> Any:
-        """GET and decode JSON, raising ``FetchError`` for anything but a readable 200."""
+    async def get_response(
+        self,
+        url: str,
+        *,
+        headers: Mapping[str, str] | None = None,
+        use_etag_cache: bool = False,
+        accept: Collection[int] = (200,),
+    ) -> httpx.Response:
+        """GET, raising ``FetchError`` for a transport failure or a status not in ``accept``."""
         try:
-            response = await self.http.request("GET", url, use_etag_cache=use_etag_cache)
+            response = await self.http.request(
+                "GET", url, headers=headers, use_etag_cache=use_etag_cache
+            )
         except httpx.TimeoutException as exc:
             raise FetchError("timeout", f"timed out after retries ({type(exc).__name__})") from None
         except httpx.TransportError as exc:
             raise FetchError(
                 "other", f"network error after retries ({type(exc).__name__})"
             ) from None
-        if response.status_code != 200:
+        if response.status_code not in accept:
             snippet = " ".join(response.text[:_BODY_SNIPPET].split())
             message = f"HTTP {response.status_code} from {response.url.host}"
             raise FetchError(
@@ -109,7 +138,15 @@ class HttpAdapter:
                 f"{message}: {snippet}" if snippet else message,
                 status=response.status_code,
             )
+        return response
+
+    @staticmethod
+    def decode_json(response: httpx.Response) -> Any:
         try:
             return response.json()
         except ValueError as exc:
             raise FetchError("parse", f"invalid JSON from {response.url.host}: {exc}") from None
+
+    async def get_json(self, url: str, *, use_etag_cache: bool = False) -> Any:
+        """GET and decode JSON, raising ``FetchError`` for anything but a readable 200."""
+        return self.decode_json(await self.get_response(url, use_etag_cache=use_etag_cache))

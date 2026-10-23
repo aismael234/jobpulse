@@ -25,6 +25,10 @@ log = logging.getLogger(__name__)
 RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
 REPLAY_HEADER = "X-Jobpulse-Replayed"
 _HEADERS_KEPT_ON_REPLAY = frozenset({"content-type", "etag", "last-modified"})
+# get_limited hands back decoded, possibly cut-off bytes, so these no longer describe them.
+_HEADERS_DROPPED_ON_TRUNCATION = frozenset(
+    {"content-encoding", "content-length", "transfer-encoding"}
+)
 
 Sleep = Callable[[float], Awaitable[None]]
 
@@ -199,6 +203,30 @@ class HttpClient:
                     self._etag_cache[url] = _CachedBody(etag, response.content, kept)
             return response
         raise AssertionError("unreachable: the last attempt always returns or raises")
+
+    async def get_limited(self, url: str, *, max_bytes: int) -> httpx.Response:
+        """One GET (no retries) whose body is cut off after ``max_bytes``, for fetching pages
+        whose size nobody promised. Raises ``httpx.TransportError`` like ``request``."""
+        host = (httpx.URL(url).host or "").lower()
+        async with self._semaphore(host), self._client.stream("GET", url) as response:
+            chunks: list[bytes] = []
+            size = 0
+            async for chunk in response.aiter_bytes():  # decoded, so the cap is on real bytes
+                chunks.append(chunk)
+                size += len(chunk)
+                if size >= max_bytes:
+                    break
+        headers = {
+            name: value
+            for name, value in response.headers.items()
+            if name.lower() not in _HEADERS_DROPPED_ON_TRUNCATION
+        }
+        return httpx.Response(
+            response.status_code,
+            headers=headers,
+            content=b"".join(chunks)[:max_bytes],
+            request=response.request,
+        )
 
     @staticmethod
     def _replay(cached: _CachedBody, request: httpx.Request) -> httpx.Response:

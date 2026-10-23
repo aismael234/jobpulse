@@ -2,15 +2,22 @@
 
 import json
 import re
-from datetime import UTC, datetime, timedelta
+from collections.abc import Mapping, Sequence
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
+
+import pandas as pd
+from jobspy.model import JobPost
 
 from jobpulse.core.filters import WeightedRegex
 from jobpulse.core.models import Posting
 
 FIXTURES = Path(__file__).parent / "fixtures"
 NOW = datetime(2026, 10, 23, 14, 0, tzinfo=UTC)
+JOBSPY_COLUMNS = list(JobPost.model_fields)
+LINKEDIN_ID = "4101234567"
+INDEED_KEY = "1a2b3c4d5e6f7a8b"
 
 
 def load_fixture(name: str) -> Any:
@@ -47,6 +54,63 @@ def make_posting(**overrides: Any) -> Posting:
     return Posting(**values)
 
 
+def jobspy_row(site: str = "linkedin", **overrides: Any) -> dict[str, Any]:
+    """One row the way ``scrape_jobs`` 1.4.0 returns it for that site."""
+    if site == "linkedin":
+        external_id = overrides.pop("external_id", LINKEDIN_ID)
+        row: dict[str, Any] = {
+            "id": f"li-{external_id}",
+            "site": "linkedin",
+            "job_url": f"https://www.linkedin.com/jobs/view/{external_id}",
+            "job_url_direct": None,
+            "title": "Backend Engineer",
+            "company": "Acme",
+            "location": "San Francisco, CA, USA",
+            "date_posted": date(2026, 10, 23),
+            "is_remote": False,
+            "company_url": "https://www.linkedin.com/company/acme",
+        }
+    else:
+        key = overrides.pop("external_id", INDEED_KEY)
+        row = {
+            "id": f"in-{key}",
+            "site": "indeed",
+            "job_url": f"https://www.indeed.com/viewjob?jk={key}",
+            "job_url_direct": None,
+            "title": "Backend Engineer",
+            "company": "Acme",
+            "location": "San Francisco, CA, USA",
+            "date_posted": date(2026, 10, 23),
+            "job_type": "fulltime",
+            "salary_source": "direct_data",
+            "interval": "yearly",
+            "min_amount": 150000.0,
+            "max_amount": 190000.0,
+            "currency": "USD",
+            "is_remote": False,
+            "description": "**About the role**\n\nBuild Python services. 3+ years of experience.",
+            "company_url": "https://www.indeed.com/cmp/Acme",
+            "company_url_direct": "https://acme.example",
+        }
+    row.update(overrides)
+    return row
+
+
+def jobspy_frame(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    errors: Mapping[str, str] | None = None,
+    warnings: Mapping[str, Sequence[str]] | None = None,
+) -> pd.DataFrame:
+    """A DataFrame shaped like ``scrape_jobs``' result, ``attrs`` included."""
+    frame = pd.DataFrame([dict(row) for row in rows], columns=JOBSPY_COLUMNS)
+    frame.attrs = {
+        "errors": dict(errors or {}),
+        "warnings": {site: list(items) for site, items in (warnings or {}).items()},
+    }
+    return frame
+
+
 class FakeSleep:
     """Records requested sleeps instead of sleeping."""
 
@@ -55,3 +119,13 @@ class FakeSleep:
 
     async def __call__(self, seconds: float) -> None:
         self.calls.append(seconds)
+
+
+class FakeMonotonic:
+    """A monotonic clock that only moves when told to."""
+
+    def __init__(self, start: float = 1000.0) -> None:
+        self.now = start
+
+    def __call__(self) -> float:
+        return self.now

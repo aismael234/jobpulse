@@ -89,6 +89,11 @@ def fingerprint(company: str, title: str, primary_location: str | None) -> str:
 
 
 def posting_fingerprint(posting: Posting) -> str:
+    if not normalize_company(posting.company_name):
+        # Without a company the fingerprint would match unrelated jobs with the same title
+        # and city, so it matches only this posting.
+        key = f"no company|{posting.source}|{posting.external_id}"
+        return hashlib.sha256(key.encode("utf-8")).hexdigest()
     primary = posting.locations[0] if posting.locations else None
     return fingerprint(posting.company_name, posting.title, primary)
 

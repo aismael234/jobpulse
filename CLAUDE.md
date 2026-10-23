@@ -9,8 +9,8 @@ Personal job-posting watcher. Read PROGRESS.md first: milestone checklists, deci
 - `uv run ruff check . && uv run ruff format --check .` — lint and format check
 - `uv run mypy src` — types (strict on `jobpulse.core`)
 - `scripts/check.sh` — all of the above in one go
-- `uv run jobpulse poll --once --dry-run` — one poll cycle; nothing sent, nothing saved
-- `uv run jobpulse --config tests/fixtures/scenarios/config.yaml poll --once --dry-run --fixtures tests/fixtures/scenarios/first_poll` — the same over recorded responses (set `DATABASE_URL` to a scratch DB and run `db upgrade` first)
+- `uv run jobpulse poll --once --dry-run` — one poll cycle over every source (`--source` narrows it); nothing sent, nothing saved
+- `uv run jobpulse --config tests/fixtures/scenarios/config.yaml poll --once --dry-run --fixtures tests/fixtures/scenarios/first_poll` — the same over recorded responses, JobSpy rows included (set `DATABASE_URL` to a scratch DB and run `db upgrade` first; `second_poll` after a live `first_poll` shows a merge)
 - `uv run jobpulse worker` — the scheduler (needs `NTFY_TOPIC` when ntfy is enabled)
 - `uv run jobpulse companies list` / `companies sync`, `uv run jobpulse notify test`
 - `uv run alembic upgrade head` or `uv run jobpulse db upgrade` — migrate the database
@@ -42,11 +42,16 @@ Personal job-posting watcher. Read PROGRESS.md first: milestone checklists, deci
 - Protocol members such as `name` are plain class attributes (`name = "lever"`), not `ClassVar`, or mypy rejects the adapter.
 - The logging handler resolves `sys.stderr` when it writes, and `configure_logging` replaces only its own handler, so CliRunner and pytest capture keep working.
 - respx: to change a response between polls, set the route's `return_value` or `side_effect`. Don't register the same pattern again.
+- Searches are synced from config at the start of every cycle, so a `searches` row added by hand is deactivated. Integration tests use `env.add_search()`, which edits the config.
+- JobSpy frames under pandas 3 hold `nan` (a float) for missing text cells; `jobspy_boards._clean` turns them into None. LinkedIn's page delay is the class attribute `jobspy.linkedin.LinkedIn.delay`, set from config on first use.
+- The Simplify feed skips the in-memory ETag cache: its ETag lives in `source_state` and is saved in the same commit as that cycle's rows.
+- Two postings with the same company, title and city fingerprint-merge within 30 days, even inside one source. Fixtures need distinct titles.
+- Discovery's miss cache is in memory: each `poll --once` starts fresh, the worker keeps it.
 - time-machine 3 doesn't patch `monotonic`, so asyncio runs in real time. Anything that sleeps takes an injected `sleep`.
 
 ## Verified API facts (2026-10-23)
 
-Confirmed by `JOBPULSE_LIVE=1 uv run pytest -m live` (9 passed) and read-only probes.
+Confirmed by `JOBPULSE_LIVE=1 uv run pytest -m live` (11 passed) and read-only probes.
 - **Greenhouse:**
   - The list without `content=true` already carries `first_published` on every job, so the freshness gate runs on list data.
   - The per-job endpoint's `content` is entity-escaped HTML.
@@ -63,7 +68,8 @@ Confirmed by `JOBPULSE_LIVE=1 uv run pytest -m live` (9 passed) and read-only pr
   - `isRemote` is also true for Hybrid jobs, so `workplaceType` decides.
   - Unknown slug → 404 plain text. OpenAI's board is 14 MB.
 - **All three:** they send ETags, and the live test confirms they answer `If-None-Match` with 304. No rate-limit headers were seen.
-- **Simplify feed:** 13 MB, an ETag, and 304 on `If-None-Match` (adapter in M2).
+- **Simplify feed:** 13 MB (2 MB gzipped). httpx asks for gzip and gets a weak ETag, which answers `If-None-Match` with 304. 19,325 records, 3,075 open (`active && is_visible`); the 14 hidden ones are all inactive. 784 open listings are dated exactly midnight UTC.
+- **JobSpy 1.4.0:** failures and ignored options are in `frame.attrs["errors"/"warnings"]`, keyed by site; a board never raises, and a 429 reads `response status code 429 (blocked: use a proxy)`. LinkedIn rows never carry `job_url_direct`. `verbose=0` logs errors only, and with root logging configured JobSpy adds no handler of its own.
 
 ## When compacting
 

@@ -7,6 +7,7 @@ import pytest
 
 from jobpulse.config import (
     DEFAULT_DATABASE_URL,
+    SIMPLIFY_NEW_GRAD_URL,
     ConfigError,
     config_warnings,
     load_config,
@@ -234,6 +235,70 @@ def test_placeholders_produce_warnings_not_errors() -> None:
     warnings = config_warnings(load_config(EXAMPLE_CONFIG))
     assert any("filters.level.include" in w and "<SET ME>" in w for w in warnings)
     assert any("contact_email" in w for w in warnings)
+
+
+# --- Milestone 2 sections -------------------------------------------------------------
+
+
+def test_m2_sections_get_their_defaults(tmp_path: Path) -> None:
+    config = load_config(write_config(tmp_path))
+    assert config.simplify.enabled
+    assert config.simplify.name == "new-grad"
+    assert config.simplify.url == SIMPLIFY_NEW_GRAD_URL
+    assert config.discovery.enabled
+    assert config.discovery.max_validations_per_cycle == 10
+    assert config.discovery.max_page_fetches_per_cycle == 5
+    assert config.health.consecutive_failures == 3
+    assert config.health.busy_min == 5
+    assert config.health.busy_window_days == 7
+    assert config.health.zero_hours == 24
+    assert config.linkedin.cooldown_minutes == 30
+    assert config.schedules.job_boards.every_minutes == 75
+    assert config.schedules.job_boards.jitter_seconds == 900
+
+
+def test_example_config_has_m2_sections() -> None:
+    config = load_config(EXAMPLE_CONFIG)
+    assert config.simplify.url == SIMPLIFY_NEW_GRAD_URL
+    assert config.searches == []
+
+
+@pytest.mark.parametrize(
+    ("body", "field"),
+    [
+        ("simplify: {url: 'http://example.com/listings.json'}\n", "simplify.url"),
+        ("simplify: {name: 'has space'}\n", "simplify.name"),
+        ("discovery: {max_validations_per_cycle: -1}\n", "discovery.max_validations_per_cycle"),
+        ("health: {consecutive_failures: 0}\n", "health.consecutive_failures"),
+        ("health: {zero_hours: 0}\n", "health.zero_hours"),
+        ("linkedin: {cooldown_minutes: -5}\n", "linkedin.cooldown_minutes"),
+        (
+            "searches:\n  - {name: s, site: glassdoor, search_term: backend}\n",
+            "searches[0].site",
+        ),
+    ],
+)
+def test_m2_sections_name_bad_fields(tmp_path: Path, body: str, field: str) -> None:
+    path = write_config(tmp_path, body)
+    message = config_error(path)
+    assert field in message
+    assert str(path) in message
+
+
+def test_linkedin_is_remote_produces_a_warning(tmp_path: Path) -> None:
+    config = load_config(
+        write_config(
+            tmp_path,
+            """
+            searches:
+              - {name: remote-li, site: linkedin, search_term: backend engineer, is_remote: true}
+              - {name: remote-in, site: indeed, search_term: backend engineer, is_remote: true}
+            """,
+        )
+    )
+    [warning] = [w for w in config_warnings(config) if "is_remote" in w]
+    assert "searches[0]" in warning
+    assert "LinkedIn" in warning
 
 
 # --- secrets from .env --------------------------------------------------------------

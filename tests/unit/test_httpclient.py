@@ -204,3 +204,35 @@ async def test_per_host_concurrency_limit() -> None:
     ) as http:
         await asyncio.gather(*(http.request("GET", f"{URL}?n={i}") for i in range(8)))
     assert peak == 2
+
+
+PAGE = "https://careers.acme.example/jobs"
+
+
+async def test_get_limited_cuts_the_body_off_at_the_cap(respx_mock: respx.MockRouter) -> None:
+    route = respx_mock.get(PAGE).respond(
+        200, text="a" * 5000, headers={"Content-Type": "text/html"}
+    )
+    async with client(FakeSleep()) as http:
+        response = await http.get_limited(PAGE, max_bytes=1000)
+    assert response.status_code == 200
+    assert response.content == b"a" * 1000
+    assert response.headers["Content-Type"] == "text/html"
+    assert route.calls.last.request.headers["User-Agent"] == "jobpulse-test/0.1"
+
+
+async def test_get_limited_makes_one_attempt(respx_mock: respx.MockRouter) -> None:
+    sleep = FakeSleep()
+    route = respx_mock.get(PAGE).respond(503)
+    async with client(sleep) as http:
+        response = await http.get_limited(PAGE, max_bytes=1000)
+    assert response.status_code == 503
+    assert route.call_count == 1
+    assert sleep.calls == []
+
+
+async def test_get_limited_raises_transport_errors(respx_mock: respx.MockRouter) -> None:
+    respx_mock.get(PAGE).mock(side_effect=httpx.ConnectError("refused"))
+    async with client(FakeSleep()) as http:
+        with pytest.raises(httpx.ConnectError):
+            await http.get_limited(PAGE, max_bytes=1000)

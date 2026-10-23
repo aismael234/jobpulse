@@ -1,4 +1,6 @@
-# The next poll: Greenhouse has one new backend job; Lever and Ashby are unchanged.
+# The next poll: Greenhouse has one new backend job, Lever and Ashby are unchanged, the feed
+# answers 304, Delta (added by discovery) has its first poll, and LinkedIn shows a copy of an
+# Acme job next to one new LinkedIn-only job.
 routes:
   - url: https://boards-api.greenhouse.io/v1/boards/acme/jobs
     file: acme_jobs.json
@@ -8,3 +10,11 @@ routes:
     file: ../../lever/beta_postings.json
   - url: https://api.ashbyhq.com/posting-api/job-board/gamma?includeCompensation=true
     file: ../../ashby/gamma_job_board.json
+  - url: https://raw.githubusercontent.com/SimplifyJobs/New-Grad-Positions/dev/.github/scripts/listings.json
+    status: 304
+  - url: https://api.lever.co/v0/postings/delta?mode=json
+    file: ../../lever/delta_postings.json
+jobspy:
+  - site: linkedin
+    search_term: backend engineer
+    file: linkedin_backend_sf.json

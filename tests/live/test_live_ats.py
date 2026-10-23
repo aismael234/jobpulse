@@ -4,15 +4,10 @@ Skipped unless JOBPULSE_LIVE=1:  JOBPULSE_LIVE=1 uv run pytest -m live -v
 The User-Agent carries the contact_email from ./config.yaml when it exists.
 """
 
-import secrets
-from collections.abc import AsyncIterator
-from pathlib import Path
-
 import pytest
 
-from jobpulse.config import load_config
 from jobpulse.core.models import CompanyTarget
-from jobpulse.httpclient import REPLAY_HEADER, HttpClient, build_user_agent
+from jobpulse.httpclient import REPLAY_HEADER, HttpClient
 from jobpulse.sources.ashby import AshbyAdapter
 from jobpulse.sources.base import HttpAdapter
 from jobpulse.sources.greenhouse import GreenhouseAdapter
@@ -20,24 +15,11 @@ from jobpulse.sources.lever import LeverAdapter
 
 pytestmark = [pytest.mark.live, pytest.mark.enable_socket]
 
-CONFIG = Path(__file__).resolve().parents[2] / "config.yaml"
 ADAPTERS: dict[str, type[HttpAdapter]] = {
     "greenhouse": GreenhouseAdapter,
     "lever": LeverAdapter,
     "ashby": AshbyAdapter,
 }
-
-
-def contact_email() -> str:
-    if CONFIG.exists():
-        return load_config(CONFIG).contact_email
-    return f"jobpulse-dev-{secrets.token_hex(4)}@example.com"
-
-
-@pytest.fixture
-async def live_http() -> AsyncIterator[HttpClient]:
-    async with HttpClient(user_agent=build_user_agent(contact_email())) as client:
-        yield client
 
 
 def target(ats: str, token: str, region: str = "us") -> CompanyTarget:

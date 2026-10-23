@@ -40,6 +40,7 @@ class Company(Base):
     source_of_discovery: Mapped[str] = mapped_column(
         String(20), default="config", server_default="config"
     )
+    discovered_from: Mapped[str | None] = mapped_column(Text)  # the URL that led to an auto add
     baseline_done_at: Mapped[datetime | None]
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)
@@ -129,5 +130,39 @@ class Run(Base):
     new_count: Mapped[int] = mapped_column(default=0, server_default="0")
     error: Mapped[str | None] = mapped_column(Text)
     error_kind: Mapped[str | None] = mapped_column(String(32))
+    not_modified: Mapped[bool] = mapped_column(default=False, server_default=false())  # a 304
     warnings: Mapped[list[str] | None] = mapped_column(JSONType)
     stats: Mapped[dict[str, Any] | None] = mapped_column(JSONType)
+
+
+class SourceState(Base):
+    """What a feed needs between polls: the ETag to send next and its silent baseline."""
+
+    __tablename__ = "source_state"
+    __table_args__ = (UniqueConstraint("source", "target"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    source: Mapped[str] = mapped_column(String(20))
+    target: Mapped[str] = mapped_column(String(255))
+    url: Mapped[str] = mapped_column(Text)
+    etag: Mapped[str | None] = mapped_column(Text)
+    baseline_done_at: Mapped[datetime | None]
+    updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)
+
+
+class HealthIncident(Base):
+    """One health problem of one target: opened, alerted once, resolved, recovery sent once."""
+
+    __tablename__ = "health_incidents"
+    __table_args__ = (Index("ix_health_incidents_source_target_kind", "source", "target", "kind"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    source: Mapped[str] = mapped_column(String(20))
+    target: Mapped[str] = mapped_column(String(255))
+    kind: Mapped[str] = mapped_column(String(16))  # failing | silent
+    opened_at: Mapped[datetime]  # when the problem began, not when it was noticed
+    title: Mapped[str] = mapped_column(Text)
+    detail: Mapped[str] = mapped_column(Text)
+    alerted_at: Mapped[datetime | None]
+    resolved_at: Mapped[datetime | None]
+    recovery_sent_at: Mapped[datetime | None]

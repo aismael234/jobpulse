@@ -1,4 +1,4 @@
-# Recorded responses for `jobpulse poll --fixtures`: the first poll of every board.
+# Recorded responses for `jobpulse poll --fixtures`: the first poll of every source.
 routes:
   - url: https://boards-api.greenhouse.io/v1/boards/acme/jobs
     file: ../../greenhouse/acme_jobs.json
@@ -6,3 +6,13 @@ routes:
     file: ../../lever/beta_postings.json
   - url: https://api.ashbyhq.com/posting-api/job-board/gamma?includeCompensation=true
     file: ../../ashby/gamma_job_board.json
+  - url: https://raw.githubusercontent.com/SimplifyJobs/New-Grad-Positions/dev/.github/scripts/listings.json
+    file: ../../simplify/listings.json
+    headers: {ETag: 'W/"c3956a3dc66b07cf"'}
+  # Discovery validates Delta's board, found in the Simplify feed.
+  - url: https://api.lever.co/v0/postings/delta?mode=json
+    file: ../../lever/delta_postings.json
+jobspy:
+  - site: linkedin
+    search_term: backend engineer
+    file: ../../jobspy/linkedin_backend_sf.json

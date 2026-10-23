@@ -14,8 +14,11 @@ ErrorKind = Literal[
 Tier = Literal["pending", "baseline", "merged", "filtered", "stale", "digest", "instant"]
 Region = Literal["us", "eu"]
 
+FeedName = Literal["simplify"]
+
 ATS_SOURCES: frozenset[str] = frozenset({"greenhouse", "lever", "ashby", "workday"})
 JOB_BOARD_SOURCES: frozenset[str] = frozenset({"indeed", "linkedin"})
+FEED_SOURCES: frozenset[str] = frozenset({"simplify"})
 # New postings from these sources go through cross-source dedupe (detection rule 5).
 DEDUPE_SOURCES: frozenset[str] = frozenset({"indeed", "linkedin", "simplify"})
 
@@ -94,12 +97,38 @@ class SearchTarget:
         return self.name
 
 
-Target = CompanyTarget | SearchTarget
+@dataclass(frozen=True, slots=True, kw_only=True)
+class FeedTarget:
+    """A public feed such as the SimplifyJobs list. It carries closed listings too, so its
+    closures come from the feed's own flags, never from absence. ``etag`` is the validator
+    saved after the last successful fetch."""
+
+    feed: FeedName
+    name: str
+    url: str
+    etag: str | None = None
+    baseline_done: bool = False
+
+    @property
+    def source(self) -> str:
+        return self.feed
+
+    @property
+    def key(self) -> str:
+        return self.name
+
+
+Target = CompanyTarget | SearchTarget | FeedTarget
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class FetchResult:
-    """What one fetch of one target produced. A failure never carries postings."""
+    """What one fetch of one target produced. A failure never carries postings.
+
+    ``closed_external_ids`` are listings the source itself reports closed (Simplify's
+    ``active: false``). ``etag`` is saved together with the result. A ``skipped`` result was
+    never attempted (a rate-limit back-off), so no run is recorded for it.
+    """
 
     ok: bool
     fetched_at: datetime
@@ -109,12 +138,23 @@ class FetchResult:
     error_kind: ErrorKind | None = None
     warnings: tuple[str, ...] = ()
     not_modified: bool = False
+    closed_external_ids: tuple[str, ...] = ()
+    etag: str | None = None
+    skipped: bool = False
 
     def __post_init__(self) -> None:
-        if self.ok and self.error_kind is not None:
-            raise ValueError("a successful FetchResult has no error_kind")
-        if not self.ok and (self.error_kind is None or self.postings or self.complete_listing):
+        if self.ok and (self.error_kind is not None or self.skipped):
+            raise ValueError("a successful FetchResult has no error_kind and isn't skipped")
+        if not self.ok and (
+            self.error_kind is None
+            or self.postings
+            or self.complete_listing
+            or self.closed_external_ids
+            or self.not_modified
+        ):
             raise ValueError("a failed FetchResult needs an error_kind and carries no postings")
+        if self.not_modified and self.postings:
+            raise ValueError("a not-modified FetchResult carries no postings")
 
     @classmethod
     def success(
@@ -124,6 +164,8 @@ class FetchResult:
         fetched_at: datetime,
         complete_listing: bool,
         warnings: tuple[str, ...] | list[str] = (),
+        closed_external_ids: tuple[str, ...] | list[str] = (),
+        etag: str | None = None,
     ) -> "FetchResult":
         return cls(
             ok=True,
@@ -131,11 +173,22 @@ class FetchResult:
             postings=tuple(postings),
             complete_listing=complete_listing,
             warnings=tuple(warnings),
+            closed_external_ids=tuple(closed_external_ids),
+            etag=etag,
         )
+
+    @classmethod
+    def unchanged(cls, *, fetched_at: datetime, etag: str | None) -> "FetchResult":
+        """A 304: the source has nothing new since ``etag``. A success, not an empty list."""
+        return cls(ok=True, fetched_at=fetched_at, not_modified=True, etag=etag)
 
     @classmethod
     def failure(cls, kind: ErrorKind, error: str, *, fetched_at: datetime) -> "FetchResult":
         return cls(ok=False, fetched_at=fetched_at, error=error, error_kind=kind)
+
+    @classmethod
+    def skip(cls, kind: ErrorKind, reason: str, *, fetched_at: datetime) -> "FetchResult":
+        return cls(ok=False, fetched_at=fetched_at, error=reason, error_kind=kind, skipped=True)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

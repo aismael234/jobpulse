@@ -32,6 +32,10 @@ from jobpulse.core.scoring import Weights
 DEFAULT_CONFIG_PATH = Path("config.yaml")
 DEFAULT_ENV_FILE = Path(".env")
 DEFAULT_DATABASE_URL = "sqlite:///data/jobpulse.db"
+SIMPLIFY_NEW_GRAD_URL = (
+    "https://raw.githubusercontent.com/SimplifyJobs/New-Grad-Positions/dev/.github/scripts/"
+    "listings.json"
+)
 PLACEHOLDER = "<SET ME>"
 EXAMPLE_CONTACT_EMAIL = "you@example.com"
 
@@ -278,12 +282,40 @@ class SearchEntry(_Model):
 class LinkedInPacing(_Model):
     delay_min_seconds: float = Field(default=4.0, ge=0)
     delay_max_seconds: float = Field(default=8.0, ge=0)
+    cooldown_minutes: float = Field(default=30.0, ge=0)
 
     @model_validator(mode="after")
     def _ordered(self) -> Self:
         if self.delay_min_seconds > self.delay_max_seconds:
             raise ValueError("delay_min_seconds must not exceed delay_max_seconds")
         return self
+
+
+class SimplifyConfig(_Model):
+    enabled: bool = True
+    name: Slug = "new-grad"
+    url: str = SIMPLIFY_NEW_GRAD_URL
+
+    @field_validator("url")
+    @classmethod
+    def _https(cls, value: str) -> str:
+        if not value.startswith("https://"):
+            raise ValueError("must be an https:// URL")
+        return value
+
+
+class DiscoveryConfig(_Model):
+    enabled: bool = True
+    max_validations_per_cycle: int = Field(default=10, ge=0, le=100)
+    max_page_fetches_per_cycle: int = Field(default=5, ge=0, le=50)
+
+
+class HealthConfig(_Model):
+    enabled: bool = True
+    consecutive_failures: int = Field(default=3, ge=1)
+    busy_min: int = Field(default=5, ge=1)
+    busy_window_days: float = Field(default=7, gt=0)
+    zero_hours: float = Field(default=24, gt=0)
 
 
 class DashboardConfig(_Model):
@@ -304,6 +336,9 @@ class AppConfig(_Model):
     watchlist: list[WatchlistEntry] = []
     searches: list[SearchEntry] = []
     linkedin: LinkedInPacing = LinkedInPacing()
+    simplify: SimplifyConfig = SimplifyConfig()
+    discovery: DiscoveryConfig = DiscoveryConfig()
+    health: HealthConfig = HealthConfig()
     dashboard: DashboardConfig = DashboardConfig()
 
     @field_validator("contact_email")
@@ -497,6 +532,12 @@ def config_warnings(config: AppConfig) -> list[str]:
             warnings.append(
                 f"watchlist[{index}] ({entry.name}) uses ats 'workday', which this build can't "
                 "poll yet (Milestone 4)"
+            )
+    for index, search in enumerate(config.searches):
+        if search.site == "linkedin" and search.is_remote:
+            warnings.append(
+                f"searches[{index}] ({search.name}) sets is_remote, which LinkedIn ignores; "
+                "put 'Remote' in its location or search_term instead"
             )
     return warnings
 

@@ -4,7 +4,7 @@ A personal job-posting watcher for one person on one always-on machine. It polls
 
 It detects and notifies only. It never applies, fills forms, logs in anywhere or works around rate limits.
 
-> Work in progress. See [PROGRESS.md](PROGRESS.md) for what is built so far. Full setup docs arrive with Milestone 3.
+> Work in progress. Built so far: the Greenhouse, Lever and Ashby watchlist, the SimplifyJobs feed, Indeed and LinkedIn searches through JobSpy, cross-source dedupe, automatic watchlist discovery and source-health alerts. The dashboard, digests, Docker and full setup docs arrive with Milestone 3. See [PROGRESS.md](PROGRESS.md).
 
 ## Quick start (development)
 
@@ -16,4 +16,6 @@ uv run jobpulse poll --once --dry-run     # fetch and evaluate everything, save 
 scripts/check.sh                          # lint, types, tests
 ```
 
-The first real poll of each board stores what's there silently. After that, `uv run jobpulse worker` polls on a schedule and pushes fresh matches through ntfy. Put `NTFY_TOPIC` in `.env` first; see `.env.example`.
+The first real poll of each board, search and feed stores what's there silently. After that, `uv run jobpulse worker` polls each on its own schedule and pushes fresh matches through ntfy. Put `NTFY_TOPIC` in `.env` first; see `.env.example`.
+
+Indeed and LinkedIn searches go in `searches:` in `config.yaml` (examples in `config.example.yaml`). Boards linked from the feed and from job-board postings are added to the watchlist automatically (`discovery:`); `uv run jobpulse companies list` shows where each company came from.

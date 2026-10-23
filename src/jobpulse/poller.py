@@ -1,4 +1,5 @@
-"""One poll cycle: fetch, diff, dedupe, prescreen, enrich, decide, notify.
+"""One poll cycle: fetch, diff, dedupe, prescreen, enrich, decide, notify, check health,
+discover new boards.
 
 The network phases run concurrently; every database phase is a synchronous block with no
 ``await`` inside. Live runs commit between phases, so no transaction is held across network
@@ -23,12 +24,15 @@ from jobpulse.config import (
 )
 from jobpulse.core.dedupe import posting_fingerprint
 from jobpulse.core.detection import EvaluationContext, evaluate, plan_presence, prescreen
+from jobpulse.core.filters import check_title
 from jobpulse.core.models import (
     ATS_SOURCES,
     DEDUPE_SOURCES,
+    FEED_SOURCES,
     JOB_BOARD_SOURCES,
     CompanyTarget,
     Decision,
+    FeedTarget,
     FetchResult,
     Posting,
     Precision,
@@ -38,11 +42,15 @@ from jobpulse.core.scoring import priority_component
 from jobpulse.core.timeparse import utcnow
 from jobpulse.db import repo
 from jobpulse.db.tables import PostingRow
+from jobpulse.discovery import Discoverer, Sighting
+from jobpulse.health import HealthMonitor, HealthRules
 from jobpulse.notify.base import Notifier, NotifierError
 from jobpulse.notify.format import PushContent, instant_notification, overflow_notification
 from jobpulse.sources.base import SourceAdapter
 
 log = logging.getLogger(__name__)
+
+Inserted = tuple[int, Posting, str]  # (row id, posting, fingerprint)
 
 
 @dataclass
@@ -57,6 +65,7 @@ class TargetReport:
     is_baseline: bool = False
     baseline_stored: int = 0
     merged: int = 0
+    adopted: int = 0
     closed: int = 0
     reopened: int = 0
     filtered: int = 0
@@ -65,11 +74,15 @@ class TargetReport:
     digest: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     run_id: int | None = None
+    not_modified: bool = False
+    skipped: bool = False
+    merges: list[str] = field(default_factory=list)
 
     def stats(self) -> dict[str, int]:
         return {
             "baseline_stored": self.baseline_stored,
             "merged": self.merged,
+            "adopted": self.adopted,
             "closed": self.closed,
             "reopened": self.reopened,
             "filtered": self.filtered,
@@ -86,6 +99,9 @@ class CycleReport:
     pushes: list[str] = field(default_factory=list)  # title lines sent (or, in a dry run, due)
     failed_pushes: int = 0
     held_back: int = 0
+    discovered: list[str] = field(default_factory=list)  # boards added (or that would be)
+    discovery_deferred: int = 0
+    health: list[str] = field(default_factory=list)  # health messages sent (or due)
 
 
 @dataclass
@@ -118,6 +134,10 @@ class _UnitOfWork:
             self.session.close()
 
 
+def _label(posting: Posting) -> str:
+    return f"{posting.company_name} · {posting.title}" if posting.company_name else posting.title
+
+
 class Poller:
     def __init__(
         self,
@@ -127,12 +147,17 @@ class Poller:
         adapters: Mapping[str, SourceAdapter],
         notifier: Notifier | None = None,
         clock: Callable[[], datetime] = utcnow,
+        discoverer: Discoverer | None = None,
     ) -> None:
         self._config = config
         self._sessions = sessions
         self._adapters = dict(adapters)
         self._notifier = notifier
         self._clock = clock
+        self._discoverer = discoverer
+        self._health = (
+            HealthMonitor(HealthRules.from_config(config.health)) if config.health.enabled else None
+        )
         self._rules = filter_rules(config)
         self._weights = scoring_weights(config)
         self._short_labels = short_labels(config)
@@ -150,17 +175,21 @@ class Poller:
         unit = _UnitOfWork(self._sessions(), dry_run=dry_run)
         session = unit.session
         try:
-            repo.sync_watchlist(session, self._config.watchlist, now=self._clock())
+            now = self._clock()
+            repo.sync_watchlist(session, self._config.watchlist, now=now)
+            repo.sync_searches(session, self._config.searches, now=now)
             targets = self._targets(session, sources, target_key)
             unit.checkpoint()
 
             started_at = self._clock()
             results = await asyncio.gather(*(self._fetch(target) for target in targets))
             survivors: list[_Survivor] = []
+            sightings: list[Sighting] = []
             for target, result in zip(targets, results, strict=True):
                 target_report, target_survivors = self._ingest(session, target, result, started_at)
                 report.targets.append(target_report)
                 survivors.extend(target_survivors)
+                sightings.extend(self._sightings(result))
                 unit.checkpoint()
 
             enriched = await asyncio.gather(*(self._enrich(survivor) for survivor in survivors))
@@ -179,6 +208,8 @@ class Poller:
             unit.checkpoint()
 
             await self._notify(unit, report)
+            await self._check_health(unit, report)
+            await self._discover(unit, report, sightings)
             return report
         finally:
             unit.close()
@@ -188,11 +219,15 @@ class Poller:
     def _targets(
         self, session: Session, sources: Collection[str] | None, target_key: str | None
     ) -> list[Target]:
+        """Companies first, then feeds, then searches, so that within one cycle the ATS row
+        of a job exists before any copy of it is deduplicated."""
         wanted = None if sources is None else set(sources)
         targets: list[Target] = []
         if wanted is None or wanted & ATS_SOURCES:
             ats = None if wanted is None else wanted & ATS_SOURCES
             targets.extend(repo.company_targets(session, ats=ats, token=target_key))
+        if (wanted is None or wanted & FEED_SOURCES) and self._config.simplify.enabled:
+            targets.extend(repo.feed_targets(session, self._config.simplify, name=target_key))
         if wanted is None or wanted & JOB_BOARD_SOURCES:
             sites = None if wanted is None else wanted & JOB_BOARD_SOURCES
             targets.extend(repo.search_targets(session, sites=sites, name=target_key))
@@ -215,8 +250,16 @@ class Poller:
         self, session: Session, target: Target, result: FetchResult, started_at: datetime
     ) -> tuple[TargetReport, list[_Survivor]]:
         """Phase A for one target: record the run, apply presence and closures, insert new
-        postings, store a baseline silently, dedupe, and prescreen."""
+        postings, link ATS rows to earlier copies, store a baseline silently, dedupe, and
+        prescreen."""
         report = TargetReport(source=target.source, key=target.key)
+        if result.skipped:  # never attempted, so there is no run to record
+            report.ok = False
+            report.skipped = True
+            report.error_kind = result.error_kind
+            report.error = result.error
+            log.info("%s/%s skipped: %s", target.source, target.key, result.error)
+            return report, []
         report.run_id = repo.start_run(
             session, source=target.source, target=target.key, started_at=started_at, result=result
         )
@@ -230,11 +273,66 @@ class Poller:
             return report, []
         report.fetched = len(result.postings)
         report.warnings = list(result.warnings)
-        if result.not_modified:
-            return report, []
+        report.not_modified = result.not_modified
 
         now = result.fetched_at
         company_id = target.company_id if isinstance(target, CompanyTarget) else None
+        if isinstance(target, FeedTarget) and result.etag != target.etag:
+            # Saved with this cycle's rows, so a crash can't skip a version of the feed.
+            repo.save_feed_etag(session, target, etag=result.etag, now=now)
+        if result.not_modified:
+            # Nothing changed at the source; only rows an interrupted cycle left are open.
+            if not target.baseline_done:
+                return report, []
+            pending = self._pending(session, target, company_id, report, now=now, exclude=())
+            return report, self._prescreen(session, pending)
+
+        inserted = self._store(session, target, result, company_id, report, now=now)
+        baseline = not target.baseline_done
+        if isinstance(target, CompanyTarget) and inserted:
+            adoptions = repo.adopt_copies(
+                session,
+                inserted=inserted,
+                since=now - self._fingerprint_window,
+                now=now,
+                baseline=baseline,
+            )
+            report.adopted = len(adoptions)
+            for adoption in adoptions:
+                log.info(
+                    "%s/%s: posting %d took over %s posting %d (%s)",
+                    target.source, target.key, adoption.primary_id, adoption.copy_source,
+                    adoption.copy_id, adoption.how,
+                )  # fmt: skip
+        if baseline:
+            repo.mark_baseline_done(session, target, now=now)
+            report.is_baseline = True
+            report.baseline_stored = len(inserted)
+            return report, []
+        report.new = len(inserted)
+
+        candidates = self._dedupe(session, target, inserted, report, now=now)
+        candidates += self._pending(
+            session,
+            target,
+            company_id,
+            report,
+            now=now,
+            exclude=[candidate.row_id for candidate in candidates],
+        )
+        return report, self._prescreen(session, candidates)
+
+    def _store(
+        self,
+        session: Session,
+        target: Target,
+        result: FetchResult,
+        company_id: int | None,
+        report: TargetReport,
+        *,
+        now: datetime,
+    ) -> list[Inserted]:
+        """Presence and closures, then insert every posting not stored yet."""
         if isinstance(target, CompanyTarget):
             existing = repo.presence_for_company(
                 session, source=target.source, company_id=target.company_id
@@ -249,11 +347,18 @@ class Poller:
             result, existing, close_after=self._config.detection.closure_missing_polls
         )
         repo.apply_presence(session, plan, now=now)
-        report.closed = len(plan.closed_ids)
+        reported = (
+            repo.close_reported(
+                session, source=target.source, external_ids=result.closed_external_ids, now=now
+            )
+            if result.closed_external_ids
+            else 0
+        )
+        report.closed = len(plan.closed_ids) + reported
         report.reopened = len(plan.reopened_ids)
 
         baseline = not target.baseline_done
-        inserted: list[tuple[int, Posting, str]] = []
+        inserted: list[Inserted] = []
         for posting in result.postings:
             if posting.external_id in existing:
                 continue
@@ -269,13 +374,18 @@ class Poller:
             )
             if row_id is not None:
                 inserted.append((row_id, posting, fingerprint))
-        if baseline:
-            repo.mark_baseline_done(session, target, now=now)
-            report.is_baseline = True
-            report.baseline_stored = len(inserted)
-            return report, []
-        report.new = len(inserted)
+        return inserted
 
+    def _dedupe(
+        self,
+        session: Session,
+        target: Target,
+        inserted: list[Inserted],
+        report: TargetReport,
+        *,
+        now: datetime,
+    ) -> list[_Survivor]:
+        """Rule 5: a new feed or job-board posting that copies a stored one is merged."""
         candidates: list[_Survivor] = []
         hosts: dict[str, str] | None = None
         for row_id, posting, fingerprint in inserted:
@@ -301,20 +411,44 @@ class Poller:
                         now=now,
                     )
                     report.merged += 1
+                    report.merges.append(
+                        f"{_label(posting)} ({posting.source} {posting.external_id}) "
+                        f"into {primary.source} {primary.external_id} by {how}"
+                    )
                     continue
             candidates.append(_Survivor(row_id, posting, now, target, report))
+        return candidates
 
+    def _pending(
+        self,
+        session: Session,
+        target: Target,
+        company_id: int | None,
+        report: TargetReport,
+        *,
+        now: datetime,
+        exclude: Collection[int],
+    ) -> list[_Survivor]:
+        """Rows an interrupted cycle inserted but never decided."""
         token = target.token if isinstance(target, CompanyTarget) else None
-        for row in repo.pending_rows(
-            session,
-            source=target.source,
-            company_id=company_id,
-            since=now - self._freshness,
-            exclude_ids=[candidate.row_id for candidate in candidates],
-        ):
-            posting = repo.row_to_posting(row, company_token=token)
-            candidates.append(_Survivor(row.id, posting, row.first_seen_at, target, report))
+        return [
+            _Survivor(
+                row.id,
+                repo.row_to_posting(row, company_token=token),
+                row.first_seen_at,
+                target,
+                report,
+            )
+            for row in repo.pending_rows(
+                session,
+                source=target.source,
+                company_id=company_id,
+                since=now - self._freshness,
+                exclude_ids=exclude,
+            )
+        ]
 
+    def _prescreen(self, session: Session, candidates: list[_Survivor]) -> list[_Survivor]:
         survivors: list[_Survivor] = []
         for candidate in candidates:
             decision = prescreen(candidate.posting, self._context(candidate))
@@ -323,7 +457,27 @@ class Poller:
             else:
                 repo.set_decision(session, candidate.row_id, decision)
                 self._tally(candidate, candidate.posting, decision)
-        return report, survivors
+        return survivors
+
+    def _sightings(self, result: FetchResult) -> list[Sighting]:
+        """Every URL on a feed or job-board posting, for watchlist discovery."""
+        if self._discoverer is None or not result.ok:
+            return []
+        sightings: list[Sighting] = []
+        for posting in result.postings:
+            if posting.source not in DEDUPE_SOURCES:
+                continue
+            relevant = check_title(posting.title, self._rules).passed
+            for url in dict.fromkeys(url for url in (posting.url, posting.apply_url) if url):
+                sightings.append(
+                    Sighting(
+                        url=url,
+                        company_name=posting.company_name,
+                        source=posting.source,
+                        relevant=relevant,
+                    )
+                )
+        return sightings
 
     async def _enrich(self, survivor: _Survivor) -> Posting:
         adapter = self._adapters.get(survivor.posting.source)
@@ -391,6 +545,73 @@ class Poller:
                 )
             except NotifierError as exc:
                 log.warning("overflow summary push failed: %s", exc)
+
+    async def _check_health(self, unit: _UnitOfWork, report: CycleReport) -> None:
+        """Open and resolve incidents for the targets that just ran, then send what's due:
+        one alert per incident and one recovery message. A failed send is retried next
+        cycle."""
+        if self._health is None:
+            return
+        keys = {(target.source, target.key) for target in report.targets if target.run_id}
+        due = self._health.review(unit.session, keys, now=self._clock())
+        unit.checkpoint()
+        for message in due:
+            title = message.notification.title
+            if report.dry_run:
+                report.health.append(title)
+                continue
+            if self._notifier is None:
+                continue
+            try:
+                await self._notifier.send(message.notification)
+            except NotifierError as exc:
+                log.warning("health message %r failed (retrying next cycle): %s", title, exc)
+                continue
+            self._health.mark_sent(unit.session, message, now=self._clock())
+            unit.checkpoint()
+            report.health.append(title)
+
+    async def _discover(
+        self, unit: _UnitOfWork, report: CycleReport, sightings: list[Sighting]
+    ) -> None:
+        """Validate boards found in this cycle's feed and job-board URLs and add the good
+        ones to the watchlist (``auto``, priority 0, baseline pending)."""
+        if self._discoverer is None or not sightings:
+            return
+        session = unit.session
+        known = repo.known_companies(session)
+        hosts = repo.greenhouse_hosts(session)
+        unit.checkpoint()  # nothing stays open while pages and validations run
+        outcome = await self._discoverer.run(sightings, known=known, greenhouse_hosts=hosts.keys())
+        report.discovery_deferred = outcome.deferred
+        now = self._clock()
+        for found in outcome.valid:
+            ref = found.validation.ref
+            name = found.candidate.company_name or found.validation.name or ref.token
+            if repo.add_discovered_company(
+                session,
+                ats=ref.ats,
+                token=ref.token,
+                region=ref.region,
+                name=name,
+                discovered_from=found.candidate.url,
+                now=now,
+            ):
+                report.discovered.append(
+                    f"{ref.ats}/{ref.token} ({name}, {found.validation.job_count} jobs) "
+                    f"from {found.candidate.url}"
+                )
+                log.info(
+                    "discovery: %s %s/%s from %s",
+                    "would add" if report.dry_run else "added",
+                    ref.ats, ref.token, found.candidate.url,
+                )  # fmt: skip
+        for found in outcome.invalid:
+            log.info(
+                "discovery: %s/%s not added: %s",
+                found.candidate.ref.ats, found.candidate.ref.token, found.validation.error,
+            )  # fmt: skip
+        unit.checkpoint()
 
     # --- helpers ------------------------------------------------------------------------
 

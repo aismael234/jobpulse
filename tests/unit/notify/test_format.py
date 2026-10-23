@@ -46,6 +46,13 @@ def test_title_line_without_locations() -> None:
     )
 
 
+def test_title_line_without_a_company() -> None:
+    assert (
+        title_line(content(company="", locations=()), now=NOW)
+        == "Backend Engineer · posted 25 min ago"
+    )
+
+
 @pytest.mark.parametrize(
     ("age", "label"),
     [

@@ -67,7 +67,7 @@ def when_label(
 def title_line(
     content: PushContent, *, now: datetime, short_labels: Mapping[str, str] = DEFAULT_SHORT_LABELS
 ) -> str:
-    parts = [content.company, content.title]
+    parts = [content.company, content.title] if content.company else [content.title]
     where = location_summary(content.locations, short_labels=short_labels)
     if where:
         parts.append(where)
@@ -96,7 +96,7 @@ def instant_notification(
     short_labels: Mapping[str, str] = DEFAULT_SHORT_LABELS,
 ) -> Notification:
     where = "; ".join(content.locations) or "location not given"
-    lines = [content.title, f"{content.company}{SEPARATOR}{where}"]
+    lines = [content.title, f"{content.company}{SEPARATOR}{where}" if content.company else where]
     if content.score is not None:
         detail = _breakdown_text(content.breakdown)
         lines.append(

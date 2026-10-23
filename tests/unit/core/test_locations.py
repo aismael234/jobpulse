@@ -90,6 +90,23 @@ def test_unknown_location_is_kept_as_written() -> None:
     assert normalize_locations(["Zürich, Switzerland"]) == (("Zürich, Switzerland",), False)
 
 
+@pytest.mark.parametrize(
+    ("raw", "label"),
+    [
+        ("San Francisco, CA, USA", "San Francisco, CA"),  # JobSpy's display form
+        ("Arlington, VA, USA", "Arlington, VA"),
+        ("Austin, TX, US", "Austin, TX"),
+        ("San Francisco, California, United States", "San Francisco, CA"),
+        ("New York, New York, United States", "New York, NY"),
+        ("London, UK", "London, UK"),
+        ("Toronto, ON, Canada", "Toronto, ON, Canada"),
+        ("USA", "USA"),
+    ],
+)
+def test_a_trailing_us_country_is_dropped_from_city_state(raw: str, label: str) -> None:
+    assert normalize_locations([raw]) == ((label,), False)
+
+
 def test_no_location() -> None:
     assert normalize_locations([]) == ((), None)
     assert normalize_locations([None, "  "]) == ((), None)

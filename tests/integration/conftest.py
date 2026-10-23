@@ -3,9 +3,11 @@ records what it was asked to send, and a job-board adapter whose results each te
 
 import copy
 import html
+import random
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 import httpx
@@ -15,18 +17,29 @@ import time_machine
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session, sessionmaker
 
-from jobpulse.config import AppConfig
+from jobpulse.config import SIMPLIFY_NEW_GRAD_URL, AppConfig, SearchEntry
 from jobpulse.core.dedupe import canonicalize_url
 from jobpulse.core.locations import normalize_locations
 from jobpulse.core.models import FetchResult, Posting, Target
 from jobpulse.core.timeparse import utcnow
 from jobpulse.db.session import create_engine_for, make_session_factory
-from jobpulse.db.tables import Base, Company, PostingRow, Run, Search
+from jobpulse.db.tables import (
+    Base,
+    Company,
+    HealthIncident,
+    PostingRow,
+    Run,
+    Search,
+    SourceState,
+)
+from jobpulse.discovery import Discoverer
 from jobpulse.httpclient import HttpClient
 from jobpulse.notify.base import Notification, NotifierError
 from jobpulse.poller import CycleReport, Poller
 from jobpulse.runtime import build_adapters
-from tests.factories import NOW
+from jobpulse.sources.ats_detect import AtsDetector
+from jobpulse.sources.jobspy_boards import JobSpyAdapter
+from tests.factories import NOW, FakeMonotonic, FakeSleep
 
 GH_LIST = "https://boards-api.greenhouse.io/v1/boards/acme/jobs"
 GH_DETAIL = re.compile(
@@ -98,19 +111,55 @@ def gh_job(
 
 
 def lever_posting(
-    posting_id: str, title: str = "Backend Engineer", *, created: datetime
+    posting_id: str,
+    title: str = "Backend Engineer",
+    *,
+    created: datetime,
+    token: str = "beta",
+    location: str = "San Francisco, CA",
 ) -> dict[str, Any]:
     return {
         "id": posting_id,
         "text": title,
-        "categories": {"location": "San Francisco, CA", "allLocations": ["San Francisco, CA"]},
+        "categories": {"location": location, "allLocations": [location]},
         "createdAt": int(created.timestamp() * 1000),
         "descriptionPlain": DEFAULT_DESCRIPTION,
         "lists": [],
         "additionalPlain": "",
         "workplaceType": "hybrid",
-        "hostedUrl": f"https://jobs.lever.co/beta/{posting_id}",
-        "applyUrl": f"https://jobs.lever.co/beta/{posting_id}/apply",
+        "hostedUrl": f"https://jobs.lever.co/{token}/{posting_id}",
+        "applyUrl": f"https://jobs.lever.co/{token}/{posting_id}/apply",
+    }
+
+
+def simplify_listing(
+    listing_id: str,
+    title: str = "Backend Engineer, New Grad",
+    *,
+    company: str = "Delta",
+    url: str | None = None,
+    posted: datetime,
+    active: bool = True,
+    visible: bool = True,
+    locations: Sequence[str] = ("San Francisco, CA",),
+    category: str = "Software",
+) -> dict[str, Any]:
+    """One record of the SimplifyJobs listings.json feed."""
+    return {
+        "source": "Simplify",
+        "category": category,
+        "company_name": company,
+        "id": listing_id,
+        "title": title,
+        "active": active,
+        "date_updated": int(posted.timestamp()),
+        "date_posted": int(posted.timestamp()),
+        "url": url or f"https://jobs.example.com/{company.lower()}/{listing_id}",
+        "locations": list(locations),
+        "company_url": f"https://simplify.jobs/c/{company}",
+        "is_visible": visible,
+        "sponsorship": "Other",
+        "degrees": ["Bachelor's"],
     }
 
 
@@ -196,12 +245,62 @@ class GreenhouseMock:
 
 
 @dataclass
+class SimplifyMock:
+    """The SimplifyJobs feed: set the listings (and ETag) per poll, or a 304, or a failure."""
+
+    route: respx.Route
+
+    def respond(self, *listings: dict[str, Any], etag: str | None = None) -> None:
+        self.route.side_effect = None
+        self.route.return_value = httpx.Response(
+            200, json=list(listings), headers={"ETag": etag} if etag else {}
+        )
+
+    def not_modified(self) -> None:
+        self.route.side_effect = None
+        self.route.return_value = httpx.Response(304)
+
+    def fail_with(self, outcome: httpx.Response | Exception) -> None:
+        if isinstance(outcome, Exception):
+            self.route.side_effect = outcome
+        else:
+            self.route.side_effect = None
+            self.route.return_value = outcome
+
+    def sent_etag(self, call: int = -1) -> str | None:
+        return self.route.calls[call].request.headers.get("If-None-Match")
+
+
+class ScriptedScrape:
+    """``scrape_jobs`` stand-in for the real JobSpy adapter: each site answers from its own
+    queue of frames (or exceptions), and every call's arguments are kept."""
+
+    def __init__(self) -> None:
+        self.frames: dict[str, list[Any]] = {"linkedin": [], "indeed": []}
+        self.calls: list[dict[str, Any]] = []
+
+    def queue(self, site: str, *outcomes: Any) -> None:
+        self.frames[site].extend(outcomes)
+
+    def __call__(self, **arguments: Any) -> Any:
+        self.calls.append(arguments)
+        outcome = self.frames[arguments["site_name"][0]].pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    def sites(self) -> list[str]:
+        return [call["site_name"][0] for call in self.calls]
+
+
+@dataclass
 class Env:
     sessions: sessionmaker[Session]
     http: HttpClient
     config: AppConfig
     notifier: Any
     adapters: dict[str, Any]
+    discoverer: Discoverer | None = None
 
     def poller(self) -> Poller:
         return Poller(
@@ -209,6 +308,7 @@ class Env:
             sessions=self.sessions,
             adapters=self.adapters,
             notifier=self.notifier,
+            discoverer=self.discoverer,
         )
 
     async def poll(self, **kwargs: Any) -> CycleReport:
@@ -240,9 +340,46 @@ class Env:
         with self.sessions() as session:
             return list(session.scalars(select(Run).order_by(Run.id)))
 
-    def add_search(self, name: str = "backend-sf", site: str = "linkedin") -> None:
+    def add_search(self, name: str = "backend-sf", site: str = "linkedin", **fields: Any) -> None:
+        """Configure a search; the next poll syncs it into the database."""
+        entry = SearchEntry.model_validate(
+            {"name": name, "site": site, "search_term": "backend engineer", **fields}
+        )
+        self.reconfigure(searches=[*self.config.searches, entry])
+
+    def reconfigure(self, **sections: Any) -> None:
+        self.config = self.config.model_copy(update=sections)
+
+    def search(self, name: str = "backend-sf") -> Search:
         with self.sessions() as session:
-            session.add(Search(name=name, site=site, search_term="backend engineer"))
+            return session.scalars(select(Search).where(Search.name == name)).one()
+
+    def feed_state(self) -> SourceState:
+        with self.sessions() as session:
+            return session.scalars(select(SourceState)).one()
+
+    def incidents(self) -> list[HealthIncident]:
+        with self.sessions() as session:
+            return list(session.scalars(select(HealthIncident).order_by(HealthIncident.id)))
+
+    def companies(self) -> list[Company]:
+        with self.sessions() as session:
+            return list(session.scalars(select(Company).order_by(Company.id)))
+
+    def add_runs(self, source: str, target: str, samples: Sequence[tuple[datetime, int]]) -> None:
+        """Successful past runs, as (started_at, fetched_count)."""
+        with self.sessions() as session:
+            session.add_all(
+                Run(
+                    source=source,
+                    target=target,
+                    started_at=started,
+                    finished_at=started + timedelta(seconds=5),
+                    ok=True,
+                    fetched_count=count,
+                )
+                for started, count in samples
+            )
             session.commit()
 
     def update_posting(self, source: str, external_id: str, **values: Any) -> None:
@@ -270,7 +407,25 @@ def env(
     config = make_config()
     adapters: dict[str, Any] = dict(build_adapters(http, config))
     adapters["linkedin"] = FakeBoardAdapter("linkedin")
-    return Env(database, http, config, RecordingNotifier(), adapters)
+    discoverer = Discoverer(AtsDetector(http), max_validations=10, max_page_fetches=5)
+    return Env(database, http, config, RecordingNotifier(), adapters, discoverer)
+
+
+@pytest.fixture
+def feed(respx_mock: respx.MockRouter) -> SimplifyMock:
+    return SimplifyMock(respx_mock.get(SIMPLIFY_NEW_GRAD_URL))
+
+
+@pytest.fixture
+def boards(env: Env) -> ScriptedScrape:
+    """The real JobSpy adapter for both sites, over a scripted ``scrape_jobs``."""
+    scrape = ScriptedScrape()
+    adapter = JobSpyAdapter(
+        scrape=scrape, sleep=FakeSleep(), rng=random.Random(5), monotonic=FakeMonotonic()
+    )
+    env.adapters["linkedin"] = adapter
+    env.adapters["indeed"] = adapter
+    return scrape
 
 
 @pytest.fixture

@@ -23,7 +23,7 @@ from jobpulse.config import (
 from jobpulse.core.timeparse import utcnow
 from jobpulse.db import migrate, repo
 from jobpulse.db.session import display_url, resolve_database_url, session_scope
-from jobpulse.devtools.fixtures import FixtureTransport
+from jobpulse.devtools.fixtures import FixtureScraper, FixtureTransport
 from jobpulse.logging_setup import configure_logging
 from jobpulse.runtime import (
     KNOWN_SOURCES,
@@ -197,7 +197,11 @@ def poll(
     ] = False,
     source: Annotated[
         list[str] | None,
-        typer.Option("--source", help="Only this source (repeatable): greenhouse, lever, ashby."),
+        typer.Option(
+            "--source",
+            help="Only this source (repeatable): greenhouse, lever, ashby, simplify, indeed, "
+            "linkedin.",
+        ),
     ] = None,
     target: Annotated[
         str | None, typer.Option("--target", help="Only this company token or search name.")
@@ -206,13 +210,13 @@ def poll(
         Path | None,
         typer.Option(
             "--fixtures",
-            help="Development: answer HTTP from recorded responses (DIR/routes.yaml).",
+            help="Development: answer HTTP and JobSpy from recorded responses (DIR/routes.yaml).",
             exists=True,
             file_okay=False,
         ),
     ] = None,
 ) -> None:
-    """Run one poll cycle over the watchlist."""
+    """Run one poll cycle over every source (or the --source ones)."""
     state = _state(ctx)
     config = _load_config(state)
     unknown = sorted(set(source or ()) - set(KNOWN_SOURCES))
@@ -231,6 +235,7 @@ def poll(
                 sources=source or None,
                 target=target,
                 transport=FixtureTransport(fixtures) if fixtures else None,
+                scrape=FixtureScraper(fixtures) if fixtures else None,
             )
         )
     except DatabaseNotReady as exc:

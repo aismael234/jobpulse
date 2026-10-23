@@ -122,6 +122,16 @@ def test_posting_fingerprint_uses_the_primary_location() -> None:
     )
 
 
+def test_a_posting_without_a_company_only_matches_itself() -> None:
+    first = make_posting(source="indeed", external_id="a1", company_name="")
+    second = make_posting(source="indeed", external_id="b2", company_name="  ")
+    assert posting_fingerprint(first) != posting_fingerprint(second)
+    assert posting_fingerprint(first) == posting_fingerprint(
+        make_posting(source="indeed", external_id="a1", company_name="")
+    )
+    assert posting_fingerprint(first) != fingerprint("", "Backend Engineer", "San Francisco, CA")
+
+
 def test_merge_also_seen_is_idempotent_and_pure() -> None:
     entry = {
         "source": "linkedin",

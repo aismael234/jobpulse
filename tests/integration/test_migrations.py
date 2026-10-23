@@ -12,7 +12,7 @@ from jobpulse.cli import app
 from jobpulse.db.tables import Base
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-TABLES = {"companies", "searches", "postings", "runs"}
+TABLES = {"companies", "searches", "postings", "runs", "source_state", "health_incidents"}
 
 
 def alembic_config(url: str) -> Config:

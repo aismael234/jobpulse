@@ -123,3 +123,39 @@ async def test_a_failing_job_is_logged_and_still_rescheduled(
     await worker.run_job("watchlist")
     assert scheduler.delay_of("watchlist") == 1800
     assert "boom" in caplog.text
+
+
+async def test_worker_jobs_follow_the_config() -> None:
+    from jobpulse.runtime import scheduled_jobs
+
+    config = AppConfig.model_validate(
+        {
+            "contact_email": "dev@example.com",
+            "schedules": {"job_boards": {"every_minutes": 60, "jitter_seconds": 600}},
+            "searches": [
+                {"name": "backend-sf", "site": "linkedin", "search_term": "backend"},
+                {"name": "old", "site": "indeed", "search_term": "x", "active": False},
+            ],
+        }
+    )
+    ran: list[tuple[str, tuple[str, ...]]] = []
+
+    async def run(job: str, sources: tuple[str, ...]) -> None:
+        ran.append((job, sources))
+
+    jobs = scheduled_jobs(config, run)
+    assert set(jobs) == {"watchlist", "simplify", "job_boards"}
+    assert jobs["job_boards"][0] == Cadence(3600, 600)
+    assert jobs["simplify"][0] == Cadence(1800, 120)
+    for _, job in jobs.values():
+        await job()
+    assert ran == [
+        ("watchlist", ("greenhouse", "lever", "ashby")),
+        ("simplify", ("simplify",)),
+        ("job_boards", ("indeed", "linkedin")),
+    ]
+
+    quiet = AppConfig.model_validate(
+        {"contact_email": "dev@example.com", "simplify": {"enabled": False}}
+    )
+    assert set(scheduled_jobs(quiet, run)) == {"watchlist"}
