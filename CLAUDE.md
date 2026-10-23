@@ -9,7 +9,10 @@ Personal job-posting watcher. Read PROGRESS.md first: milestone checklists, deci
 - `uv run ruff check . && uv run ruff format --check .` — lint and format check
 - `uv run mypy src` — types (strict on `jobpulse.core`)
 - `scripts/check.sh` — all of the above in one go
-- `uv run jobpulse poll --once --dry-run` — one poll cycle; nothing sent, nothing saved (M1+)
+- `uv run jobpulse poll --once --dry-run` — one poll cycle; nothing sent, nothing saved
+- `uv run jobpulse --config tests/fixtures/scenarios/config.yaml poll --once --dry-run --fixtures tests/fixtures/scenarios/first_poll` — the same over recorded responses (set `DATABASE_URL` to a scratch DB and run `db upgrade` first)
+- `uv run jobpulse worker` — the scheduler (needs `NTFY_TOPIC` when ntfy is enabled)
+- `uv run jobpulse companies list` / `companies sync`, `uv run jobpulse notify test`
 - `uv run alembic upgrade head` or `uv run jobpulse db upgrade` — migrate the database
 
 ## Conventions
@@ -33,14 +36,34 @@ Personal job-posting watcher. Read PROGRESS.md first: milestone checklists, deci
 - Alembic autogenerate renders `JSONB(astext_type=Text())` without the `sa.` prefix, and boolean server defaults as `1`/`0`, which Postgres rejects. Fix both by hand (`sa.Text()`, `sa.true()`/`sa.false()`); `test_migrations_match_the_models` catches drift.
 - Typer renders help with Rich markup, so `[...]` in a help string disappears. Use parentheses.
 - `ConfigError` messages must never echo secret values; the tests assert this.
+- httpx encodes `str` header values as ASCII, so "·" in a title would raise. `HttpClient` sends header values as UTF-8 bytes, and ntfy reads them as UTF-8.
+- `dict(session.execute(...))` fails because a SQLAlchemy `Result` has `.keys()`. Iterate the rows instead; `.tuples()` is deprecated in 2.1.
+- `config.py` defines its own pydantic `LocationRules`, so it imports the core filter types as `core_filters`.
+- Protocol members such as `name` are plain class attributes (`name = "lever"`), not `ClassVar`, or mypy rejects the adapter.
+- The logging handler resolves `sys.stderr` when it writes, and `configure_logging` replaces only its own handler, so CliRunner and pytest capture keep working.
+- respx: to change a response between polls, set the route's `return_value` or `side_effect`. Don't register the same pattern again.
+- time-machine 3 doesn't patch `monotonic`, so asyncio runs in real time. Anything that sleeps takes an injected `sleep`.
 
 ## Verified API facts (2026-10-23)
 
-- **Greenhouse:** the list without `content=true` already carries `first_published` on every job. `content` from the per-job endpoint is entity-escaped HTML. `absolute_url` is often a custom domain with `?gh_jid=`. Unknown token → 404 JSON. EU boards on `job-boards.eu.greenhouse.io` are served by `boards-api.greenhouse.io`; `boards-api.eu.greenhouse.io` doesn't resolve.
-- **Lever:** a bare array with no default page cap; `createdAt` is epoch ms; requirements live in `lists[]`. EU boards answer only on `api.eu.lever.co` (US host → 404). Unknown slug → 404 JSON. Lever doesn't gzip; Palantir's board is 6 MB.
-- **Ashby:** `id` is always present and equals the `jobUrl` UUID. `isRemote` is also true for Hybrid jobs. Unknown slug → 404 plain text. OpenAI's board is 14 MB.
-- **All three** send ETags and answer `If-None-Match` with 304. No rate-limit headers were seen.
-- **Simplify feed:** 13 MB, an ETag, and 304 on `If-None-Match`.
+Confirmed by `JOBPULSE_LIVE=1 uv run pytest -m live` (9 passed) and read-only probes.
+- **Greenhouse:**
+  - The list without `content=true` already carries `first_published` on every job, so the freshness gate runs on list data.
+  - The per-job endpoint's `content` is entity-escaped HTML.
+  - `absolute_url` is often a custom domain with `?gh_jid=`.
+  - Unknown token → 404 JSON.
+  - EU boards on `job-boards.eu.greenhouse.io` (for example `proton`) are served by the global `boards-api.greenhouse.io`; `boards-api.eu.greenhouse.io` doesn't resolve.
+- **Lever:**
+  - A bare array with no default page cap; `createdAt` is epoch ms; requirements live in `lists[]`.
+  - EU boards answer only on `api.eu.lever.co`: `olx` → 404 on the US host, 200 on the EU host.
+  - Unknown slug → 404 JSON.
+  - Lever doesn't gzip; Palantir's board is 6 MB.
+- **Ashby:**
+  - `id` is always present and equals the `jobUrl` UUID.
+  - `isRemote` is also true for Hybrid jobs, so `workplaceType` decides.
+  - Unknown slug → 404 plain text. OpenAI's board is 14 MB.
+- **All three:** they send ETags, and the live test confirms they answer `If-None-Match` with 304. No rate-limit headers were seen.
+- **Simplify feed:** 13 MB, an ETag, and 304 on `If-None-Match` (adapter in M2).
 
 ## When compacting
 

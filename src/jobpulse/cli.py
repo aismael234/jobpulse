@@ -1,5 +1,7 @@
 """jobpulse command-line interface (Typer)."""
 
+import asyncio
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, NoReturn
@@ -18,8 +20,22 @@ from jobpulse.config import (
     require_secrets,
     resolve_config_path,
 )
-from jobpulse.db import migrate
-from jobpulse.db.session import display_url, resolve_database_url
+from jobpulse.core.timeparse import utcnow
+from jobpulse.db import migrate, repo
+from jobpulse.db.session import display_url, resolve_database_url, session_scope
+from jobpulse.devtools.fixtures import FixtureTransport
+from jobpulse.logging_setup import configure_logging
+from jobpulse.runtime import (
+    KNOWN_SOURCES,
+    DatabaseNotReady,
+    open_database,
+    poll_once,
+    render_report,
+    run_worker,
+    send_test_notification,
+)
+
+log = logging.getLogger("jobpulse")
 
 app = typer.Typer(
     name="jobpulse",
@@ -31,9 +47,11 @@ app = typer.Typer(
 config_app = typer.Typer(help="Validate configuration.", no_args_is_help=True)
 db_app = typer.Typer(help="Database migrations.", no_args_is_help=True)
 companies_app = typer.Typer(help="Watchlist companies.", no_args_is_help=True)
+notify_app = typer.Typer(help="Notification channels.", no_args_is_help=True)
 app.add_typer(config_app, name="config")
 app.add_typer(db_app, name="db")
 app.add_typer(companies_app, name="companies")
+app.add_typer(notify_app, name="notify")
 
 
 @dataclass(frozen=True)
@@ -66,10 +84,24 @@ def _load_config(state: CliState) -> AppConfig:
         _fail(exc)
 
 
-def _database_url(state: CliState) -> str:
+def _database_url(state: CliState, config: AppConfig | None = None) -> str:
     """Config is optional here: without config.yaml, DATABASE_URL or the default applies."""
-    config = _load_config(state) if state.config_path.exists() else None
+    if config is None and state.config_path.exists():
+        config = _load_config(state)
     return resolve_database_url(state.settings, config)
+
+
+def _require_secrets(state: CliState, config: AppConfig) -> None:
+    try:
+        require_secrets(config, state.settings, env_file=state.env_file)
+    except ConfigError as exc:
+        _fail(exc)
+
+
+def _start_logging(state: CliState, config: AppConfig) -> None:
+    configure_logging(state.settings.log_level, secrets=state.settings.secret_values())
+    for warning in config_warnings(config):
+        log.warning("config: %s", warning)
 
 
 def _show_version(value: bool) -> None:
@@ -150,21 +182,138 @@ def db_current(ctx: typer.Context) -> None:
 
 
 @app.command()
-def poll() -> None:
+def poll(
+    ctx: typer.Context,
+    once: Annotated[
+        bool,
+        typer.Option("--once", help="Run one cycle and exit (the worker runs them on a schedule)."),
+    ] = True,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help="Fetch and evaluate in a transaction that is rolled back; send nothing.",
+        ),
+    ] = False,
+    source: Annotated[
+        list[str] | None,
+        typer.Option("--source", help="Only this source (repeatable): greenhouse, lever, ashby."),
+    ] = None,
+    target: Annotated[
+        str | None, typer.Option("--target", help="Only this company token or search name.")
+    ] = None,
+    fixtures: Annotated[
+        Path | None,
+        typer.Option(
+            "--fixtures",
+            help="Development: answer HTTP from recorded responses (DIR/routes.yaml).",
+            exists=True,
+            file_okay=False,
+        ),
+    ] = None,
+) -> None:
     """Run one poll cycle over the watchlist."""
-    _not_built_yet("M1")
+    state = _state(ctx)
+    config = _load_config(state)
+    unknown = sorted(set(source or ()) - set(KNOWN_SOURCES))
+    if unknown:
+        _fail(f"unknown source {', '.join(unknown)}; choose from {', '.join(KNOWN_SOURCES)}")
+    if not dry_run:
+        _require_secrets(state, config)
+    _start_logging(state, config)
+    try:
+        report = asyncio.run(
+            poll_once(
+                config=config,
+                settings=state.settings,
+                database_url=_database_url(state, config),
+                dry_run=dry_run,
+                sources=source or None,
+                target=target,
+                transport=FixtureTransport(fixtures) if fixtures else None,
+            )
+        )
+    except DatabaseNotReady as exc:
+        _fail(exc)
+    for line in render_report(report):
+        typer.echo(line)
 
 
 @app.command()
-def worker() -> None:
-    """Run the scheduler: poll every source on its own interval."""
-    _not_built_yet("M1")
+def worker(ctx: typer.Context) -> None:
+    """Run the scheduler: poll every source on its own interval (Ctrl-C to stop)."""
+    state = _state(ctx)
+    config = _load_config(state)
+    _require_secrets(state, config)
+    _start_logging(state, config)
+    try:
+        asyncio.run(
+            run_worker(
+                config=config, settings=state.settings, database_url=_database_url(state, config)
+            )
+        )
+    except DatabaseNotReady as exc:
+        _fail(exc)
 
 
 @companies_app.command("list")
-def companies_list() -> None:
-    """List watchlist companies and their baseline state."""
-    _not_built_yet("M1")
+def companies_list(ctx: typer.Context) -> None:
+    """List watchlist companies with their baseline state and open postings."""
+    state = _state(ctx)
+    try:
+        sessions = open_database(_database_url(state))
+    except DatabaseNotReady as exc:
+        _fail(exc)
+    with session_scope(sessions) as session:
+        companies = repo.list_companies(session)
+    if not companies:
+        typer.echo("no companies yet; run `jobpulse companies sync` or `jobpulse poll --once`")
+    for company in companies:
+        baseline = (
+            f"baseline {company.baseline_done_at:%Y-%m-%d}"
+            if company.baseline_done_at
+            else "baseline pending"
+        )
+        status = "active" if company.active else "inactive"
+        typer.echo(
+            f"{company.ats:<10} {company.token:<24} {company.name:<24} priority {company.priority:<3}"
+            f" {status:<8} {baseline:<20} {company.open_postings} open ({company.source_of_discovery})"
+        )
+
+
+@companies_app.command("sync")
+def companies_sync(ctx: typer.Context) -> None:
+    """Upsert the watchlist from config.yaml. Every poll does this too."""
+    state = _state(ctx)
+    config = _load_config(state)
+    try:
+        sessions = open_database(_database_url(state, config))
+    except DatabaseNotReady as exc:
+        _fail(exc)
+    with session_scope(sessions) as session:
+        report = repo.sync_watchlist(session, config.watchlist, now=utcnow())
+    for label, names in (
+        ("added", report.added),
+        ("updated", report.updated),
+        ("deactivated", report.deactivated),
+    ):
+        for name in names:
+            typer.echo(f"{label}: {name}")
+    if not (report.added or report.updated or report.deactivated):
+        typer.echo("watchlist already in sync")
+
+
+@notify_app.command("test")
+def notify_test(ctx: typer.Context) -> None:
+    """Send one test push through every configured channel."""
+    state = _state(ctx)
+    config = _load_config(state)
+    _require_secrets(state, config)
+    _start_logging(state, config)
+    channels = asyncio.run(send_test_notification(config=config, settings=state.settings))
+    if not channels:
+        _fail("no notification channels configured (notify.channels in config.yaml)")
+    typer.echo(f"test notification sent via {', '.join(channels)}")
 
 
 @app.command()

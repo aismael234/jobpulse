@@ -1,0 +1,8 @@
+# Recorded responses for `jobpulse poll --fixtures`: the first poll of every board.
+routes:
+  - url: https://boards-api.greenhouse.io/v1/boards/acme/jobs
+    file: ../../greenhouse/acme_jobs.json
+  - url: https://api.lever.co/v0/postings/beta?mode=json
+    file: ../../lever/beta_postings.json
+  - url: https://api.ashbyhq.com/posting-api/job-board/gamma?includeCompensation=true
+    file: ../../ashby/gamma_job_board.json

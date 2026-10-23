@@ -10,8 +10,10 @@ It detects and notifies only. It never applies, fills forms, logs in anywhere or
 
 ```bash
 uv sync
-cp config.example.yaml config.yaml
-uv run jobpulse config check
+cp config.example.yaml config.yaml        # then edit: contact_email, filters, watchlist
 uv run jobpulse db upgrade
-scripts/check.sh
+uv run jobpulse poll --once --dry-run     # fetch and evaluate everything, save and send nothing
+scripts/check.sh                          # lint, types, tests
 ```
+
+The first real poll of each board stores what's there silently. After that, `uv run jobpulse worker` polls on a schedule and pushes fresh matches through ntfy. Put `NTFY_TOPIC` in `.env` first; see `.env.example`.

@@ -25,6 +25,10 @@ from pydantic import (
 from pydantic_core import ErrorDetails, PydanticCustomError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from jobpulse.core import filters as core_filters
+from jobpulse.core.locations import DEFAULT_SHORT_LABELS, merge_aliases
+from jobpulse.core.scoring import Weights
+
 DEFAULT_CONFIG_PATH = Path("config.yaml")
 DEFAULT_ENV_FILE = Path(".env")
 DEFAULT_DATABASE_URL = "sqlite:///data/jobpulse.db"
@@ -307,6 +311,8 @@ class AppConfig(_Model):
     def _email(cls, value: str) -> str:
         if not EMAIL_PATTERN.fullmatch(value):
             raise ValueError(f"{value!r} doesn't look like an email address")
+        if not value.isascii():
+            raise ValueError("must be ASCII: it goes into the User-Agent header")
         return value
 
     @field_validator("timezone")
@@ -526,3 +532,61 @@ def _yaml_problem(exc: yaml.YAMLError) -> str:
     if mark is not None:
         return f"YAML syntax error at line {mark.line + 1}, column {mark.column + 1}: {problem}"
     return f"YAML syntax error: {problem}"
+
+
+def _patterns(patterns: list[str]) -> tuple[re.Pattern[str], ...]:
+    return tuple(re.compile(p, re.IGNORECASE) for p in patterns if p != PLACEHOLDER)
+
+
+def filter_rules(config: AppConfig) -> core_filters.FilterRules:
+    """Compile the filter section into core rules (case-insensitive, placeholders dropped)."""
+    filters = config.filters
+    return core_filters.FilterRules(
+        title_include=tuple(
+            core_filters.WeightedRegex(re.compile(rule.pattern, re.IGNORECASE), rule.weight)
+            for rule in filters.title.include
+            if rule.pattern != PLACEHOLDER
+        ),
+        title_exclude=_patterns(filters.title.exclude),
+        level_include=_patterns(filters.level.include),
+        level_exclude=_patterns(filters.level.exclude),
+        level_include_bonus=filters.level.include_bonus,
+        max_years=filters.description.max_years_experience,
+        years_mode=filters.description.years_mode,
+        level_phrases_exclude=_patterns(filters.description.level_phrases_exclude),
+        stack=tuple(
+            core_filters.WeightedRegex(re.compile(pattern, re.IGNORECASE), weight)
+            for pattern, weight in filters.description.stack_keywords.items()
+            if pattern != PLACEHOLDER
+        ),
+        stack_saturation=filters.description.stack_saturation,
+        locations=core_filters.LocationRules(
+            include=_patterns(filters.locations.include),
+            exclude=_patterns(filters.locations.exclude),
+            unknown_passes=filters.locations.unknown_location_passes,
+        ),
+    )
+
+
+def scoring_weights(config: AppConfig) -> Weights:
+    weights = config.scoring.weights
+    return Weights(
+        freshness=weights.freshness,
+        company_priority=weights.company_priority,
+        title=weights.title,
+        stack=weights.stack,
+        level_mismatch=weights.level_mismatch,
+        applicants=weights.applicants,
+    )
+
+
+def location_aliases(config: AppConfig) -> dict[str, str]:
+    return merge_aliases(config.filters.locations.aliases)
+
+
+def short_labels(config: AppConfig) -> dict[str, str]:
+    """Display names for push titles: built-ins plus short alias keys such as ``SF``."""
+    reverse = {
+        label: key for key, label in config.filters.locations.aliases.items() if len(key) <= 4
+    }
+    return {**DEFAULT_SHORT_LABELS, **reverse}

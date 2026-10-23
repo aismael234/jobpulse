@@ -41,18 +41,18 @@ Source of truth for what is built, what was decided, and what is left. The appro
 
 ## M1 — ATS watchlist → detection → ntfy
 
-- [ ] core: models, timeparse (incl. Workday `postedOn`), text, locations, filters, scoring, atsurls, dedupe, detection
-- [ ] `httpclient.py`: per-host limits, timeouts, full-jitter backoff, `Retry-After`, User-Agent, ETag replay cache
-- [ ] adapters: Greenhouse (list without content, per-job enrich), Lever (US/EU), Ashby
-- [ ] repo: watchlist upsert, presence plan, insert-if-absent, merges, runs
-- [ ] poller: baseline, freshness gate, closures, dedupe, enrichment, scoring, notification retry and cap
-- [ ] notifiers: ntfy (headers + JSON fallback), Discord (embed, 429 `retry_after`); message format
-- [ ] scheduler: per-source cadence with jitter, worker command
-- [ ] CLI: `poll --once [--dry-run] [--source] [--target] [--fixtures]`, `worker`, `companies list|sync`, `notify test`
-- [ ] fixtures for every ATS, scenario route sets
-- [ ] tests: section 7 items 1–7, 9 (ATS forms), 11, 13, 14, 16, adapter parsing, dry-run CLI
-- [ ] live smoke test (item 17); VERIFY results in CLAUDE.md
-- [ ] commit `feat(m1): …`
+- [x] core: models, timeparse (incl. Workday `postedOn`), text, locations, filters, scoring, atsurls, dedupe, detection
+- [x] `httpclient.py`: per-host limits, timeouts, full-jitter backoff, `Retry-After`, User-Agent, ETag replay cache
+- [x] adapters: Greenhouse (list without content, per-job enrich), Lever (US/EU), Ashby
+- [x] repo: watchlist upsert, presence plan, insert-if-absent, merges, runs
+- [x] poller: baseline, freshness gate, closures, dedupe, enrichment, scoring, notification retry and cap
+- [x] notifiers: ntfy (headers + JSON fallback), Discord (embed, 429 `retry_after`); message format
+- [x] scheduler: per-source cadence with jitter, worker command
+- [x] CLI: `poll --once [--dry-run] [--source] [--target] [--fixtures]`, `worker`, `companies list|sync`, `notify test`
+- [x] fixtures for every ATS, scenario route sets (`tests/fixtures/scenarios/`)
+- [x] tests: section 7 items 1–7, 9 (ATS forms), 11, 13, 14, 15, 16, adapter parsing, dry-run CLI (352 tests)
+- [x] live smoke test (item 17, 9 live tests); VERIFY results in CLAUDE.md
+- [x] commit `feat(m1): …`
 
 ## M2 — SimplifyJobs, discovery, JobSpy, dedupe, health
 
@@ -92,3 +92,26 @@ LinkedIn applicant enrichment, the Workday adapter and the LLM scoring layer are
   - Added `tzdata` so timezone names resolve in slim Docker images.
   - Partial cadences (`watchlist: {every_minutes: 10}`) keep the default jitter.
   - Open: nothing.
+- **2026-10-23** — M1 done.
+  - **Test-first in two waves,** each against interface stubs and run red first:
+    - core, HTTP, adapters, notifiers and scheduler: 273 failures, all `NotImplementedError`;
+    - repository, poller and CLI: 30 failures, all from `NotImplementedError`.
+    - Now 352 tests pass, and 9 live tests pass with `JOBPULSE_LIVE=1`.
+  - **Dedupe decisions:**
+    - The fingerprint uses the city part of the primary location ("San Francisco, CA" and "San Francisco, California, United States" agree). JobSpy's LinkedIn rows have no `job_url_direct`, so LinkedIn-to-ATS dedupe rests on the fingerprint.
+    - URL merges happen only on ATS job keys. A job-board copy merges into any row with the same key, not only ATS rows, because ATS keys are job-specific.
+    - A `gh_jid` on a domain not yet mapped falls back to looking up the Greenhouse job id directly.
+  - **Notifications:**
+    - ntfy header values are sent as UTF-8 bytes, because httpx sends `str` headers as ASCII and ntfy reads UTF-8. A title outside Latin-1 goes to the JSON endpoint, per the spec.
+    - A failed push is retried on later cycles while the posting is inside the freshness window.
+    - `notify.max_instant_per_cycle` holds the overflow for the digest and sends one "N more" push.
+  - **Robustness:**
+    - Rows left `pending` by an interrupted cycle are re-evaluated on the next one.
+    - List calls use an in-memory ETag cache. A 304 replays the previous body, so closures behave as they would on a 200.
+    - The worker uses self-rescheduling one-shot jobs, so a source's runs never overlap. Job exceptions are logged, never raised into APScheduler.
+  - **Other:**
+    - The watchlist is upserted at the start of every cycle.
+    - Workday entries are skipped with a warning (no adapter until M4).
+    - Logs are in UTC.
+  - **Real dry run** over the 11 example boards (live APIs): about 2,500 postings, baseline lines only, nothing saved, about 3 s.
+  - **Left for M2:** the reverse link, where a new ATS posting matches an already-pushed job-board posting. It isn't needed until job-board sources exist.

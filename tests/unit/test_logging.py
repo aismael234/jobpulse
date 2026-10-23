@@ -39,6 +39,7 @@ def test_httpx_request_logs_are_silenced() -> None:
     configure_logging("DEBUG", secrets=[], stream=io.StringIO())
     assert logging.getLogger("httpx").getEffectiveLevel() == logging.WARNING
     assert logging.getLogger("httpcore").getEffectiveLevel() == logging.WARNING
+    assert logging.getLogger("apscheduler").getEffectiveLevel() == logging.WARNING
 
 
 def test_short_or_empty_secrets_are_ignored() -> None:

@@ -1,0 +1,10 @@
+# The next poll: Greenhouse has one new backend job; Lever and Ashby are unchanged.
+routes:
+  - url: https://boards-api.greenhouse.io/v1/boards/acme/jobs
+    file: acme_jobs.json
+  - url: https://boards-api.greenhouse.io/v1/boards/acme/jobs/4012345012?pay_transparency=true
+    file: acme_job_4012345012.json
+  - url: https://api.lever.co/v0/postings/beta?mode=json
+    file: ../../lever/beta_postings.json
+  - url: https://api.ashbyhq.com/posting-api/job-board/gamma?includeCompensation=true
+    file: ../../ashby/gamma_job_board.json

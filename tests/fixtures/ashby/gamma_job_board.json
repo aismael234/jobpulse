@@ -1,0 +1,151 @@
+{
+  "apiVersion": "1",
+  "jobs": [
+    {
+      "id": "d3bc1ced-3ce4-4086-a050-555055dbb1ff",
+      "title": "Backend Engineer",
+      "department": "Engineering",
+      "team": "Core Services",
+      "employmentType": "FullTime",
+      "location": "New York, NY",
+      "shouldDisplayCompensationOnJobPostings": true,
+      "secondaryLocations": [
+        {
+          "location": "San Francisco, CA",
+          "address": {
+            "postalAddress": {
+              "addressLocality": "San Francisco",
+              "addressRegion": "California",
+              "addressCountry": "United States"
+            }
+          }
+        }
+      ],
+      "publishedAt": "2026-10-23T09:15:00.158+00:00",
+      "isListed": true,
+      "isRemote": true,
+      "workplaceType": "Hybrid",
+      "address": {
+        "postalAddress": {
+          "addressLocality": "New York",
+          "addressRegion": "New York",
+          "addressCountry": "United States"
+        }
+      },
+      "jobUrl": "https://jobs.ashbyhq.com/gamma/d3bc1ced-3ce4-4086-a050-555055dbb1ff",
+      "applyUrl": "https://jobs.ashbyhq.com/gamma/d3bc1ced-3ce4-4086-a050-555055dbb1ff/application",
+      "descriptionHtml": "<p>Build the services behind Gamma.</p><ul><li>2+ years of experience with Python or Go</li></ul>",
+      "descriptionPlain": "Build the services behind Gamma.\n\n- 2+ years of experience with Python or Go",
+      "compensation": {
+        "compensationTierSummary": "$170K – $220K • Offers Equity",
+        "scrapeableCompensationSalarySummary": "$170K - $220K",
+        "compensationTiers": [
+          {
+            "id": "tier-1",
+            "tierSummary": "$170K – $220K",
+            "title": "US"
+          }
+        ],
+        "summaryComponents": [
+          {
+            "compensationType": "Salary",
+            "interval": "1 YEAR",
+            "currencyCode": "USD",
+            "minValue": 170000,
+            "maxValue": 220000
+          }
+        ]
+      }
+    },
+    {
+      "title": "Platform Engineer",
+      "department": "Engineering",
+      "team": "Platform",
+      "employmentType": "FullTime",
+      "location": "Remote - US",
+      "shouldDisplayCompensationOnJobPostings": false,
+      "secondaryLocations": [],
+      "publishedAt": "2026-10-22T21:40:00.000+00:00",
+      "isListed": true,
+      "isRemote": true,
+      "workplaceType": "Remote",
+      "address": {
+        "postalAddress": {
+          "addressCountry": "United States"
+        }
+      },
+      "jobUrl": "https://jobs.ashbyhq.com/gamma/7a1d9c4e-2b3f-4e5a-8c6d-1e2f3a4b5c6d",
+      "applyUrl": "https://jobs.ashbyhq.com/gamma/7a1d9c4e-2b3f-4e5a-8c6d-1e2f3a4b5c6d/application",
+      "descriptionHtml": "<p>Own our deploy pipeline.</p>",
+      "descriptionPlain": "Own our deploy pipeline.",
+      "compensation": {
+        "compensationTierSummary": null,
+        "scrapeableCompensationSalarySummary": null,
+        "compensationTiers": [],
+        "summaryComponents": []
+      }
+    },
+    {
+      "id": "11111111-2222-4333-8444-555555555555",
+      "title": "Unlisted Role",
+      "department": "Engineering",
+      "team": "Core Services",
+      "employmentType": "FullTime",
+      "location": "New York, NY",
+      "shouldDisplayCompensationOnJobPostings": false,
+      "secondaryLocations": [],
+      "publishedAt": "2026-10-20T12:00:00.000+00:00",
+      "isListed": false,
+      "isRemote": false,
+      "workplaceType": "OnSite",
+      "address": {
+        "postalAddress": {
+          "addressLocality": "New York",
+          "addressRegion": "New York",
+          "addressCountry": "United States"
+        }
+      },
+      "jobUrl": "https://jobs.ashbyhq.com/gamma/11111111-2222-4333-8444-555555555555",
+      "applyUrl": "https://jobs.ashbyhq.com/gamma/11111111-2222-4333-8444-555555555555/application",
+      "descriptionHtml": "<p>Hidden.</p>",
+      "descriptionPlain": "Hidden.",
+      "compensation": {
+        "compensationTierSummary": null,
+        "scrapeableCompensationSalarySummary": null,
+        "compensationTiers": [],
+        "summaryComponents": []
+      }
+    },
+    {
+      "id": "66666666-7777-4888-8999-aaaaaaaaaaaa",
+      "title": "Account Executive",
+      "department": "Sales",
+      "team": "Mid-Market",
+      "employmentType": "FullTime",
+      "location": "Austin, TX",
+      "shouldDisplayCompensationOnJobPostings": false,
+      "secondaryLocations": [],
+      "publishedAt": "2026-10-19T15:00:00.000+00:00",
+      "isListed": true,
+      "isRemote": false,
+      "workplaceType": null,
+      "address": {
+        "postalAddress": {
+          "addressLocality": "Austin",
+          "addressRegion": "Texas",
+          "addressCountry": "United States"
+        }
+      },
+      "jobUrl": "https://jobs.ashbyhq.com/gamma/66666666-7777-4888-8999-aaaaaaaaaaaa",
+      "applyUrl": "https://jobs.ashbyhq.com/gamma/66666666-7777-4888-8999-aaaaaaaaaaaa/application",
+      "descriptionHtml": "<p>Sell Gamma.</p>",
+      "descriptionPlain": "Sell Gamma.",
+      "compensation": {
+        "compensationTierSummary": null,
+        "scrapeableCompensationSalarySummary": null,
+        "compensationTiers": [],
+        "summaryComponents": []
+      }
+    }
+  ]
+}

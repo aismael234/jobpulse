@@ -1,7 +1,9 @@
 # Secrets and local state: never commit these
 .env
-config.yaml
-data/
+.env.*
+!.env.example
+/config.yaml
+/data/
 *.db
 *.db-wal
 *.db-shm

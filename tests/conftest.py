@@ -1,6 +1,11 @@
 import os
+import random
+from collections.abc import AsyncIterator
 
 import pytest
+
+from jobpulse.httpclient import HttpClient
+from tests.factories import FakeSleep
 
 # Variables jobpulse reads from the environment. Tests start from a clean slate so a
 # developer's shell (or a real .env exported into it) can't leak into results.
@@ -30,3 +35,12 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 def _clean_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in JOBPULSE_ENV_VARS:
         monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture
+async def http() -> AsyncIterator[HttpClient]:
+    """An HttpClient whose retries never actually sleep."""
+    async with HttpClient(
+        user_agent="jobpulse-test/0.1", sleep=FakeSleep(), rng=random.Random(0)
+    ) as client:
+        yield client

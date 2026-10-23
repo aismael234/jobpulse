@@ -1,0 +1,67 @@
+from datetime import timedelta
+
+import pytest
+
+from jobpulse.core.scoring import (
+    ScoreInputs,
+    Weights,
+    freshness_component,
+    priority_component,
+    score,
+)
+
+WEIGHTS = Weights(
+    freshness=0.25, company_priority=0.2, title=0.3, stack=0.25, level_mismatch=0.5, applicants=0.1
+)
+
+
+def test_score_is_the_weighted_sum() -> None:
+    total, breakdown = score(
+        ScoreInputs(freshness=1.0, company_priority=0.5, title=1.0, stack=0.5), WEIGHTS
+    )
+    assert total == pytest.approx(0.25 + 0.1 + 0.3 + 0.125)
+    assert breakdown["freshness"] == pytest.approx(0.25)
+    assert breakdown["company_priority"] == pytest.approx(0.1)
+    assert breakdown["title"] == pytest.approx(0.3)
+    assert breakdown["stack"] == pytest.approx(0.125)
+    assert breakdown["level_mismatch"] == 0.0
+    assert breakdown["applicants"] is None
+    assert breakdown["total"] == pytest.approx(total)
+
+
+def test_level_mismatch_subtracts() -> None:
+    clean, _ = score(ScoreInputs(freshness=1.0, company_priority=0.0, title=1.0), WEIGHTS)
+    penalized, breakdown = score(
+        ScoreInputs(freshness=1.0, company_priority=0.0, title=1.0, level_mismatch=1.0), WEIGHTS
+    )
+    assert penalized == pytest.approx(clean - 0.5)
+    assert breakdown["level_mismatch"] == pytest.approx(-0.5)
+
+
+def test_unknown_stack_and_applicants_contribute_nothing() -> None:
+    total, breakdown = score(ScoreInputs(freshness=0.0, company_priority=0.0, title=1.0), WEIGHTS)
+    assert total == pytest.approx(0.3)
+    assert breakdown["stack"] is None
+    assert breakdown["applicants"] is None
+
+
+def test_known_applicant_signal_counts() -> None:
+    total, breakdown = score(
+        ScoreInputs(freshness=0.0, company_priority=0.0, title=0.0, applicants=1.0), WEIGHTS
+    )
+    assert total == pytest.approx(0.1)
+    assert breakdown["applicants"] == pytest.approx(0.1)
+
+
+@pytest.mark.parametrize(
+    ("age_hours", "expected"), [(0, 1.0), (24, 0.5), (48, 0.0), (60, 0.0), (-2, 1.0)]
+)
+def test_freshness_component(age_hours: float, expected: float) -> None:
+    assert freshness_component(timedelta(hours=age_hours), timedelta(hours=48)) == pytest.approx(
+        expected
+    )
+
+
+@pytest.mark.parametrize(("priority", "expected"), [(0, 0.0), (5, 0.5), (10, 1.0), (20, 1.0)])
+def test_priority_component(priority: int, expected: float) -> None:
+    assert priority_component(priority, 10) == pytest.approx(expected)

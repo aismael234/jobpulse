@@ -34,4 +34,5 @@ class UTCDateTime(TypeDecorator[datetime]):
         return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
-JSONType = JSON().with_variant(JSONB(), "postgresql")
+# None is stored as SQL NULL, not as the JSON value null.
+JSONType = JSON(none_as_null=True).with_variant(JSONB(none_as_null=True), "postgresql")

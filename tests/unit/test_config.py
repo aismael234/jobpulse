@@ -197,6 +197,14 @@ def test_invalid_contact_email(tmp_path: Path) -> None:
     assert "contact_email" in config_error(path)
 
 
+def test_contact_email_must_be_ascii(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text("contact_email: josé@example.com\n", encoding="utf-8")
+    message = config_error(path)
+    assert "contact_email" in message
+    assert "ASCII" in message
+
+
 def test_yaml_syntax_error_reports_file_and_line(tmp_path: Path) -> None:
     path = write_config(
         tmp_path,
