@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from jobpulse.core.atsurls import detect_ats_url
+from jobpulse.core.atsurls import detect_ats_url, detect_workday_url
 from jobpulse.core.locations import location_key
 from jobpulse.core.models import Posting
 from jobpulse.core.text import collapse_whitespace
@@ -32,7 +32,7 @@ def _is_tracking(name: str) -> bool:
 
 
 def canonicalize_url(url: str, *, greenhouse_hosts: Mapping[str, str] | None = None) -> str:
-    """Rule 5a. Returns an ATS key for Greenhouse, Lever and Ashby job URLs (including
+    """Rule 5a. Returns an ATS key for Greenhouse, Lever, Ashby and Workday job URLs (including
     ``?gh_jid=`` on a custom domain whose Greenhouse token is known), else a cleaned URL:
     lowercase scheme and host, no fragment, no tracking parameters, no trailing ``/apply``,
     ``/application`` or slash, remaining parameters sorted."""
@@ -54,7 +54,8 @@ def canonicalize_url(url: str, *, greenhouse_hosts: Mapping[str, str] | None = N
         (k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if not _is_tracking(k)
     ]
 
-    ref = detect_ats_url(urlunsplit((scheme, netloc, path, urlencode(query), "")))
+    cleaned = urlunsplit((scheme, netloc, path, urlencode(query), ""))
+    ref = detect_ats_url(cleaned) or detect_workday_url(cleaned)
     if ref is not None and ref.job_id is not None:
         return ats_key(ref.ats, ref.token, ref.job_id)
     if greenhouse_hosts:

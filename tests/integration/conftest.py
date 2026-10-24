@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 import httpx
+import httpx2
 import pytest
 import respx
 import time_machine
@@ -37,6 +38,7 @@ from jobpulse.db.tables import (
 )
 from jobpulse.discovery import Discoverer
 from jobpulse.httpclient import HttpClient
+from jobpulse.llm.scorer import LlmScorer
 from jobpulse.notify.base import Notification, NotifierError
 from jobpulse.poller import CycleReport, Poller
 from jobpulse.runtime import build_adapters, build_discoverer
@@ -305,6 +307,7 @@ class Env:
     notifier: Any
     adapters: dict[str, Any]
     discoverer: Discoverer | None = None
+    llm: LlmScorer | None = None
 
     def poller(self) -> Poller:
         return Poller(
@@ -313,6 +316,7 @@ class Env:
             adapters=self.adapters,
             notifier=self.notifier,
             discoverer=self.discoverer,
+            llm=self.llm,
         )
 
     async def poll(self, **kwargs: Any) -> CycleReport:
@@ -529,7 +533,7 @@ class Web:
 
     def post(
         self, path: str, data: dict[str, Any] | None = None, *, htmx: bool = True
-    ) -> httpx.Response:
+    ) -> httpx2.Response:  # Starlette's TestClient uses httpx2 when it's installed
         headers = {"X-CSRF-Token": self.token}
         if htmx:
             headers["HX-Request"] = "true"

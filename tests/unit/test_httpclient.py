@@ -236,3 +236,19 @@ async def test_get_limited_raises_transport_errors(respx_mock: respx.MockRouter)
     async with client(FakeSleep()) as http:
         with pytest.raises(httpx.ConnectError):
             await http.get_limited(PAGE, max_bytes=1000)
+
+
+async def test_cookies_are_never_kept_or_sent(respx_mock: respx.MockRouter) -> None:
+    """jobpulse keeps no sessions: not with LinkedIn (guardrail), not with anyone."""
+    page = "https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/4101100003"
+    route = respx_mock.get(page).respond(
+        200,
+        html="<p>job</p>",
+        headers={"Set-Cookie": "JSESSIONID=ajax:123; Path=/; Domain=.www.linkedin.com; Secure"},
+    )
+    async with client(FakeSleep()) as http:
+        await http.request("GET", page)
+        await http.get_limited(page, max_bytes=1000)
+        await http.request("GET", page)
+    assert route.call_count == 3
+    assert all("cookie" not in call.request.headers for call in route.calls)

@@ -41,6 +41,7 @@ class Company(Base):
         String(20), default="config", server_default="config"
     )
     discovered_from: Mapped[str | None] = mapped_column(Text)  # the URL that led to an auto add
+    params: Mapped[dict[str, Any] | None] = mapped_column(JSONType)  # Workday: {"keywords": [...]}
     baseline_done_at: Mapped[datetime | None]
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)
@@ -166,3 +167,27 @@ class HealthIncident(Base):
     alerted_at: Mapped[datetime | None]
     resolved_at: Mapped[datetime | None]
     recovery_sent_at: Mapped[datetime | None]
+
+
+class LlmAssessment(Base):
+    """One LLM call about one posting: its answer (the per-posting cache) or its error. Every
+    row counts toward ``llm.max_calls_per_day``."""
+
+    __tablename__ = "llm_assessments"
+    __table_args__ = (
+        Index("ix_llm_assessments_posting_id_input_hash", "posting_id", "input_hash"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    posting_id: Mapped[int] = mapped_column(ForeignKey("postings.id", ondelete="CASCADE"))
+    input_hash: Mapped[str] = mapped_column(String(64))
+    model: Mapped[str] = mapped_column(String(100))
+    created_at: Mapped[datetime] = mapped_column(index=True)
+    ok: Mapped[bool] = mapped_column(default=False, server_default=false())
+    level: Mapped[str | None] = mapped_column(String(20))
+    backend_focus: Mapped[float | None]
+    fit: Mapped[float | None]
+    reason: Mapped[str | None] = mapped_column(Text)
+    error: Mapped[str | None] = mapped_column(Text)
+    input_tokens: Mapped[int] = mapped_column(default=0, server_default="0")
+    output_tokens: Mapped[int] = mapped_column(default=0, server_default="0")

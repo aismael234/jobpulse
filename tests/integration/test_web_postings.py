@@ -1,6 +1,7 @@
 """Dashboard routes: the status views, one-click status changes, filters, sort order, paging,
 and blocked companies."""
 
+import html
 import re
 from collections.abc import Callable
 from datetime import timedelta
@@ -259,3 +260,15 @@ def test_blocked_companies_are_hidden_except_where_you_applied(
     assert nav_count(page, "New") == 1
     assert nav_count(page, "Saved") == 0
     assert nav_count(page, "Applied") == 1
+
+
+def test_an_llm_second_opinion_shows_with_its_reason(web: Web) -> None:
+    """M4: the LLM layer's move on the score, and its reason on hover."""
+    reason = "score 0.50 < 0.55; llm -0.09: mid, backend 20%, fit 20% (Mostly frontend.)"
+    web.add(
+        score=0.50, score_breakdown={"title": 0.3, "llm": -0.09, "total": 0.5}, tier_reason=reason
+    )
+    web.add(score=0.45)
+    page = html.unescape(web.page("/"))
+    assert page.count("LLM -0.09") == 1
+    assert f'title="{reason}"' in page

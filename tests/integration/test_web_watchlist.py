@@ -2,6 +2,7 @@
 validate it with one API call, show the result, set a priority and add it."""
 
 import html
+import json
 import re
 from collections.abc import Callable
 from typing import Any
@@ -121,7 +122,6 @@ def test_a_page_without_a_board_is_reported(web: Web, respx_mock: respx.MockRout
         ("http://192.168.1.10/careers", "public"),
         ("ftp://example.com/jobs", "public"),
         ("", "Paste"),
-        ("https://acme.wd5.myworkdayjobs.com/en-US/careers", "Workday"),
     ],
 )
 def test_urls_that_are_never_fetched(web: Web, url: str, message: str) -> None:
@@ -293,3 +293,131 @@ def test_the_watchlist_page_lists_every_company(web: Web) -> None:
     assert 'href="https://job-boards.greenhouse.io/acme"' in page
     assert 'href="https://jobs.lever.co/delta"' in page
     assert 'href="https://jobs.lever.co/delta/abc/apply"' in page
+
+
+# --- Workday (M4) -------------------------------------------------------------------------
+
+WD_JOBS = "https://omega.wd5.myworkdayjobs.com/wday/cxs/omega/External/jobs"
+WD_JOB_URL = (
+    "https://omega.wd5.myworkdayjobs.com/en-US/External/job/Seattle-WA/"
+    "Software-Engineer---New-Grad_R0012345"
+)
+
+
+def wd_page(total: int) -> dict[str, Any]:
+    item = {
+        "title": "Software Engineer - New Grad",
+        "externalPath": "/job/Seattle-WA/Software-Engineer---New-Grad_R0012345",
+        "locationsText": "US, WA, Seattle",
+        "postedOn": "Posted Today",
+        "bulletFields": ["R0012345"],
+    }
+    return {"total": total, "jobPostings": [item]}
+
+
+def test_a_workday_board_is_validated_with_one_call_and_offered_with_keywords(
+    web: Web, respx_mock: respx.MockRouter
+) -> None:
+    api = respx_mock.post(WD_JOBS).respond(json=wd_page(312))
+
+    page = detect(web, WD_JOB_URL)
+
+    assert api.call_count == 1
+    body = json.loads(api.calls.last.request.content)
+    assert (body["limit"], body["offset"], body["searchText"]) == (20, 0, "")
+    assert "Workday" in page
+    assert "312 open jobs" in page
+    fields = add_form(page)
+    assert (fields["ats"], fields["token"], fields["region"]) == (
+        "workday",
+        "omega.wd5/External",
+        "us",
+    )
+    assert fields["name"] == "omega"  # the tenant; you can rename it before adding
+    assert fields["keywords"] == ""
+    assert "keyword" in page.lower()
+
+
+def test_a_big_workday_board_gets_a_warning_about_keywords(
+    web: Web, respx_mock: respx.MockRouter
+) -> None:
+    respx_mock.post(WD_JOBS).respond(json=wd_page(1400))
+    page = detect(web, "https://omega.wd5.myworkdayjobs.com/External")
+    assert has_add_form(page)
+    assert "1400 open jobs" in page
+    assert "workday.max_pages" in page
+
+
+def test_an_unknown_workday_site_is_reported(web: Web, respx_mock: respx.MockRouter) -> None:
+    respx_mock.post(WD_JOBS).respond(
+        404, json={"errorCode": "S21", "message": "not found: Job_Posting_Site_ID=External"}
+    )
+    page = detect(web, "https://omega.wd5.myworkdayjobs.com/External")
+    assert "couldn't be validated" in page
+    assert "HTTP 404" in page
+    assert not has_add_form(page)
+
+
+def test_a_careers_page_that_links_a_workday_board(web: Web, respx_mock: respx.MockRouter) -> None:
+    careers = respx_mock.get(CAREERS).respond(
+        html='<a href="https://omega.wd5.myworkdayjobs.com/en-US/External">Open roles</a>'
+    )
+    api = respx_mock.post(WD_JOBS).respond(json=wd_page(12))
+    page = detect(web, CAREERS)
+    assert (careers.call_count, api.call_count) == (1, 1)
+    assert add_form(page)["token"] == "omega.wd5/External"
+
+
+def test_a_watched_workday_board_is_not_validated_again(make_web: Callable[..., Web]) -> None:
+    config = make_config(
+        watchlist=[{"name": "Omega", "ats": "workday", "token": "omega.wd5/External"}]
+    )
+    web = make_web(config=config)
+    web.sync_watchlist()
+    with respx.mock(assert_all_called=False) as router:
+        page = detect(web, WD_JOB_URL)
+        assert router.calls.call_count == 0
+    assert "already on your watchlist" in page
+
+
+def test_adding_a_workday_board_keeps_its_keywords(web: Web) -> None:
+    response = web.post(
+        "/watchlist/add",
+        {
+            "ats": "workday",
+            "token": "omega.wd5/External",
+            "region": "us",
+            "name": "Omega",
+            "priority": "2",
+            "keywords": " backend, Platform Engineer ,backend,, ",
+            "url": WD_JOB_URL,
+        },
+    )
+    assert response.status_code == 200
+    assert "Added Omega" in html.unescape(response.text)
+    [company] = web.companies()
+    assert (company.ats_type, company.token, company.priority) == (
+        "workday",
+        "omega.wd5/External",
+        2,
+    )
+    assert company.params == {"keywords": ["backend", "Platform Engineer"]}
+    assert company.source_of_discovery == "dashboard"
+    with web.sessions() as session:
+        [target] = repo.company_targets(session)
+    assert target.keywords == ("backend", "Platform Engineer")
+
+
+def test_keywords_mean_nothing_for_other_boards(web: Web) -> None:
+    web.post(
+        "/watchlist/add",
+        {
+            "ats": "greenhouse",
+            "token": "acmecorp",
+            "name": "Acme",
+            "priority": "0",
+            "keywords": "x",
+        },
+    )
+    [company] = web.companies()
+    assert not company.params

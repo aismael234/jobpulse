@@ -1,0 +1,35 @@
+{
+  "total": 3,
+  "jobPostings": [
+    {
+      "title": "Backend Engineer, Payments",
+      "externalPath": "/job/US-WA-Seattle/Backend-Engineer--Payments_R0012350",
+      "locationsText": "US, WA, Seattle",
+      "postedOn": "Posted Today",
+      "bulletFields": ["R0012350"]
+    },
+    {
+      "title": "Software Engineer - New Grad",
+      "externalPath": "/job/Seattle-WA/Software-Engineer---New-Grad_R0012345",
+      "locationsText": "2 Locations",
+      "postedOn": "Posted Yesterday",
+      "remoteType": "Flex",
+      "bulletFields": ["R0012345"]
+    },
+    {
+      "title": "Platform Engineer",
+      "externalPath": "/job/USA-Remote/Platform-Engineer_R0011001-1",
+      "locationsText": "USA Remote",
+      "postedOn": "Posted 30+ Days Ago",
+      "remoteType": "Remote",
+      "bulletFields": ["R0011001"]
+    }
+  ],
+  "facets": [
+    {
+      "facetParameter": "locationMainGroup",
+      "values": [{"facetParameter": "locations", "values": [{"descriptor": "US, WA, Seattle", "id": "1b2c3d", "count": 2}]}]
+    }
+  ],
+  "userAuthenticated": false
+}

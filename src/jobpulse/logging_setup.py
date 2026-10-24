@@ -13,8 +13,9 @@ from typing import TextIO
 
 REDACTED = "***"
 MIN_SECRET_LENGTH = 4
-# httpx logs URLs (secrets); APScheduler logs every job run at INFO.
-QUIET_LOGGERS = ("httpx", "httpcore", "apscheduler")
+# httpx logs URLs (secrets), and so does httpx2 under the Anthropic SDK; APScheduler logs every
+# job run at INFO.
+QUIET_LOGGERS = ("httpx", "httpcore", "httpx2", "httpcore2", "apscheduler")
 LOG_FORMAT = "%(asctime)s %(levelname)-7s %(name)s: %(message)s"
 DATE_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 

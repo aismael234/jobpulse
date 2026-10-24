@@ -1,4 +1,4 @@
-from jobpulse.core.text import collapse_whitespace, html_to_text
+from jobpulse.core.text import collapse_whitespace, html_to_text, texts_by_class
 
 
 def test_greenhouse_entity_escaped_content_becomes_text() -> None:
@@ -29,3 +29,12 @@ def test_empty_input() -> None:
 
 def test_collapse_whitespace() -> None:
     assert collapse_whitespace("  a \t b\n c\N{NO-BREAK SPACE}d ") == "a b c d"
+
+
+def test_texts_by_class() -> None:
+    page = (
+        '<div class="a other"><p>x<br>y</p><img class="a"><div>z</div></div>'
+        '<span class="b">no</span><span class="a"></span><p class="a">&amp; done</p>'
+    )
+    assert texts_by_class(page, "a") == ["x\ny\nz", "", "& done"]
+    assert texts_by_class(page, "missing") == []

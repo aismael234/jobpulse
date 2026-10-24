@@ -16,9 +16,8 @@ import math
 import random
 import re
 import time
-from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
+from collections.abc import Callable, Mapping
+from datetime import UTC, date, datetime
 from typing import Any
 
 from jobpulse.core.dedupe import canonicalize_url
@@ -26,6 +25,7 @@ from jobpulse.core.jobboards import board_job_id
 from jobpulse.core.locations import DEFAULT_ALIASES, normalize_locations
 from jobpulse.core.models import ErrorKind, FetchResult, Posting, SearchSite, SearchTarget, Target
 from jobpulse.core.timeparse import utcnow
+from jobpulse.sources.linkedin_gate import DEFAULT_PACING, LinkedInGate, Pacing, Sleep
 
 SITES: tuple[SearchSite, ...] = ("indeed", "linkedin")
 DEFAULT_RESULTS_WANTED = 30  # the config default; synced searches always carry their own
@@ -35,19 +35,6 @@ _NOT_IN_RAW = frozenset({"description", "company_description"})
 _HTTP_429 = re.compile(r"\b429\b")
 
 Scrape = Callable[..., Any]
-Sleep = Callable[[float], Awaitable[None]]
-
-
-@dataclass(frozen=True, slots=True)
-class Pacing:
-    """LinkedIn politeness: a random pause between calls and a cool-down after a 429."""
-
-    delay_min: float = 4.0
-    delay_max: float = 8.0
-    cooldown: timedelta = timedelta(minutes=30)
-
-
-DEFAULT_PACING = Pacing()
 
 
 def jobspy_error_kind(message: str) -> ErrorKind:
@@ -132,17 +119,18 @@ class JobSpyAdapter:
         sleep: Sleep = asyncio.sleep,
         rng: random.Random | None = None,
         monotonic: Callable[[], float] = time.monotonic,
+        gate: LinkedInGate | None = None,
     ) -> None:
+        """``gate`` paces LinkedIn calls together with the job pages; without one, the
+        adapter paces its own (``pacing``, ``sleep``, ``rng``, ``monotonic``)."""
         self._scrape = scrape
         self.aliases = aliases if aliases is not None else DEFAULT_ALIASES
-        self.pacing = pacing
         self.clock = clock
-        self._sleep = sleep
-        self._rng = rng or random.Random()
-        self._monotonic = monotonic
+        self._gate = gate or LinkedInGate(
+            pacing, clock=clock, sleep=sleep, rng=rng, monotonic=monotonic
+        )
+        self.pacing = self._gate.pacing
         self._lock = asyncio.Lock()
-        self._last_linkedin: float | None = None
-        self._linkedin_blocked_until: datetime | None = None
 
     async def fetch(self, target: Target) -> FetchResult:
         if not isinstance(target, SearchTarget):
@@ -151,34 +139,32 @@ class JobSpyAdapter:
                 f"{type(target).__name__} is not a job-board search target",
                 fetched_at=self.clock(),
             )
-        linkedin = target.site == "linkedin"
         async with self._lock:  # one search at a time, across both sites
-            blocked_until = self._linkedin_blocked_until
-            if linkedin and blocked_until is not None and self.clock() < blocked_until:
+            if target.site != "linkedin":
+                return await self._search(target)
+            blocked_until = self._gate.blocked_until()
+            if blocked_until is not None:
                 return FetchResult.skip(
                     "http_429",
                     f"not attempted: LinkedIn answered 429, backing off until "
                     f"{blocked_until:%H:%M} UTC",
                     fetched_at=self.clock(),
                 )
-            if linkedin:
-                await self._pace()
-            fetched_at = self.clock()
-            arguments = self.scrape_arguments(target)
-            try:
-                frame = await asyncio.to_thread(self._call, arguments)
-            except Exception as exc:
-                message = f"JobSpy raised {type(exc).__name__}: {exc}"
-                result = FetchResult.failure(
-                    jobspy_error_kind(message), message, fetched_at=fetched_at
-                )
-            else:
-                result = self.parse_frame(frame, target, fetched_at)
-            if linkedin:
-                self._last_linkedin = self._monotonic()
-                if result.error_kind == "http_429":
-                    self._linkedin_blocked_until = self.clock() + self.pacing.cooldown
+            async with self._gate.turn():
+                result = await self._search(target)
+            if result.error_kind == "http_429":
+                self._gate.back_off()
             return result
+
+    async def _search(self, target: SearchTarget) -> FetchResult:
+        fetched_at = self.clock()
+        arguments = self.scrape_arguments(target)
+        try:
+            frame = await asyncio.to_thread(self._call, arguments)
+        except Exception as exc:
+            message = f"JobSpy raised {type(exc).__name__}: {exc}"
+            return FetchResult.failure(jobspy_error_kind(message), message, fetched_at=fetched_at)
+        return self.parse_frame(frame, target, fetched_at)
 
     async def enrich(self, posting: Posting) -> Posting:
         return posting
@@ -187,14 +173,6 @@ class JobSpyAdapter:
         if self._scrape is None:
             self._scrape = load_scrape_jobs(self.pacing)
         return self._scrape(**arguments)
-
-    async def _pace(self) -> None:
-        if self._last_linkedin is None:
-            return
-        delay = self._rng.uniform(self.pacing.delay_min, self.pacing.delay_max)
-        wait = delay - (self._monotonic() - self._last_linkedin)
-        if wait > 0:
-            await self._sleep(wait)
 
     def scrape_arguments(self, search: SearchTarget) -> dict[str, Any]:
         params = search.params

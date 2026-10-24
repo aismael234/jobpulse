@@ -1,5 +1,5 @@
-"""One poll cycle: fetch, diff, dedupe, prescreen, enrich, decide, notify, check health,
-discover new boards.
+"""One poll cycle: fetch, diff, dedupe, prescreen, enrich, decide (with the LLM layer's second
+opinion near the threshold, when it's on), notify, check health, discover new boards.
 
 The network phases run concurrently; every database phase is a synchronous block with no
 ``await`` inside. Live runs commit between phases, so no transaction is held across network
@@ -44,6 +44,7 @@ from jobpulse.db import repo
 from jobpulse.db.tables import PostingRow
 from jobpulse.discovery import Discoverer, Sighting
 from jobpulse.health import HealthMonitor, HealthRules
+from jobpulse.llm.scorer import Ask, LlmScorer
 from jobpulse.notify.base import Notifier, NotifierError
 from jobpulse.notify.format import PushContent, instant_notification, overflow_notification
 from jobpulse.sources.base import SourceAdapter
@@ -51,6 +52,7 @@ from jobpulse.sources.base import SourceAdapter
 log = logging.getLogger(__name__)
 
 Inserted = tuple[int, Posting, str]  # (row id, posting, fingerprint)
+LLM_CAP_WINDOW = timedelta(hours=24)  # llm.max_calls_per_day counts calls in this window
 
 
 @dataclass
@@ -106,6 +108,12 @@ class CycleReport:
     health: list[str] = field(default_factory=list)  # health messages sent (or due)
     pruned_runs: int = 0  # runs older than retention_days deleted this cycle
     retention_days: int | None = None
+    llm_asked: int = 0  # answers the LLM gave this cycle
+    llm_cached: int = 0  # answers taken from the per-posting cache
+    llm_failed: int = 0  # calls that brought no answer
+    llm_over_limit: int = 0  # band postings left to the rules: llm.max_calls_per_day reached
+    llm_would_ask: int = 0  # dry run: band postings with no cached answer
+    llm_stopped: str | None = None  # why the LLM layer stopped asking (a bad key)
 
 
 @dataclass
@@ -152,6 +160,7 @@ class Poller:
         notifier: Notifier | None = None,
         clock: Callable[[], datetime] = utcnow,
         discoverer: Discoverer | None = None,
+        llm: LlmScorer | None = None,
     ) -> None:
         self._config = config
         self._sessions = sessions
@@ -159,6 +168,7 @@ class Poller:
         self._notifier = notifier
         self._clock = clock
         self._discoverer = discoverer
+        self._llm = llm
         self._health = (
             HealthMonitor(HealthRules.from_config(config.health)) if config.health.enabled else None
         )
@@ -199,8 +209,14 @@ class Poller:
                 unit.checkpoint()
 
             enriched = await asyncio.gather(*(self._enrich(survivor) for survivor in survivors))
-            for survivor, posting in zip(survivors, enriched, strict=True):
-                self._decide(session, survivor, posting)
+            decisions = [
+                evaluate(posting, self._context(survivor))
+                for survivor, posting in zip(survivors, enriched, strict=True)
+            ]
+            decisions = await self._review(unit, report, survivors, enriched, decisions)
+            for survivor, posting, decision in zip(survivors, enriched, decisions, strict=True):
+                repo.save_evaluation(session, survivor.row_id, posting, decision)
+                self._tally(survivor, posting, decision)
             finished_at = self._clock()
             for target_report in report.targets:
                 if target_report.run_id is not None:
@@ -512,10 +528,66 @@ class Poller:
             )
             return survivor.posting
 
-    def _decide(self, session: Session, survivor: _Survivor, posting: Posting) -> None:
-        decision = evaluate(posting, self._context(survivor))
-        repo.save_evaluation(session, survivor.row_id, posting, decision)
-        self._tally(survivor, posting, decision)
+    async def _review(
+        self,
+        unit: _UnitOfWork,
+        report: CycleReport,
+        survivors: list[_Survivor],
+        postings: list[Posting],
+        decisions: list[Decision],
+    ) -> list[Decision]:
+        """The LLM layer's second opinion on the decisions within its band of the instant
+        threshold: the answer cached for that exact question, else a call while
+        ``llm.max_calls_per_day`` allows. A dry run never calls."""
+        llm = self._llm
+        asks = llm.candidates(postings, decisions) if llm is not None else []
+        if llm is None or not asks:
+            return decisions
+        session = unit.session
+        cached = repo.cached_assessments(
+            session, {survivors[ask.index].row_id: ask.request.input_hash for ask in asks}
+        )
+        used = repo.count_llm_calls(session, since=self._clock() - LLM_CAP_WINDOW)
+        unit.checkpoint()  # nothing stays open while the LLM answers
+        decided = list(decisions)
+        fresh: list[Ask] = []
+        for ask in asks:
+            answer = cached.get(survivors[ask.index].row_id)
+            if answer is None:
+                fresh.append(ask)
+            else:
+                decided[ask.index] = llm.apply(decided[ask.index], answer)
+                report.llm_cached += 1
+        if not fresh:
+            return decided
+        if report.dry_run:
+            report.llm_would_ask = len(fresh)
+            return decided
+        if not llm.can_ask:
+            report.llm_stopped = llm.stopped or "no LLM client (LLM_API_KEY)"
+            return decided
+        to_ask = fresh[: max(0, llm.max_calls_per_day - used)]
+        report.llm_over_limit = len(fresh) - len(to_ask)
+        replies = await llm.ask([ask.request for ask in to_ask])
+        answered_at = self._clock()
+        for ask, reply in zip(to_ask, replies, strict=True):
+            row_id = survivors[ask.index].row_id
+            if reply.asked:
+                repo.record_assessment(
+                    session,
+                    posting_id=row_id,
+                    input_hash=ask.request.input_hash,
+                    reply=reply,
+                    now=answered_at,
+                )
+            if reply.assessment is None:
+                report.llm_failed += reply.asked
+                log.warning("llm: no answer about posting %d: %s", row_id, reply.error)
+                continue
+            report.llm_asked += 1
+            decided[ask.index] = llm.apply(decided[ask.index], reply.assessment)
+        report.llm_stopped = llm.stopped
+        return decided
 
     async def _notify(self, unit: _UnitOfWork, report: CycleReport) -> None:
         """Push every instant-tier posting not yet sent (so failed sends retry), best first,
@@ -694,6 +766,7 @@ class Poller:
             weights=self._weights,
             instant_threshold=self._config.scoring.instant_threshold,
             company_priority=priority,
+            applicant_cap=self._config.scoring.applicant_cap,
         )
 
     def _tally(self, survivor: _Survivor, posting: Posting, decision: Decision) -> None:

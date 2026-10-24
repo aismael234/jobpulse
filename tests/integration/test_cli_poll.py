@@ -173,3 +173,10 @@ def test_companies_sync_and_list(cli: tuple[list[str], str]) -> None:
     listed = runner.invoke(app, [*base, "companies", "list"])
     assert listed.exit_code == 0, listed.output
     assert listed.output.count("baseline pending") == 3
+
+
+def test_workday_is_a_source(cli: tuple[list[str], str]) -> None:
+    base, _ = cli
+    output = poll(base, "first_poll", "--dry-run", "--source", "workday")
+    assert "unknown source" not in output
+    assert "would notify: nothing" in output

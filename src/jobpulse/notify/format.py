@@ -19,6 +19,7 @@ _BREAKDOWN_LABELS = {
     "company_priority": "priority",
     "applicants": "applicants",
     "level_mismatch": "level",
+    "llm": "llm",
 }
 
 

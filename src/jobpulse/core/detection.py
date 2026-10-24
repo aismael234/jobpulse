@@ -7,7 +7,13 @@ from datetime import datetime, timedelta
 
 from jobpulse.core.filters import FilterRules, check_description, check_locations, check_title
 from jobpulse.core.models import Decision, FetchResult, Posting, Precision
-from jobpulse.core.scoring import ScoreInputs, Weights, freshness_component, score
+from jobpulse.core.scoring import (
+    ScoreInputs,
+    Weights,
+    applicant_component,
+    freshness_component,
+    score,
+)
 from jobpulse.core.timeparse import end_of_day
 
 
@@ -38,7 +44,7 @@ class EvaluationContext:
     weights: Weights
     instant_threshold: float
     company_priority: float = 0.0
-    applicant_signal: float | None = None
+    applicant_cap: int = 200  # applicant counts scale against this (scoring.applicant_cap)
 
 
 def can_drive_closures(result: FetchResult) -> bool:
@@ -122,15 +128,19 @@ def _stale(posting: Posting, ctx: EvaluationContext) -> Decision:
 def prescreen(posting: Posting, ctx: EvaluationContext) -> Decision | None:
     """Cheap checks before any detail fetch: the company blocklist, title, location, and
     freshness when the list already carries a timestamp. ``None`` means the posting
-    survives."""
+    survives.
+
+    A posting with no location yet (Workday's "2 Locations") isn't judged on location here:
+    its detail call may supply them, and ``evaluate`` decides after it."""
     if ctx.rules.blocklist.blocks_company(posting.company_name):
         return Decision(tier="filtered", reason="company is on the blocklist")
     title = check_title(posting.title, ctx.rules)
     if not title.passed:
         return Decision(tier="filtered", reason=title.reason)
-    location = check_locations(posting.locations, ctx.rules.locations)
-    if not location.passed:
-        return Decision(tier="filtered", reason=location.reason)
+    if posting.locations:
+        location = check_locations(posting.locations, ctx.rules.locations)
+        if not location.passed:
+            return Decision(tier="filtered", reason=location.reason)
     if posting.posted_at_precision != "none" and not is_fresh(
         posting, first_seen_at=ctx.first_seen_at, now=ctx.now, freshness=ctx.freshness
     ):
@@ -143,6 +153,10 @@ def evaluate(posting: Posting, ctx: EvaluationContext) -> Decision:
     early = prescreen(posting, ctx)
     if early is not None:
         return early
+    if not posting.locations:
+        location = check_locations((), ctx.rules.locations)
+        if not location.passed:
+            return Decision(tier="filtered", reason=location.reason)
     if not is_fresh(posting, first_seen_at=ctx.first_seen_at, now=ctx.now, freshness=ctx.freshness):
         return _stale(posting, ctx)
     description = check_description(posting.description_text, ctx.rules)
@@ -157,7 +171,11 @@ def evaluate(posting: Posting, ctx: EvaluationContext) -> Decision:
             title=title.match,
             stack=description.stack_match,
             level_mismatch=description.level_mismatch,
-            applicants=ctx.applicant_signal,
+            applicants=(
+                applicant_component(posting.applicants, ctx.applicant_cap)
+                if posting.applicants is not None
+                else None
+            ),
         ),
         ctx.weights,
     )

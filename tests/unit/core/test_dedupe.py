@@ -144,3 +144,34 @@ def test_merge_also_seen_is_idempotent_and_pure() -> None:
     assert once == [entry]
     assert twice == [entry]
     assert original == []
+
+
+# --- Workday (M4): every form of a job URL gives the same key --------------------------
+
+OMEGA_KEY = "workday:omega.wd5/external:software-engineer---new-grad_r0012345"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://omega.wd5.myworkdayjobs.com/External/job/Seattle-WA/Software-Engineer---New-Grad_R0012345",
+        "https://omega.wd5.myworkdayjobs.com/en-US/External/job/Seattle-WA/Software-Engineer---New-Grad_R0012345?source=LinkedIn&utm_medium=x",
+        "https://omega.wd5.myworkdayjobs.com/External/job/Remote-USA/Software-Engineer---New-Grad_R0012345/apply",
+        "https://omega.wd5.myworkdayjobs.com/External/details/Software-Engineer---New-Grad_R0012345",
+        "https://wd5.myworkdaysite.com/recruiting/omega/External/job/Seattle-WA/Software-Engineer---New-Grad_R0012345",
+    ],
+)
+def test_workday_job_urls_canonicalize_to_one_key(url: str) -> None:
+    assert canonicalize_url(url) == OMEGA_KEY
+
+
+def test_a_workday_board_url_is_not_a_job_key() -> None:
+    assert canonicalize_url("https://omega.wd5.myworkdayjobs.com/en-US/External/") == (
+        "https://omega.wd5.myworkdayjobs.com/en-US/External"
+    )
+
+
+def test_the_workday_key_matches_the_adapters() -> None:
+    assert ats_key("workday", "omega.wd5/External", "Software-Engineer---New-Grad_R0012345") == (
+        OMEGA_KEY
+    )

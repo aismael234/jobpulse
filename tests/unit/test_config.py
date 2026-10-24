@@ -536,3 +536,195 @@ def test_run_history_must_cover_the_busy_window(tmp_path: Path) -> None:
         write_config(tmp_path, "retention: {runs_days: 3}\nhealth: {enabled: false}\n")
     )
     assert config.retention.runs_days == 3
+
+
+# --- Milestone 4 sections -------------------------------------------------------------
+
+RESUME_TEXT = "Backend engineer: Python, Go, Postgres. 4 years.\n"
+
+
+def write_resume(tmp_path: Path, text: str = RESUME_TEXT) -> Path:
+    path = tmp_path / "resume.txt"
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def test_m4_sections_get_their_defaults(tmp_path: Path) -> None:
+    config = load_config(write_config(tmp_path))
+    assert config.linkedin.job_pages
+    assert config.linkedin.max_job_pages_per_hour == 40
+    assert config.workday.max_pages == 25
+    assert config.scoring.applicant_cap == 200
+    assert config.scoring.weights.llm == 0.15
+    assert config.llm.enabled is False  # off by default
+    assert config.llm.provider == "anthropic"
+    assert config.llm.model == "claude-opus-5-5"
+    assert config.llm.effort == "low"
+    assert config.llm.band == 0.10
+    assert config.llm.wanted_levels == []
+    assert config.llm.max_calls_per_day == 25
+    assert config.llm.resume_path is None
+
+
+def test_the_example_config_keeps_the_llm_off() -> None:
+    assert load_config(EXAMPLE_CONFIG).llm.enabled is False
+
+
+@pytest.mark.parametrize(
+    ("token", "expected"),
+    [
+        ("omega.wd5/External", "omega.wd5/External"),
+        ("OMEGA.WD5/External", "omega.wd5/External"),
+        ("https://omega.wd5.myworkdayjobs.com/en-US/External", "omega.wd5/External"),
+        ("https://wd5.myworkdaysite.com/recruiting/omega/External", "omega.wd5/External"),
+    ],
+)
+def test_workday_tokens_are_normalized(tmp_path: Path, token: str, expected: str) -> None:
+    config = load_config(
+        write_config(
+            tmp_path,
+            f"watchlist:\n  - {{name: Omega, ats: workday, token: '{token}', keywords: [backend]}}\n",
+        )
+    )
+    [entry] = config.watchlist
+    assert entry.token == expected
+    assert entry.keywords == ["backend"]
+
+
+@pytest.mark.parametrize(
+    ("entry", "field", "hint"),
+    [
+        ("{name: Omega, ats: workday, token: omega}", "watchlist[0].token", "tenant.wdN/site"),
+        ("{name: Acme, ats: greenhouse, token: 'acme/jobs'}", "watchlist[0].token", None),
+        (
+            "{name: Acme, ats: greenhouse, token: acme, keywords: [backend]}",
+            "watchlist[0].keywords",
+            "Workday",
+        ),
+        (
+            "{name: Omega, ats: workday, token: omega.wd5/External, keywords: [backend, ' ']}",
+            "watchlist[0].keywords",
+            None,
+        ),
+    ],
+)
+def test_bad_workday_entries_name_the_field(
+    tmp_path: Path, entry: str, field: str, hint: str | None
+) -> None:
+    path = write_config(tmp_path, f"watchlist:\n  - {entry}\n")
+    message = config_error(path)
+    assert field in message
+    assert str(path) in message
+    if hint is not None:
+        assert hint in message
+
+
+def test_the_same_workday_board_twice_is_a_duplicate(tmp_path: Path) -> None:
+    path = write_config(
+        tmp_path,
+        """
+        watchlist:
+          - {name: Omega, ats: workday, token: omega.wd5/External}
+          - {name: Omega again, ats: workday, token: 'https://omega.wd5.myworkdayjobs.com/External'}
+        """,
+    )
+    assert "watchlist[1] is a duplicate of watchlist[0]" in config_error(path)
+
+
+def test_a_workday_board_can_be_blocked(tmp_path: Path) -> None:
+    config = load_config(
+        write_config(tmp_path, "blocklist: {boards: [workday/omega.wd5/External]}\n")
+    )
+    assert company_blocklist(config).blocks_board("workday", "omega.wd5/External")
+
+
+def test_workday_entries_no_longer_warn(tmp_path: Path) -> None:
+    config = load_config(
+        write_config(
+            tmp_path, "watchlist:\n  - {name: Omega, ats: workday, token: omega.wd5/External}\n"
+        )
+    )
+    assert not any("workday" in warning.lower() for warning in config_warnings(config))
+
+
+def test_the_llm_needs_a_resume_when_enabled(tmp_path: Path) -> None:
+    message = config_error(write_config(tmp_path, "llm: {enabled: true}\n"))
+    assert "llm" in message
+    assert "resume_path" in message
+
+
+def test_the_resume_path_is_relative_to_the_config_file(tmp_path: Path) -> None:
+    resume = write_resume(tmp_path)
+    config = load_config(write_config(tmp_path, "llm: {enabled: true, resume_path: resume.txt}\n"))
+    assert config.llm.resume_path == resume
+
+
+@pytest.mark.parametrize(("text", "problem"), [(None, "not found"), ("  \n", "empty")])
+def test_an_unreadable_resume_is_a_config_error(
+    tmp_path: Path, text: str | None, problem: str
+) -> None:
+    if text is not None:
+        write_resume(tmp_path, text)
+    path = write_config(tmp_path, "llm: {enabled: true, resume_path: resume.txt}\n")
+    message = config_error(path)
+    assert "llm.resume_path" in message
+    assert problem in message
+
+
+def test_a_missing_resume_is_fine_while_the_llm_is_off(tmp_path: Path) -> None:
+    config = load_config(write_config(tmp_path, "llm: {resume_path: nosuch.txt}\n"))
+    assert not config.llm.enabled
+
+
+@pytest.mark.parametrize(
+    ("body", "field"),
+    [
+        ("llm: {effort: extreme}\n", "llm.effort"),
+        ("llm: {provider: openai}\n", "llm.provider"),
+        ("llm: {wanted_levels: [director]}\n", "llm.wanted_levels[0]"),
+        ("llm: {band: 0}\n", "llm.band"),
+        ("llm: {max_calls_per_day: 0}\n", "llm.max_calls_per_day"),
+        ("llm: {model: ''}\n", "llm.model"),
+        ("scoring: {applicant_cap: 0}\n", "scoring.applicant_cap"),
+        ("scoring: {weights: {llm: 2}}\n", "scoring.weights.llm"),
+        ("workday: {max_pages: 0}\n", "workday.max_pages"),
+        ("workday: {max_pages: 101}\n", "workday.max_pages"),
+        ("linkedin: {max_job_pages_per_hour: 0}\n", "linkedin.max_job_pages_per_hour"),
+    ],
+)
+def test_m4_sections_name_bad_fields(tmp_path: Path, body: str, field: str) -> None:
+    path = write_config(tmp_path, body)
+    message = config_error(path)
+    assert field in message
+    assert str(path) in message
+
+
+def llm_config(tmp_path: Path) -> Path:
+    write_resume(tmp_path)
+    return write_config(
+        tmp_path, "notify: {channels: []}\nllm: {enabled: true, resume_path: resume.txt}\n"
+    )
+
+
+def test_the_llm_key_is_required_by_commands_that_call_the_llm(tmp_path: Path) -> None:
+    config = load_config(llm_config(tmp_path))
+    env = write_env(tmp_path)
+    with pytest.raises(ConfigError) as excinfo:
+        require_secrets(config, load_settings(env), env_file=env, llm=True)
+    assert "LLM_API_KEY" in str(excinfo.value)
+    assert str(env) in str(excinfo.value)
+    require_secrets(config, load_settings(env), env_file=env)  # digest, notify test: no LLM
+
+
+def test_a_set_llm_key_passes_and_is_never_echoed(tmp_path: Path) -> None:
+    config = load_config(llm_config(tmp_path))
+    env = write_env(tmp_path, "LLM_API_KEY=sk-ant-secret-0123456789\n")
+    settings = load_settings(env)
+    require_secrets(config, settings, env_file=env, llm=True)
+    assert "sk-ant-secret-0123456789" in settings.secret_values()
+
+
+def test_the_llm_key_is_not_needed_while_the_llm_is_off(tmp_path: Path) -> None:
+    path = write_config(tmp_path, "notify: {channels: []}\n")
+    env = write_env(tmp_path)
+    require_secrets(load_config(path), load_settings(env), env_file=env, llm=True)

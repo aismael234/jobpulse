@@ -2,7 +2,7 @@
 "Over 200 applicants") parsed into a label and a min/max range.
 
 For jobs that apply on the company's own site the count reflects Apply-button clicks, so
-treat it as rough. Nothing fetches the line yet: the guest job page is Milestone 4.
+treat it as rough. The line comes from LinkedIn's public job page (``sources.linkedin_guest``).
 """
 
 import re

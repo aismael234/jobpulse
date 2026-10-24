@@ -96,9 +96,10 @@ def _database_url(state: CliState, config: AppConfig | None = None) -> str:
     return resolve_database_url(state.settings, config)
 
 
-def _require_secrets(state: CliState, config: AppConfig) -> None:
+def _require_secrets(state: CliState, config: AppConfig, *, llm: bool = False) -> None:
+    """``llm``: the command may call the LLM layer (the worker, a live poll)."""
     try:
-        require_secrets(config, state.settings, env_file=state.env_file)
+        require_secrets(config, state.settings, env_file=state.env_file, llm=llm)
     except ConfigError as exc:
         _fail(exc)
 
@@ -147,11 +148,12 @@ def main(
 
 @config_app.command("check")
 def config_check(ctx: typer.Context) -> None:
-    """Validate config.yaml and the secrets your notification channels need."""
+    """Validate config.yaml and the secrets your notification channels (and the LLM layer,
+    when it's on) need."""
     state = _state(ctx)
     config = _load_config(state)
     try:
-        require_secrets(config, state.settings, env_file=state.env_file)
+        require_secrets(config, state.settings, env_file=state.env_file, llm=True)
     except ConfigError as exc:
         _fail(exc)
     for warning in config_warnings(config):
@@ -204,8 +206,8 @@ def poll(
         list[str] | None,
         typer.Option(
             "--source",
-            help="Only this source (repeatable): greenhouse, lever, ashby, simplify, indeed, "
-            "linkedin.",
+            help="Only this source (repeatable): greenhouse, lever, ashby, workday, simplify, "
+            "indeed, linkedin.",
         ),
     ] = None,
     target: Annotated[
@@ -228,7 +230,7 @@ def poll(
     if unknown:
         _fail(f"unknown source {', '.join(unknown)}; choose from {', '.join(KNOWN_SOURCES)}")
     if not dry_run:
-        _require_secrets(state, config)
+        _require_secrets(state, config, llm=True)
     _start_logging(state, config)
     try:
         report = asyncio.run(
@@ -243,7 +245,7 @@ def poll(
                 scrape=FixtureScraper(fixtures) if fixtures else None,
             )
         )
-    except DatabaseNotReady as exc:
+    except (DatabaseNotReady, ConfigError) as exc:  # ConfigError: the resume went missing
         _fail(exc)
     for line in render_report(report):
         typer.echo(line)
@@ -254,7 +256,7 @@ def worker(ctx: typer.Context) -> None:
     """Run the scheduler: poll every source on its own interval (Ctrl-C to stop)."""
     state = _state(ctx)
     config = _load_config(state)
-    _require_secrets(state, config)
+    _require_secrets(state, config, llm=True)
     _start_logging(state, config)
     try:
         asyncio.run(
@@ -262,7 +264,7 @@ def worker(ctx: typer.Context) -> None:
                 config=config, settings=state.settings, database_url=_database_url(state, config)
             )
         )
-    except DatabaseNotReady as exc:
+    except (DatabaseNotReady, ConfigError) as exc:  # ConfigError: the resume went missing
         _fail(exc)
     except WorkerStalled as exc:
         log.error("%s", exc)

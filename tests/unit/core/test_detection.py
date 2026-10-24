@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from jobpulse.core.applicants import ApplicantCount
 from jobpulse.core.detection import (
     EvaluationContext,
     PresenceRow,
@@ -243,3 +244,47 @@ def test_evaluate_excludes_too_many_years_in_exclude_mode() -> None:
 
 def test_evaluate_stale() -> None:
     assert evaluate(make_posting(posted_at=NOW - timedelta(days=3)), context()).tier == "stale"
+
+
+# --- M4: applicants and locations known only after enrichment -------------------------
+
+
+def test_evaluate_scores_a_known_applicant_count() -> None:
+    plain = evaluate(make_posting(), context())
+    crowded = evaluate(
+        make_posting(applicants=ApplicantCount("Over 200 applicants", 200, None)), context()
+    )
+    early = evaluate(
+        make_posting(applicants=ApplicantCount("Be among the first 25 applicants", None, 25)),
+        context(applicant_cap=100),
+    )
+    assert plain.breakdown is not None
+    assert plain.breakdown["applicants"] is None
+    assert crowded.breakdown is not None
+    assert crowded.breakdown["applicants"] == 0.0
+    assert early.breakdown is not None
+    assert early.breakdown["applicants"] == pytest.approx(0.1 * 0.75)
+    assert early.score == pytest.approx((plain.score or 0) + 0.075)
+
+
+STRICT_LOCATIONS = dataclasses.replace(
+    RULES, locations=LocationRules(include=compiled(r"Seattle"), unknown_passes=False)
+)
+
+
+def test_prescreen_leaves_a_missing_location_for_after_enrichment() -> None:
+    """Workday's "2 Locations" means the places come with the detail call."""
+    assert prescreen(make_posting(locations=()), context(rules=STRICT_LOCATIONS)) is None
+
+
+def test_evaluate_judges_a_location_still_missing_after_enrichment() -> None:
+    decision = evaluate(make_posting(locations=()), context(rules=STRICT_LOCATIONS))
+    assert decision.tier == "filtered"
+    assert "no location" in decision.reason
+
+
+def test_evaluate_judges_locations_that_enrichment_supplied() -> None:
+    near = evaluate(make_posting(locations=("Seattle, WA",)), context(rules=STRICT_LOCATIONS))
+    far = evaluate(make_posting(locations=("Austin, TX",)), context(rules=STRICT_LOCATIONS))
+    assert near.tier in ("instant", "digest")
+    assert far.tier == "filtered"

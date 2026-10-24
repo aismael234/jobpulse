@@ -7,6 +7,7 @@ requires-python = ">=3.12"
 authors = [{ name = "aismael234" }]
 dependencies = [
     "alembic>=1.14",
+    "anthropic>=1.15,<2",
     "apscheduler>=3.11,<4",
     "fastapi==0.150.0",
     "httpx>=0.28,<1",
@@ -96,8 +97,3 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 addopts = ["-ra", "--strict-markers", "--strict-config", "--disable-socket", "--allow-unix-socket"]
 markers = ["live: hits the real network; skipped unless JOBPULSE_LIVE=1"]
-filterwarnings = [
-    # Starlette 1.9's TestClient prefers the new httpx2 package and warns when it falls back to
-    # httpx, which still works. See CLAUDE.md before Starlette drops the fallback.
-    "ignore:Using `httpx` with `starlette.testclient` is deprecated:UserWarning",
-]

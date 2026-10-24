@@ -5,6 +5,7 @@ such as ``watchlist[3].ats``, so a typo is quick to find.
 """
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any, Literal, Self
@@ -19,6 +20,7 @@ from pydantic import (
     Field,
     SecretStr,
     ValidationError,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
@@ -26,6 +28,8 @@ from pydantic_core import ErrorDetails, PydanticCustomError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from jobpulse.core import filters as core_filters
+from jobpulse.core.assessment import Level
+from jobpulse.core.atsurls import normalize_workday_token
 from jobpulse.core.dedupe import normalize_company
 from jobpulse.core.locations import DEFAULT_SHORT_LABELS, merge_aliases
 from jobpulse.core.scoring import Weights
@@ -44,7 +48,13 @@ NTFY_TOPIC_PATTERN = re.compile(r"[A-Za-z0-9_-]{24,64}")
 EMAIL_PATTERN = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
 TIME_OF_DAY_PATTERN = re.compile(r"([01]\d|2[0-3]):[0-5]\d")
 SLUG_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]*$"
-BOARD_REF_PATTERN = re.compile(r"(greenhouse|lever|ashby|workday)/[A-Za-z0-9][A-Za-z0-9._-]*")
+BOARD_REF_PATTERN = re.compile(
+    r"(greenhouse|lever|ashby)/[A-Za-z0-9][A-Za-z0-9._-]*"
+    r"|workday/[A-Za-z0-9][A-Za-z0-9-]*\.wd\d{1,3}/[A-Za-z0-9][A-Za-z0-9._-]*",
+    re.IGNORECASE,
+)
+MAX_KEYWORDS = 20
+MAX_KEYWORD_CHARS = 100
 
 DEFAULT_HOST_LIMITS = {
     "boards-api.greenhouse.io": 4,
@@ -64,6 +74,7 @@ AtsType = Literal["greenhouse", "lever", "ashby", "workday"]
 Region = Literal["us", "eu"]
 NotifyChannel = Literal["ntfy", "discord"]
 SearchSite = Literal["indeed", "linkedin"]
+LlmEffort = Literal["low", "medium", "high", "xhigh", "max"]
 
 
 @dataclass(frozen=True)
@@ -109,10 +120,29 @@ def _check_regex(pattern: str) -> str:
 def _check_board_ref(value: str) -> str:
     if not BOARD_REF_PATTERN.fullmatch(value.strip()):
         raise ValueError(
-            f"{value!r} is not ats/token, e.g. greenhouse/stripe "
+            f"{value!r} is not ats/token, e.g. greenhouse/stripe or workday/nvidia.wd5/External "
             "(ats is greenhouse, lever, ashby or workday)"
         )
     return value.strip()
+
+
+def clean_keywords(values: Iterable[str]) -> list[str]:
+    """Workday search keywords: whitespace collapsed, blanks and repeats (in any case) dropped.
+    Raises ``ValueError`` for a keyword over ``MAX_KEYWORD_CHARS`` or more than
+    ``MAX_KEYWORDS`` of them."""
+    keywords: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        keyword = " ".join(value.split())
+        if not keyword or keyword.casefold() in seen:
+            continue
+        if len(keyword) > MAX_KEYWORD_CHARS:
+            raise ValueError(f"keywords must be at most {MAX_KEYWORD_CHARS} characters each")
+        seen.add(keyword.casefold())
+        keywords.append(keyword)
+    if len(keywords) > MAX_KEYWORDS:
+        raise ValueError(f"at most {MAX_KEYWORDS} keywords")
+    return keywords
 
 
 def _check_company_name(value: str) -> str:
@@ -243,11 +273,13 @@ class ScoringWeights(_Model):
     stack: float = Field(default=0.25, ge=0)
     level_mismatch: float = Field(default=0.50, ge=0)
     applicants: float = Field(default=0.10, ge=0)
+    llm: float = Field(default=0.15, ge=0, le=1)
 
 
 class ScoringConfig(_Model):
     weights: ScoringWeights = ScoringWeights()
     priority_cap: int = Field(default=10, ge=1)
+    applicant_cap: int = Field(default=200, ge=1)
     instant_threshold: float = 0.55
 
 
@@ -279,10 +311,41 @@ class NotifyConfig(_Model):
 class WatchlistEntry(_Model):
     name: str = Field(min_length=1)
     ats: AtsType
-    token: Slug
+    token: str = Field(min_length=1, max_length=200)
     region: Region = "us"
     priority: int = Field(default=0, ge=0)
     active: bool = True
+    keywords: list[str] = []  # Workday only: each one is searched (searchText)
+
+    @field_validator("token")
+    @classmethod
+    def _token_fits_the_ats(cls, value: str, info: ValidationInfo) -> str:
+        """A Workday board is ``tenant.wdN/site`` (its URL works too); the others are slugs."""
+        value = value.strip()
+        if info.data.get("ats") == "workday":
+            token = normalize_workday_token(value)
+            if token is None:
+                raise ValueError(
+                    f"{value!r} isn't a Workday board: use tenant.wdN/site, e.g. "
+                    "nvidia.wd5/NVIDIAExternalCareerSite, or paste the board's URL"
+                )
+            return token
+        if not re.fullmatch(SLUG_PATTERN, value):
+            raise ValueError(
+                f"{value!r} isn't a board token: letters, digits, '.', '_' and '-' only"
+            )
+        return value
+
+    @field_validator("keywords")
+    @classmethod
+    def _keywords_for_workday(cls, value: list[str], info: ValidationInfo) -> list[str]:
+        if not value:
+            return value
+        if info.data.get("ats") != "workday":
+            raise ValueError("keywords apply to Workday boards only (ats: workday)")
+        if any(not keyword.strip() for keyword in value):
+            raise ValueError("keywords must not be blank")
+        return clean_keywords(value)
 
 
 class SearchEntry(_Model):
@@ -302,6 +365,8 @@ class LinkedInPacing(_Model):
     delay_min_seconds: float = Field(default=4.0, ge=0)
     delay_max_seconds: float = Field(default=8.0, ge=0)
     cooldown_minutes: float = Field(default=30.0, ge=0)
+    job_pages: bool = True
+    max_job_pages_per_hour: int = Field(default=40, ge=1, le=1000)
 
     @model_validator(mode="after")
     def _ordered(self) -> Self:
@@ -321,6 +386,30 @@ class SimplifyConfig(_Model):
         if not value.startswith("https://"):
             raise ValueError("must be an https:// URL")
         return value
+
+
+class WorkdayConfig(_Model):
+    max_pages: int = Field(default=25, ge=1, le=100)
+
+
+class LlmConfig(_Model):
+    enabled: bool = False
+    provider: Literal["anthropic"] = "anthropic"
+    model: str = Field(default="claude-opus-5-5", min_length=1)
+    effort: LlmEffort = "low"
+    resume_path: Path | None = None  # relative to config.yaml
+    band: float = Field(default=0.10, gt=0, le=1)
+    wanted_levels: list[Level] = []
+    max_calls_per_day: int = Field(default=25, ge=1, le=1000)
+
+    @model_validator(mode="after")
+    def _resume_when_enabled(self) -> Self:
+        if self.enabled and self.resume_path is None:
+            raise ValueError(
+                "resume_path is required when the LLM layer is enabled: a plain-text resume, "
+                "relative to config.yaml"
+            )
+        return self
 
 
 class DiscoveryConfig(_Model):
@@ -367,12 +456,14 @@ class AppConfig(_Model):
     watchlist: list[WatchlistEntry] = []
     searches: list[SearchEntry] = []
     linkedin: LinkedInPacing = LinkedInPacing()
+    workday: WorkdayConfig = WorkdayConfig()
     simplify: SimplifyConfig = SimplifyConfig()
     discovery: DiscoveryConfig = DiscoveryConfig()
     blocklist: BlocklistConfig = BlocklistConfig()
     health: HealthConfig = HealthConfig()
     retention: RetentionConfig = RetentionConfig()
     dashboard: DashboardConfig = DashboardConfig()
+    llm: LlmConfig = LlmConfig()
 
     @field_validator("contact_email")
     @classmethod
@@ -506,10 +597,48 @@ def load_config(path: Path) -> AppConfig:
             path, [FieldError("", "the top level must be a mapping of section names to values")]
         )
     try:
-        return AppConfig.model_validate(data)
+        config = AppConfig.model_validate(data)
     except ValidationError as exc:
         errors = [FieldError(_format_location(e["loc"]), _describe(e)) for e in exc.errors()]
         raise ConfigError(path, errors) from None
+    return _with_resume_beside(config, path)
+
+
+def _with_resume_beside(config: AppConfig, path: Path) -> AppConfig:
+    """``llm.resume_path`` relative to the config file; when the layer is on, it must be a
+    readable, non-empty text file."""
+    resume = config.llm.resume_path
+    if resume is None:
+        return config
+    if not resume.is_absolute():
+        resume = path.parent / resume
+        config = config.model_copy(
+            update={"llm": config.llm.model_copy(update={"resume_path": resume})}
+        )
+    if config.llm.enabled and (problem := _resume_problem(resume)):
+        raise ConfigError(path, [FieldError("llm.resume_path", problem)])
+    return config
+
+
+def _resume_problem(path: Path) -> str | None:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return f"file not found: {path}"
+    except (OSError, UnicodeDecodeError) as exc:
+        return f"can't be read as UTF-8 text ({type(exc).__name__}): {path}"
+    return None if text.strip() else f"the file is empty: {path}"
+
+
+def read_resume(config: AppConfig) -> str:
+    """The resume the LLM layer compares postings with (``llm.resume_path``)."""
+    path = config.llm.resume_path
+    if path is None:
+        raise ConfigError(DEFAULT_CONFIG_PATH, [FieldError("llm.resume_path", "not set")])
+    problem = _resume_problem(path)
+    if problem:
+        raise ConfigError(path, [FieldError("llm.resume_path", problem)])
+    return path.read_text(encoding="utf-8")
 
 
 def load_settings(env_file: Path | None) -> Settings:
@@ -528,13 +657,29 @@ def resolve_config_path(cli_value: Path | None, settings: Settings) -> Path:
     return cli_value or settings.jobpulse_config or DEFAULT_CONFIG_PATH
 
 
-def require_secrets(config: AppConfig, settings: Settings, *, env_file: Path) -> None:
-    """Check the secrets that the enabled notification channels need.
+def require_secrets(
+    config: AppConfig, settings: Settings, *, env_file: Path, llm: bool = False
+) -> None:
+    """Check the secrets that the enabled notification channels need, and with ``llm`` the
+    LLM layer's key when the layer is on (commands that can call it: the worker and a live
+    poll).
 
     Only commands that send call this; dry runs and ``config check`` without channels don't.
     Error messages never echo the secret values.
     """
     errors: list[FieldError] = []
+    if (
+        llm
+        and config.llm.enabled
+        and not (settings.llm_api_key and settings.llm_api_key.get_secret_value())
+    ):
+        errors.append(
+            FieldError(
+                "LLM_API_KEY",
+                "not set, but llm.enabled is true; put your Anthropic API key in .env "
+                "(see .env.example)",
+            )
+        )
     if "ntfy" in config.notify.channels:
         topic = settings.ntfy_topic.get_secret_value() if settings.ntfy_topic else ""
         if not topic:
@@ -613,12 +758,6 @@ def config_warnings(config: AppConfig) -> list[str]:
             warnings.append(
                 f"{field} still contains the placeholder {PLACEHOLDER!r}; it matches nothing "
                 "until you replace it"
-            )
-    for index, entry in enumerate(config.watchlist):
-        if entry.ats == "workday":
-            warnings.append(
-                f"watchlist[{index}] ({entry.name}) uses ats 'workday', which this build can't "
-                "poll yet (Milestone 4)"
             )
     for index, search in enumerate(config.searches):
         if search.site == "linkedin" and search.is_remote:
@@ -712,6 +851,7 @@ def scoring_weights(config: AppConfig) -> Weights:
         stack=weights.stack,
         level_mismatch=weights.level_mismatch,
         applicants=weights.applicants,
+        llm=weights.llm,
     )
 
 

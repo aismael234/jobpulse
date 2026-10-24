@@ -17,14 +17,22 @@ from fastapi.types import DecoratedCallable
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from jobpulse.config import SLUG_PATTERN
-from jobpulse.core.atsurls import AtsRef, detect_ats_url, gh_jid
+from jobpulse.config import SLUG_PATTERN, AppConfig, clean_keywords
+from jobpulse.core.atsurls import (
+    AtsRef,
+    detect_ats_url,
+    detect_workday_url,
+    gh_jid,
+    normalize_workday_token,
+    workday_board,
+)
 from jobpulse.db import dashboard, repo
 from jobpulse.db.dashboard import STATUSES, PostingQuery
 from jobpulse.db.session import session_scope
 from jobpulse.db.tables import Company, PostingRow
 from jobpulse.runtime import KNOWN_SOURCES
 from jobpulse.sources.ats_detect import Validation, is_fetchable_url
+from jobpulse.sources.workday import PAGE_LIMIT
 from jobpulse.web.security import verify_csrf
 from jobpulse.web.views import link
 
@@ -39,8 +47,8 @@ def page(path: str, **options: Any) -> Callable[[DecoratedCallable], DecoratedCa
 
 
 VIEWS = {status.lower(): status for status in STATUSES}
-ADDABLE_ATS = ("greenhouse", "lever", "ashby")
-ATS_NAMES = {"greenhouse": "Greenhouse", "lever": "Lever", "ashby": "Ashby"}
+ADDABLE_ATS = ("greenhouse", "lever", "ashby", "workday")
+ATS_NAMES = {"greenhouse": "Greenhouse", "lever": "Lever", "ashby": "Ashby", "workday": "Workday"}
 MAX_PRIORITY = 1000
 _SLUG = re.compile(SLUG_PATTERN)
 
@@ -283,13 +291,8 @@ async def _detect(request: Request, url: str) -> Detection:
     state = _state(request)
     if not url:
         return Detection(url, "Paste the URL of a careers page, job board or job posting.")
-    ref = detect_ats_url(url)
+    ref = detect_ats_url(url) or detect_workday_url(url)
     if ref is None:
-        host = (urlsplit(url).hostname or "").lower() if "://" in url else ""
-        if host.endswith(".myworkdayjobs.com"):
-            return Detection(
-                url, "Workday boards aren't supported in this build (Milestone 4 was skipped)."
-            )
         if not is_fetchable_url(url):
             return Detection(url, "That isn't a public http(s) URL, so it wasn't fetched.")
         refs = await state.detector.refs_in_page(url)
@@ -298,8 +301,8 @@ async def _detect(request: Request, url: str) -> Detection:
         if not refs:
             return Detection(
                 url,
-                "No Greenhouse, Lever or Ashby board found on that page. Workday, iCIMS and "
-                "other systems aren't supported.",
+                "No Greenhouse, Lever or Ashby board, and no Workday site, found on that page. "
+                "iCIMS and other systems aren't supported.",
             )
         ref = next((r for r in refs if r.ats == "greenhouse"), refs[0]) if gh_jid(url) else refs[0]
     board = f"{ref.ats}/{ref.token}"
@@ -312,20 +315,44 @@ async def _detect(request: Request, url: str) -> Detection:
     validation = await state.detector.validate(ref)
     if not validation.ok:
         return Detection(url, f"{board} couldn't be validated: {validation.error}", ref=ref)
-    name = validation.name or ref.token
+    name = validation.name or _default_name(ref)
     if state.blocklist.blocks_company(name):
         return Detection(
             url, f"{name} is on your blocklist (blocklist.companies in config.yaml).", ref=ref
         )
-    limit = state.config.discovery.max_board_jobs
-    warning = (
-        f"{validation.job_count} open jobs is more than discovery adds on its own "
-        f"({limit}); every poll downloads all of them."
-        if limit is not None and validation.job_count > limit
-        else None
-    )
     return Detection(
-        url, ref=validation.ref, validation=validation, name=name, tone="success", warning=warning
+        url,
+        ref=validation.ref,
+        validation=validation,
+        name=name,
+        tone="success",
+        warning=_size_warning(state.config, ref, validation.job_count),
+    )
+
+
+def _default_name(ref: AtsRef) -> str:
+    """What the name field starts with when the board doesn't say: a Workday tenant, else
+    the token."""
+    board = workday_board(ref.token) if ref.ats == "workday" else None
+    return board.tenant if board is not None else ref.token
+
+
+def _size_warning(config: AppConfig, ref: AtsRef, job_count: int) -> str | None:
+    if ref.ats == "workday":
+        cap = config.workday.max_pages * PAGE_LIMIT
+        if job_count <= cap:
+            return None
+        return (
+            f"{job_count} open jobs is more than one poll reads without keywords ({cap}: "
+            f"workday.max_pages pages of {PAGE_LIMIT}): add keywords, and each one is searched "
+            "instead."
+        )
+    limit = config.discovery.max_board_jobs
+    if limit is None or job_count <= limit:
+        return None
+    return (
+        f"{job_count} open jobs is more than discovery adds on its own ({limit}); every poll "
+        "downloads all of them."
     )
 
 
@@ -356,12 +383,27 @@ def add_board(
     name: Annotated[str, Form()] = "",
     priority: Annotated[str, Form()] = "0",
     url: Annotated[str, Form()] = "",
+    keywords: Annotated[str, Form()] = "",
 ) -> Response:
     state = _state(request)
     token, name = token.strip(), " ".join(name.split())
+    params: dict[str, Any] | None = None
     if ats not in ADDABLE_ATS:
-        raise HTTPException(status_code=400, detail="ats must be greenhouse, lever or ashby")
-    if not _SLUG.fullmatch(token) or len(token) > 200:
+        raise HTTPException(
+            status_code=400, detail="ats must be greenhouse, lever, ashby or workday"
+        )
+    if ats == "workday":
+        token = normalize_workday_token(token) or ""
+        if not token:
+            raise HTTPException(
+                status_code=400, detail="that isn't a Workday board (tenant.wdN/site)"
+            )
+        try:
+            words = clean_keywords(keywords.split(","))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        params = {"keywords": words} if words else None
+    elif not _SLUG.fullmatch(token) or len(token) > 200:
         raise HTTPException(status_code=400, detail=f"{token!r} isn't a board token")
     if region not in ("us", "eu"):
         raise HTTPException(status_code=400, detail="region must be us or eu")
@@ -384,16 +426,22 @@ def add_board(
             priority=value,
             discovered_from=source_url,
             now=state.clock(),
+            params=params,
         )
         companies = _companies(request, session) if added else None
     board = f"{ats}/{token}"
     if not _htmx(request):
         return RedirectResponse(f"/watchlist?added={board}" if added else "/watchlist", 303)
+    searching = (
+        f", searching for {', '.join(params['keywords'])}"
+        if params and params.get("keywords")
+        else ""
+    )
     detection = (
         Detection(
             source_url or "",
-            f"Added {name} ({board}) with priority {value}. Its first poll stores the jobs it "
-            "has now without notifying you; new ones after that reach you as usual.",
+            f"Added {name} ({board}) with priority {value}{searching}. Its first poll stores the "
+            "jobs it has now without notifying you; new ones after that reach you as usual.",
             "success",
         )
         if added

@@ -2,9 +2,11 @@ from datetime import timedelta
 
 import pytest
 
+from jobpulse.core.applicants import ApplicantCount
 from jobpulse.core.scoring import (
     ScoreInputs,
     Weights,
+    applicant_component,
     freshness_component,
     priority_component,
     score,
@@ -65,3 +67,23 @@ def test_freshness_component(age_hours: float, expected: float) -> None:
 @pytest.mark.parametrize(("priority", "expected"), [(0, 0.0), (5, 0.5), (10, 1.0), (20, 1.0)])
 def test_priority_component(priority: int, expected: float) -> None:
     assert priority_component(priority, 10) == pytest.approx(expected)
+
+
+@pytest.mark.parametrize(
+    ("count", "expected"),
+    [
+        (ApplicantCount("Be among the first 25 applicants", None, 25), 0.875),
+        (ApplicantCount("1 applicant", 1, 1), 0.995),
+        (ApplicantCount("87 applicants", 87, 87), 0.565),
+        (ApplicantCount("Over 100 applicants", 100, None), 0.5),
+        (ApplicantCount("Over 200 applicants", 200, None), 0.0),
+        (ApplicantCount("1,204 applicants", 1204, 1204), 0.0),
+    ],
+)
+def test_applicant_component_falls_with_the_count(count: ApplicantCount, expected: float) -> None:
+    """A range counts from its known end: "first 25" from 25, "Over 100" from 100."""
+    assert applicant_component(count, 200) == pytest.approx(expected)
+
+
+def test_applicant_component_scales_against_the_cap() -> None:
+    assert applicant_component(ApplicantCount("50 applicants", 50, 50), 100) == pytest.approx(0.5)

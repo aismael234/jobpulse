@@ -73,8 +73,10 @@ scoring:
     title: 0.30
     stack: 0.25
     level_mismatch: 0.50        # subtracted
-    applicants: 0.10            # only when known
+    applicants: 0.10            # only when known (a LinkedIn job page's applicant count)
+    llm: 0.15                   # only with the LLM layer on: the most it adds or subtracts
   priority_cap: 10              # watchlist priority is scaled to 0..1 against this
+  applicant_cap: 200            # applicants scale against this: none scores 1, this many or more 0
   instant_threshold: 0.55       # at or above: instant push; below (but passing filters): digest
 
 notify:
@@ -90,6 +92,10 @@ notify:
 # EXAMPLES: replace with the companies you care about. Tokens verified on 2026-10-23.
 # Greenhouse: job-boards.greenhouse.io/<token> · Lever: jobs.lever.co/<token>
 # (region: eu for jobs.eu.lever.co) · Ashby: jobs.ashbyhq.com/<token>
+# Workday: <tenant>.wd<N>.myworkdayjobs.com/<site> becomes token <tenant>.wd<N>/<site> (the URL
+# works as the token too). Give big tenants keywords: each one is searched, and only the matches
+# are polled (they never close jobs); without keywords every job is paged through. For example:
+#  - {name: Workday, ats: workday, token: workday.wd5/Workday, priority: 2, keywords: [backend, platform]}
 watchlist:
   - {name: Stripe, ats: greenhouse, token: stripe, priority: 5}
   - {name: Discord, ats: greenhouse, token: discord, priority: 3}
@@ -114,7 +120,13 @@ searches: []
 linkedin:
   delay_min_seconds: 4          # pause between LinkedIn requests, chosen at random in this range
   delay_max_seconds: 8
-  cooldown_minutes: 30          # after a 429, LinkedIn searches wait this long
+  cooldown_minutes: 30          # after a 429, LinkedIn searches and job pages wait this long
+  job_pages: true               # read each new LinkedIn match's public page: description, applicant count
+  max_job_pages_per_hour: 40
+
+# Workday boards: a search reads pages of 20 jobs (Workday's own limit), at most this many pages.
+workday:
+  max_pages: 25
 
 # The SimplifyJobs New-Grad list. Each fetch sends the stored ETag, so an unchanged feed costs
 # one tiny request. Its first successful fetch is a silent baseline.
@@ -160,3 +172,16 @@ retention:
 dashboard:
   host: 127.0.0.1               # keep it local; reach it from your phone through Tailscale
   port: 8000
+
+# An optional second opinion from Claude on postings whose score is within `band` of
+# instant_threshold: the level the role hires for, its backend focus and your resume's fit move
+# the score by up to scoring.weights.llm. The postings and your resume go to Anthropic's API, so
+# it stays off until you turn it on. Needs LLM_API_KEY in .env.
+llm:
+  enabled: false
+  model: claude-opus-5-5
+  effort: low                   # low, medium, high, xhigh or max: more thinking costs more
+  resume_path: null             # a plain-text resume, relative to this file; keep it out of git
+  band: 0.10
+  wanted_levels: []             # e.g. [entry, mid]; from intern, entry, mid, senior, staff, principal, manager
+  max_calls_per_day: 25         # in any 24 hours, failed calls included; answers are cached per posting

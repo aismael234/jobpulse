@@ -3,7 +3,8 @@
 Detection tries the URL itself first (every Greenhouse, Lever and Ashby form, see
 ``core.atsurls``), then fetches the page once and looks for board links or the Greenhouse
 embed script. Validation calls the board's list endpoint once; a Lever board that 404s on
-the US host is tried once more on the EU host.
+the US host is tried once more on the EU host, and a Workday board answers the first page of
+its job search.
 """
 
 import ipaddress
@@ -14,13 +15,20 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from jobpulse.core.atsurls import AtsRef, detect_ats_url, find_ats_refs_in_html, gh_jid
+from jobpulse.core.atsurls import (
+    AtsRef,
+    detect_ats_url,
+    find_ats_refs_in_html,
+    gh_jid,
+    workday_board,
+)
 from jobpulse.core.models import ErrorKind
 from jobpulse.httpclient import HttpClient
 from jobpulse.sources.ashby import AshbyAdapter
 from jobpulse.sources.base import FetchError, HttpAdapter
 from jobpulse.sources.greenhouse import GreenhouseAdapter
 from jobpulse.sources.lever import LeverAdapter
+from jobpulse.sources.workday import WorkdayAdapter
 
 MAX_PAGE_BYTES = 2_000_000
 _PRIVATE_SUFFIXES = (".localhost", ".local", ".internal", ".lan", ".home.arpa")
@@ -108,6 +116,8 @@ class AtsDetector:
 
     async def validate(self, ref: AtsRef) -> Validation:
         board = AtsRef(ref.ats, ref.token, None, ref.region)
+        if ref.ats == "workday":
+            return await self._check_workday(board)
         if ref.ats == "greenhouse":
             validation, _ = await self._check(
                 board, GreenhouseAdapter.list_url(ref.token), _jobs, _greenhouse_name
@@ -126,6 +136,24 @@ class AtsDetector:
             return validation
         validation, _ = await self._check(board, AshbyAdapter.list_url(ref.token), _jobs)
         return validation
+
+    async def _check_workday(self, ref: AtsRef) -> Validation:
+        """The first page of the board's job search: Workday counts its jobs there."""
+        board = workday_board(ref.token)
+        if board is None:
+            return Validation(ref, ok=False, error="not a Workday board", error_kind="parse")
+        try:
+            payload = await self._json.post_json(
+                WorkdayAdapter.jobs_url(board), WorkdayAdapter.search_body("", 0)
+            )
+        except FetchError as exc:
+            return Validation(ref, ok=False, error=exc.message, error_kind=exc.kind)
+        jobs = payload.get("jobPostings") if isinstance(payload, dict) else None
+        if not isinstance(jobs, list):
+            return Validation(ref, ok=False, error="unexpected payload", error_kind="parse")
+        total = payload.get("total")
+        count = total if isinstance(total, int) and total >= len(jobs) else len(jobs)
+        return Validation(ref, ok=True, job_count=count)
 
     async def _check(
         self,

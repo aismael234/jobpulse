@@ -1,10 +1,10 @@
 # jobpulse progress
 
-Source of truth for what is built, what was decided, and what is left. The approved plan (2026-10-23) covers M0–M3; M4 is skipped except the pure parsers section 7 requires. Work stops after each milestone for approval.
+Source of truth for what is built, what was decided, and what is left. The approved plan (2026-10-23) covered M0–M3 and skipped M4; on 2026-10-24 you asked for M4 as well. Work stops after each milestone for approval.
 
 ## Decisions
 
-- **Scope:** M0–M3. From M4 only the pure parsers required by section 7: Workday `postedOn` (M1) and the LinkedIn applicant line (M2). No LinkedIn guest fetch, Workday adapter or LLM layer.
+- **Scope:** M0–M4. M4 was skipped on 2026-10-23 (only its two pure parsers were built, in M1 and M2); you asked for the rest on 2026-10-24: LinkedIn job pages, the Workday adapter and the LLM layer.
 - **Day-precision freshness:** effective time = min(end of the posted day in UTC, `first_seen_at`). Taken literally, the spec's "later of" would make every newly seen day-precision job fresh. A job posted today always passes; "Posted 30+ Days Ago" is still screened out.
 - **Sync SQLAlchemy, async network:** every DB phase is a synchronous block with no `await` inside, so no transaction is held across network I/O.
 - **Dev contact email:** a random `jobpulse-dev-<hex>@example.com` in the gitignored `config.yaml`; `example.com` is reserved, so it can't reach a real person.
@@ -35,12 +35,22 @@ Source of truth for what is built, what was decided, and what is left. The appro
 - **Digest link and schedule:** the link is `notify.dashboard_url`, else the dashboard's local address. Times are local times in `timezone`, computed with zoneinfo (DST-safe) and run as self-rescheduling one-shot jobs like the polls; `digest_times: []` turns the digest off.
 - **Watchdog:** every interval job must finish a run within 3× the longest interval plus jitter (4.5 h with the defaults). It checks each job, not just "any job", so one hung source is caught too, and it uses the monotonic clock, so a machine waking from sleep doesn't look stalled. The digest isn't watched. The worker exits with code 1 and Docker restarts it.
 - **Dashboard security:** basic auth when both `DASHBOARD_USER` and `DASHBOARD_PASSWORD` are set (only one is an error); `/healthz` is exempt and says only "ok". The CSRF token is per browser, in an `HttpOnly`, `SameSite=Strict` cookie, and every POST sends it back as `X-CSRF-Token` (HTMX) or a form field; cross-site POSTs are refused by `Sec-Fetch-Site`. Strict CSP (no inline scripts or styles), `no-store` on pages, no API docs, secrets masked in every rendered value, and links to source URLs only when they are http(s).
-- **Watchlist paste:** the URL first, then the page once (public hosts only; Workday gets a clear message); one validation call; a board already stored isn't validated again; blocked boards and companies are refused. A board bigger than `discovery.max_board_jobs` can still be added by hand, with a warning. Added boards are `dashboard`-owned with the priority you pick; priority and pause can be changed only for companies that aren't in config.yaml, because each poll applies config.yaml again.
-- **FastAPI 0.150.0, pinned:** the newest release before `exclude-newer` (FastAPI shipped 40+ releases since September). Starlette 1.9's TestClient prefers the new `httpx2` package; its fallback warning is filtered rather than adding a five-month-old dependency.
+- **Watchlist paste:** the URL first, then the page once (public hosts only); one validation call (a Workday board answers the first page of its search, and the form adds a keywords field); a board already stored isn't validated again; blocked boards and companies are refused. A board bigger than `discovery.max_board_jobs` can still be added by hand, with a warning. Added boards are `dashboard`-owned with the priority you pick; priority and pause can be changed only for companies that aren't in config.yaml, because each poll applies config.yaml again.
+- **FastAPI 0.150.0, pinned:** the newest release before `exclude-newer` (FastAPI shipped 40+ releases since September). Starlette 1.9's TestClient prefers the new `httpx2` package; since M4 brought `httpx2` (through `anthropic`) it uses it, and the filter for its fallback warning is gone.
 - **htmx 2.0.11 vendored** from the npm tarball, its sha512 checked against the registry; a test pins the file's sha256.
 - **Health page "24 h fetched"** sums `fetched_count` over the window, as the spec asks, next to the number of runs.
 - **Run history retention (your request, 2026-10-24):** `retention.runs_days` (30; `null` keeps everything) must cover `health.busy_window_days` while health checks are on. The poller deletes older runs at most once a day per process and never in a dry run. A target that has failed for longer than the window shows "never" as its last success.
 - **HEAD (your request, 2026-10-24):** the dashboard's GET pages answer HEAD too (uvicorn sends no body); static files already did.
+- **LinkedIn job pages (M4):** `jobs-guest/jobs/api/jobPosting/{id}` for LinkedIn postings that pass the prescreen (never in a baseline, never for merged copies), one at a time through the gate the JobSpy searches use (4–8 s), one attempt each. A 429, 999, 403 or a redirect to the sign-in wall starts the shared cool-down (30 min), which also ends job pages for the rest of the cycle; other failures leave the posting as it was. At most `linkedin.max_job_pages_per_hour` (40). The applicant line is the first applicant phrase in the page's text; the description is the description section plus its criteria list ("Seniority level: Mid-Senior level").
+- **No cookies:** the HTTP client keeps none (a cookie policy that allows no domain), so no request carries a session. LinkedIn's guest page sets several.
+- **Applicant signal:** `1 - count / scoring.applicant_cap` (200), a range counted from its known end: "Be among the first 25" scores 0.875, "Over 200" scores 0.
+- **Workday tokens and ids:** a board is `tenant.wdN/site` (config and the paste box also take its URL). A posting's id is `tenant.wdn/site/jobpostingid`, lowercased, because Workday ids are unique only within a site. Job URLs in every form canonicalize to `workday:{token}:{id}`, so feed and job-board copies merge onto a watched Workday row, and a new Workday board takes over earlier copies.
+- **Workday reads:** `limit` fixed at 20 and `total` read from the first page. A board with `keywords` is searched once per keyword and never closes anything (the spec: complete only when fully paged). A board without keywords is complete only when every page was read and the count reaches `total`, so a listing that changes while it's paged pauses closures. `workday.max_pages` (25) caps each search, with a warning to add keywords. An empty first page while `total` > 0 is a failure. The detail call (survivors only) brings the description, `startDate` (day precision), the real locations behind "2 Locations" and the remote type.
+- **Workday keywords** live in `companies.params`, for config entries and dashboard additions alike. Changed keywords start a new silent baseline, like a changed search.
+- **Discovery leaves Workday alone:** tenants run to thousands of jobs and need keywords, so only you add Workday boards. Feed and job-board copies of their jobs still merge by canonical key.
+- **Missing locations:** the prescreen judges locations only when the list has some; a posting still without one after its detail call is judged in `evaluate` (`unknown_location_passes`).
+- **LLM provider:** Anthropic's Python SDK, `anthropic>=1.15,<2` (1.15.0 is the newest release before `exclude-newer`; 2.0 shipped on 2026-10-21). Default `claude-opus-5-5` at `effort: low`. One structured-output request per posting (`beta.messages.create` with `Verdict`'s JSON schema), with `stop_reason` checked before parsing, so a refusal or an answer cut off at `max_tokens` is reported as such. Models that support it send `fallbacks: "default"` (beta `server-side-fallback-2026-07-01`). The instructions and the resume are a cached prompt prefix. HTTP 400, 401, 403 and 404 stop the asking until a restart; the SDK retries 429, 5xx and network errors twice, then the failure is recorded.
+- **LLM scoring:** only instant or digest decisions within `llm.band` (0.10) of `instant_threshold`, closest first. Signal = mean(backend focus, fit), or 0 when the level is known and not in `llm.wanted_levels`; the score moves by `scoring.weights.llm`·(2·signal - 1), at most ±0.15, and nothing is filtered by it. Answers are cached per posting under a hash of the prompt version, model, effort, resume and posting text. `llm.max_calls_per_day` (25) counts every call in the last 24 h, failures included; dry runs never call. Descriptions are cut at 16,000 characters. `LLM_API_KEY` is required by the worker, a live poll and `config check` while the layer is on; `llm.resume_path` is relative to config.yaml and checked when the config loads.
 
 ## Deviations from the spec layout
 
@@ -53,6 +63,9 @@ Source of truth for what is built, what was decided, and what is left. The appro
 - Dependencies arrive with the milestone that needs them: JobSpy in M2, FastAPI/Jinja2 in M3. Dockerfile and compose arrive in M3.
 - M3 modules: `web/security.py` (basic auth, CSRF, headers), `web/views.py` (template filters), `db/dashboard.py` (dashboard read models), `core/pay.py` (pay summaries). No schema change in M3.
 - `jobpulse web` and `jobpulse digest` replace the M0 placeholders, so the M0 test that asserted the placeholders ("arrives in M3") was replaced by one that checks the real commands.
+- M4 modules: `sources/linkedin_gate.py` (pacing and cool-down shared by every LinkedIn request), `sources/linkedin_guest.py`, `sources/workday.py`, `core/assessment.py` (the LLM layer's pure scoring), `llm/base.py`, `llm/prompt.py`, `llm/claude.py`, `llm/scorer.py`; `core/text.texts_by_class`.
+- M4 schema (migration 0003): `companies.params` (Workday keywords), `llm_assessments`.
+- Two M3 expectations changed with M4: `test_urls_that_are_never_fetched` lost its Workday case (M3 asserted Workday wasn't supported; M4 validates Workday URLs, tested in `test_a_workday_board_is_validated_with_one_call_and_offered_with_keywords`), and `test_worker_jobs_follow_the_config` now expects `workday` in the watchlist job.
 
 ## M0 — Scaffold
 
@@ -118,9 +131,21 @@ Source of truth for what is built, what was decided, and what is left. The appro
 - [x] tests: 758 pass (154 new), 11 live skipped
 - [x] commit `feat(m3): …`
 
-## M4 — skipped (decision 2026-10-23)
+## M4 — LinkedIn job pages, Workday, LLM layer (your request, 2026-10-24)
 
-LinkedIn applicant enrichment, the Workday adapter and the LLM scoring layer are not built.
+- [x] VERIFY, read-only probes: Workday CXS (limit cap, `total` per page, sort order, case, hosts, errors, detail) and one LinkedIn guest job page (`num-applicants__caption`, description, criteria)
+- [x] dependency: `anthropic>=1.15,<2` (1.15.0, the newest before `exclude-newer`; it brings `httpx2`)
+- [x] schema (migration 0003): `companies.params` (Workday keywords), `llm_assessments` (the per-posting cache and the call log the daily cap counts)
+- [x] shared LinkedIn gate: one request at a time, a 4–8 s pause, a cool-down after a 429 that searches and job pages both respect; the HTTP client keeps no cookies
+- [x] `sources/linkedin_guest.py`: for LinkedIn postings that pass the prescreen, the public job page one at a time; description (with the criteria list) and applicant line from one request; a 429, 999, 403 or sign-in redirect stops job pages for the rest of the cycle and starts the cool-down; at most `linkedin.max_job_pages_per_hour`; JobSpy's `fetch_description` stays off
+- [x] applicants feed scoring (`scoring.applicant_cap`) and are stored as label/min/max
+- [x] `sources/workday.py`: `limit` hard-capped at 20, `total` read from the first page only, `searchText` per configured keyword (never complete, so no closures) or every page (complete only when the count reaches `total`), `workday.max_pages`, a suspicious empty first page is a failure, `postedOn` at day precision; detail call for survivors: description, `startDate`, real locations, remote type
+- [x] Workday everywhere else: config tokens (`tenant.wdN/site`, or the board URL), keywords per entry (a change resets the baseline), job URLs canonicalize to `workday:` keys so feed and job-board copies merge, the dashboard paste box detects, validates (one call) and adds Workday boards with keywords; discovery leaves Workday alone
+- [x] `llm/`: off by default; a provider interface with a Claude client (Anthropic SDK, structured output, refusal fallback); only rule survivors within `llm.band` of `instant_threshold`; level, backend focus and resume fit move the score by up to ±`scoring.weights.llm`; cached per posting; `llm.max_calls_per_day`; dry runs never call; `LLM_API_KEY` from `.env`
+- [x] tests first, run red: applicant pages, Workday paging (never `limit > 20`) and parsing, the LLM layer (off by default, the band only, cached per posting, the daily cap), config, migration, cycle integration, dashboard
+- [x] live smoke tests: a Workday board, a LinkedIn job page; VERIFY results in CLAUDE.md
+- [x] README, `config.example.yaml`, `.env.example`, CLAUDE.md
+- [x] `scripts/check.sh` green, commit `feat(m4): …`
 
 ## Log
 
@@ -183,4 +208,14 @@ LinkedIn applicant enrichment, the Workday adapter and the LLM scoring layer are
   - **Test-first:** 17 new tests failed on missing behavior (no `retention` section, no prune, 405 on HEAD); the static-file HEAD case already passed. Now 776 tests pass (11 live skipped).
   - GET pages are declared through `routes.page`, which registers GET and HEAD. HEAD still needs basic auth when it's on; `/healthz` stays exempt.
   - `retention.runs_days` (30) prunes `runs` once a day in the poller and reports it as a `housekeeping:` line in the cycle log.
-
+- **2026-10-24** — M4 done (your request: "Proceed with Milestone 4").
+  - **Probed first, read-only:** Workday CXS on NVIDIA, Salesforce, Workday, Intel and Microchip; one LinkedIn guest job page; the Simplify feed's Workday URL forms. Findings in CLAUDE.md.
+  - **Test-first:** against interface stubs, 196 new or changed tests failed: 132 on `NotImplementedError`, 64 on behavior not built yet (Workday tokens rejected by the slug rule, no Workday canonical keys, no LLM layer, no Workday in the watchlist job). Now 999 pass (224 new), 15 live skipped.
+  - **Mistakes in my new tests, fixed on the way:** respx passes a URL regex's named groups to side effects as keyword arguments; one stack keyword scores 0.125 with `stack_saturation` 2, not 0.25; "Posted 2 Days Ago" is about 38 h old at 14:00 under the day-precision rule, so the stale case uses 3 days; one LLM band posting had a Python description that took it out of the band.
+  - **Live:** `JOBPULSE_LIVE=1 uv run pytest -m live`: 15 passed (the 11 earlier, 3 Workday, 1 LinkedIn job page).
+  - **Real runs on scratch databases:** Workday's own board (keywords backend and platform: 386 jobs, because "platform" matches every description there) and NVIDIA (backend: 135) baselined, then polled again with 0 new. The recorded scenario reads its LinkedIn job page and scores "Be among the first 25 applicants" (+0.0875).
+  - **Checked in the built-in browser** on a scratch database: pasting a Salesforce Workday job URL found `salesforce.wd12/External_Career_Site` (1,578 jobs, with the keywords warning); adding it with two keywords stored them, and its next dry run read 131 matches instead of 1,578. No console errors.
+  - **httpx2:** `anthropic` 1.x depends on it and Starlette's TestClient switched to it; the suite passed unchanged, and the filter for the old fallback warning is gone.
+  - **Your running worker and dashboard** (started 11:27 from this checkout) still run M3 code, and `data/jobpulse.db` is untouched at migration 0002. The template changes use only fields and filters the running dashboard has.
+  - **Not done:** no real LLM call (`LLM_API_KEY` is empty in `.env`, and each call costs money); the Claude client's requests were checked against a mock transport. The Docker image wasn't rebuilt (that needs OrbStack).
+  - **Open:** `mypy tests` (not part of check.sh) reports three errors in older test files.

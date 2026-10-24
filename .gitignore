@@ -4,6 +4,7 @@
 !.env.example
 /config.yaml
 /data/
+/resume*.txt
 *.db
 *.db-wal
 *.db-shm

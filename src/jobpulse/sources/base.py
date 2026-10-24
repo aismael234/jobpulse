@@ -120,9 +120,23 @@ class HttpAdapter:
         accept: Collection[int] = (200,),
     ) -> httpx.Response:
         """GET, raising ``FetchError`` for a transport failure or a status not in ``accept``."""
+        return await self._send(
+            "GET", url, headers=headers, use_etag_cache=use_etag_cache, accept=accept
+        )
+
+    async def _send(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: Mapping[str, str] | None = None,
+        json: Any = None,
+        use_etag_cache: bool = False,
+        accept: Collection[int] = (200,),
+    ) -> httpx.Response:
         try:
             response = await self.http.request(
-                "GET", url, headers=headers, use_etag_cache=use_etag_cache
+                method, url, headers=headers, json=json, use_etag_cache=use_etag_cache
             )
         except httpx.TimeoutException as exc:
             raise FetchError("timeout", f"timed out after retries ({type(exc).__name__})") from None
@@ -150,3 +164,8 @@ class HttpAdapter:
     async def get_json(self, url: str, *, use_etag_cache: bool = False) -> Any:
         """GET and decode JSON, raising ``FetchError`` for anything but a readable 200."""
         return self.decode_json(await self.get_response(url, use_etag_cache=use_etag_cache))
+
+    async def post_json(self, url: str, payload: Any) -> Any:
+        """POST a JSON body and decode the JSON answer, raising ``FetchError`` like
+        ``get_json``."""
+        return self.decode_json(await self._send("POST", url, json=payload))

@@ -1,5 +1,6 @@
 """Async HTTP client: per-host concurrency limits, retries with full-jitter backoff that
-honors Retry-After, a descriptive User-Agent, and an opt-in ETag cache.
+honors Retry-After, a descriptive User-Agent, and an opt-in ETag cache. It keeps no cookies,
+so no request ever carries a session (LinkedIn's job pages included).
 
 ``request`` returns the final response whatever its status, so callers decide what an error
 means. It raises only when every attempt failed at the transport level (timeouts,
@@ -13,6 +14,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
+from http.cookiejar import CookieJar, DefaultCookiePolicy
 from typing import Any
 
 import httpx
@@ -108,6 +110,8 @@ class HttpClient:
             headers={"User-Agent": user_agent},
             transport=transport,
             follow_redirects=True,
+            # A policy that allows no domain: cookies are neither stored nor sent.
+            cookies=CookieJar(policy=DefaultCookiePolicy(allowed_domains=[])),
         )
         self._retry = retry
         self._host_limits = {host.lower(): limit for host, limit in (host_limits or {}).items()}

@@ -13,9 +13,15 @@
     <input type="hidden" name="url" value="{{ detection.url }}">
     <label>Name <input type="text" name="name" value="{{ detection.name }}" required maxlength="200"></label>
     <label>Priority <input type="number" name="priority" value="0" min="0" max="1000"></label>
+    {% if detection.ref.ats == "workday" %}
+    <label>Keywords <input type="text" name="keywords" value="" placeholder="backend, platform" maxlength="2000"></label>
+    {% endif %}
     <button type="submit">Add to watchlist</button>
   </form>
   <p class="hint">Priority feeds the score (0 to {{ priority_cap }}; anything higher counts as {{ priority_cap }}), so boards you care about reach the instant-push threshold more easily.</p>
+  {% if detection.ref.ats == "workday" %}
+  <p class="hint">Workday boards are searched by keyword: each comma-separated keyword is one search, and its matches are what get polled. Without keywords, every job on the board is read on every poll.</p>
+  {% endif %}
 </div>
 {% else %}
 <p class="notice {{ detection.tone }}">{{ detection.message }}</p>

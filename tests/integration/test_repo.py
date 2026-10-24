@@ -1,13 +1,18 @@
+import dataclasses
 from datetime import timedelta
 
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from jobpulse.config import SIMPLIFY_NEW_GRAD_URL, SearchEntry, SimplifyConfig
+from jobpulse.core.applicants import ApplicantCount
+from jobpulse.core.assessment import Assessment
+from jobpulse.core.models import Decision
 from jobpulse.db import repo
 from jobpulse.db.session import session_scope
-from jobpulse.db.tables import Company, Run, Search, SourceState
-from tests.factories import NOW
+from jobpulse.db.tables import Company, PostingRow, Run, Search, SourceState
+from jobpulse.llm.base import LlmReply
+from tests.factories import NOW, make_posting
 from tests.integration.conftest import make_config
 
 
@@ -190,3 +195,148 @@ def test_delete_runs_before_removes_only_older_runs(database: sessionmaker[Sessi
     with session_scope(database) as session:
         kept = sorted(session.scalars(select(Run.started_at)))
     assert kept == [cutoff, NOW]
+
+
+# --- Milestone 4 ---------------------------------------------------------------------------
+
+OMEGA = {"name": "Omega", "ats": "workday", "token": "omega.wd5/External"}
+
+
+def workday_config(keywords: list[str]) -> list[object]:
+    return list(make_config(watchlist=[{**OMEGA, "keywords": keywords}]).watchlist)
+
+
+def test_workday_keywords_are_stored_and_reach_the_target(database: sessionmaker[Session]) -> None:
+    with session_scope(database) as session:
+        repo.sync_watchlist(session, workday_config(["backend", "platform"]), now=NOW)  # type: ignore[arg-type]
+    with database() as session:
+        company = session.scalars(select(Company)).one()
+        [target] = repo.company_targets(session)
+    assert company.params == {"keywords": ["backend", "platform"]}
+    assert (target.ats, target.token, target.keywords) == (
+        "workday",
+        "omega.wd5/External",
+        ("backend", "platform"),
+    )
+
+
+def test_changed_workday_keywords_start_a_new_baseline(database: sessionmaker[Session]) -> None:
+    with session_scope(database) as session:
+        repo.sync_watchlist(session, workday_config(["backend"]), now=NOW)  # type: ignore[arg-type]
+        session.execute(update(Company).values(baseline_done_at=NOW))
+    with session_scope(database) as session:
+        unchanged = repo.sync_watchlist(session, workday_config(["backend"]), now=NOW)  # type: ignore[arg-type]
+    with database() as session:
+        assert session.scalars(select(Company)).one().baseline_done_at == NOW
+    with session_scope(database) as session:
+        changed = repo.sync_watchlist(session, workday_config(["backend", "api"]), now=NOW)  # type: ignore[arg-type]
+    assert unchanged == repo.SyncReport()
+    assert changed.updated == ("workday/omega.wd5/External",)
+    with database() as session:
+        company = session.scalars(select(Company)).one()
+    assert company.baseline_done_at is None
+    assert company.params == {"keywords": ["backend", "api"]}
+
+
+def test_other_boards_have_no_keywords(database: sessionmaker[Session]) -> None:
+    with session_scope(database) as session:
+        repo.sync_watchlist(session, make_config().watchlist, now=NOW)
+    with database() as session:
+        targets = repo.company_targets(session)
+    assert all(target.keywords == () for target in targets)
+
+
+def test_a_dashboard_workday_board_keeps_its_keywords(database: sessionmaker[Session]) -> None:
+    with session_scope(database) as session:
+        assert repo.add_company(
+            session,
+            ats="workday",
+            token="omega.wd5/External",
+            region="us",
+            name="Omega",
+            source="dashboard",
+            priority=2,
+            discovered_from=None,
+            now=NOW,
+            params={"keywords": ["backend"]},
+        )
+    with database() as session:
+        [target] = repo.company_targets(session)
+    assert target.keywords == ("backend",)
+
+
+def test_applicants_are_stored_with_the_decision_and_read_back(
+    database: sessionmaker[Session],
+) -> None:
+    posting = make_posting(source="linkedin", external_id="4101100003", posted_at=None)
+    with session_scope(database) as session:
+        row_id = repo.insert_if_absent(
+            session,
+            posting,
+            company_id=None,
+            fingerprint="f",
+            tier="pending",
+            tier_reason=None,
+            now=NOW,
+        )
+        assert row_id is not None
+        count = ApplicantCount("Be among the first 25 applicants", None, 25)
+        repo.save_evaluation(
+            session,
+            row_id,
+            dataclasses.replace(posting, applicants=count),
+            Decision(tier="digest", reason="score 0.50 < 0.55", score=0.5),
+        )
+    with database() as session:
+        row = session.get(PostingRow, row_id)
+        assert row is not None
+        assert (row.applicant_label, row.applicant_min, row.applicant_max) == (
+            "Be among the first 25 applicants",
+            None,
+            25,
+        )
+        assert repo.row_to_posting(row).applicants == count
+
+
+def test_llm_answers_are_cached_per_posting_and_every_call_counts(
+    database: sessionmaker[Session],
+) -> None:
+    with session_scope(database) as session:
+        ids = [
+            repo.insert_if_absent(
+                session,
+                make_posting(external_id=str(n)),
+                company_id=None,
+                fingerprint=str(n),
+                tier="pending",
+                tier_reason=None,
+                now=NOW,
+            )
+            for n in range(3)
+        ]
+        first, second, third = (row_id for row_id in ids if row_id is not None)
+        answer = Assessment("mid", 0.9, 0.7, "Python APIs.")
+        repo.record_assessment(
+            session,
+            posting_id=first,
+            input_hash="a" * 64,
+            reply=LlmReply(
+                model="claude-opus-5-5", assessment=answer, input_tokens=900, output_tokens=120
+            ),
+            now=NOW - timedelta(hours=25),
+        )
+        repo.record_assessment(
+            session,
+            posting_id=second,
+            input_hash="b" * 64,
+            reply=LlmReply(model="claude-opus-5-5", error="HTTP 529: overloaded"),
+            now=NOW - timedelta(hours=1),
+        )
+    with database() as session:
+        cached = repo.cached_assessments(
+            session, {first: "a" * 64, second: "b" * 64, third: "c" * 64}
+        )
+        assert cached == {first: answer}  # failures are never answers
+        assert repo.cached_assessments(session, {first: "z" * 64}) == {}  # another question
+        assert repo.count_llm_calls(session, since=NOW - timedelta(hours=24)) == 1
+        assert repo.count_llm_calls(session, since=NOW - timedelta(hours=48)) == 2

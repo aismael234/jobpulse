@@ -1,4 +1,8 @@
-"""Recognize Greenhouse, Lever and Ashby board and job URLs, and find them in HTML."""
+"""Recognize Greenhouse, Lever, Ashby and Workday board and job URLs, and find them in HTML.
+
+``detect_ats_url`` knows the boards discovery may add on its own (Greenhouse, Lever, Ashby);
+``detect_workday_url`` knows Workday's, which only you add (config or the dashboard).
+"""
 
 import html
 import re
@@ -11,10 +15,39 @@ from jobpulse.core.models import Region
 
 @dataclass(frozen=True, slots=True)
 class AtsRef:
-    ats: Literal["greenhouse", "lever", "ashby"]
+    ats: Literal["greenhouse", "lever", "ashby", "workday"]
     token: str
     job_id: str | None = None
     region: Region = "us"
+
+
+@dataclass(frozen=True, slots=True)
+class WorkdayBoard:
+    """One Workday careers site: ``https://{tenant}.{host}.myworkdayjobs.com/{site}``.
+
+    Its token is ``{tenant}.{host}/{site}``, e.g. ``nvidia.wd5/NVIDIAExternalCareerSite``.
+    """
+
+    tenant: str
+    host: str  # the data center, "wd1", "wd5", "wd12", ...
+    site: str
+
+    @property
+    def token(self) -> str:
+        return f"{self.tenant}.{self.host}/{self.site}"
+
+    @property
+    def origin(self) -> str:
+        return f"https://{self.tenant}.{self.host}.myworkdayjobs.com"
+
+    @property
+    def board_url(self) -> str:
+        return f"{self.origin}/{self.site}"
+
+    @property
+    def api_url(self) -> str:
+        """The CXS API base; ``/jobs`` lists, ``{externalPath}`` reads one job."""
+        return f"{self.origin}/wday/cxs/{self.tenant}/{self.site}"
 
 
 _GREENHOUSE_HOSTS: dict[str, Region] = {
@@ -30,9 +63,24 @@ _ASHBY_RESERVED = frozenset({"api", "embed"})
 _TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE)
 _ATS_URL_IN_HTML = re.compile(
-    r"(?:https?:)?//(?:[a-z0-9-]+\.)*(?:greenhouse\.io|lever\.co|ashbyhq\.com)(?:/[^\s\"'<>]*)?",
+    r"(?:https?:)?//(?:[a-z0-9-]+\.)*"
+    r"(?:greenhouse\.io|lever\.co|ashbyhq\.com|myworkdayjobs\.com|myworkdaysite\.com)"
+    r"(?:/[^\s\"'<>]*)?",
     re.IGNORECASE,
 )
+# {tenant}.wdN.myworkdayjobs.com, and wdN.myworkdaysite.com/recruiting/{tenant}/{site}
+_WORKDAY_JOBS_HOST = re.compile(
+    r"(?P<tenant>[a-z0-9][a-z0-9-]*)\.(?P<host>wd\d{1,3})\.myworkdayjobs\.com"
+)
+_WORKDAY_SITE_HOST = re.compile(r"(?P<host>wd\d{1,3})\.myworkdaysite\.com")
+_WORKDAY_TOKEN = re.compile(
+    r"(?P<tenant>[a-z0-9][a-z0-9-]*)\.(?P<host>wd\d{1,3})/(?P<site>[a-z0-9][a-z0-9_.-]*)",
+    re.IGNORECASE,
+)
+_WORKDAY_TENANT = re.compile(r"[a-z0-9][a-z0-9-]*", re.IGNORECASE)
+_WORKDAY_SITE = re.compile(r"[a-z0-9][a-z0-9_.-]*", re.IGNORECASE)
+_WORKDAY_RESERVED = frozenset({"wday"})
+_LOCALE = re.compile(r"[a-z]{2}-[a-z]{2}", re.IGNORECASE)
 
 
 def _split(url: str) -> SplitResult | None:
@@ -118,6 +166,80 @@ def detect_ats_url(url: str) -> AtsRef | None:
     return None
 
 
+def workday_board(token: str) -> WorkdayBoard | None:
+    """The board a ``{tenant}.{host}/{site}`` token names, or ``None``."""
+    match = _WORKDAY_TOKEN.fullmatch(token.strip())
+    if match is None:
+        return None
+    return WorkdayBoard(match["tenant"].lower(), match["host"].lower(), match["site"])
+
+
+def _workday_job(segments: list[str]) -> str | None:
+    """The job id in what follows the site: ``job/{location}/{id}``, ``job/{id}`` or
+    ``details/{id}`` (anything after the id, such as ``/apply``, is ignored)."""
+    if len(segments) < 2:
+        return None
+    kind = segments[0].lower()
+    if kind == "job":
+        return segments[2] if len(segments) >= 3 else segments[1]
+    if kind == "details":
+        return segments[1]
+    return None
+
+
+def _without_locale(segments: list[str]) -> list[str]:
+    return segments[1:] if segments and _LOCALE.fullmatch(segments[0]) else segments
+
+
+def detect_workday_url(url: str) -> AtsRef | None:
+    """The Workday board (and job, if present) a URL points at, or ``None``: every
+    ``{tenant}.wdN.myworkdayjobs.com`` form (with or without a locale such as ``en-US``),
+    ``wdN.myworkdaysite.com/recruiting/{tenant}/{site}``, and the CXS API's own URLs."""
+    parts = _split(url)
+    if parts is None or parts.hostname is None:
+        return None
+    host = parts.hostname.lower()
+    segments = [unquote(segment) for segment in parts.path.split("/") if segment]
+    jobs_host = _WORKDAY_JOBS_HOST.fullmatch(host)
+    host_match = jobs_host or _WORKDAY_SITE_HOST.fullmatch(host)
+    if host_match is None:
+        return None
+    host_number = host_match["host"]
+    if [segment.lower() for segment in segments[:2]] == ["wday", "cxs"]:
+        if len(segments) < 4:
+            return None
+        tenant = jobs_host["tenant"] if jobs_host else segments[2]
+        site, rest = segments[3], segments[4:]
+    elif jobs_host is not None:
+        segments = _without_locale(segments)
+        if not segments:
+            return None
+        tenant, site, rest = jobs_host["tenant"], segments[0], segments[1:]
+    else:
+        segments = _without_locale(segments)
+        if len(segments) < 3 or segments[0].lower() != "recruiting":
+            return None
+        tenant, site, rest = segments[1], segments[2], segments[3:]
+    if (
+        not _WORKDAY_TENANT.fullmatch(tenant)
+        or not _WORKDAY_SITE.fullmatch(site)
+        or site.lower() in _WORKDAY_RESERVED
+    ):
+        return None
+    board = WorkdayBoard(tenant.lower(), host_number, site)
+    return AtsRef("workday", board.token, _workday_job(rest))
+
+
+def normalize_workday_token(value: str) -> str | None:
+    """A Workday token from ``{tenant}.{host}/{site}`` or any board or job URL; ``None`` if
+    it's neither. The tenant and host are lowercased; the site keeps its case."""
+    board = workday_board(value)
+    if board is not None:
+        return board.token
+    ref = detect_workday_url(value.strip())
+    return ref.token if ref is not None else None
+
+
 def find_ats_refs_in_html(page: str) -> list[AtsRef]:
     """Every distinct ATS board linked or embedded in a page, in order of appearance."""
     refs: list[AtsRef] = []
@@ -126,7 +248,7 @@ def find_ats_refs_in_html(page: str) -> list[AtsRef]:
         url = match.group(0)
         if url.startswith("//"):
             url = "https:" + url
-        ref = detect_ats_url(url)
+        ref = detect_ats_url(url) or detect_workday_url(url)
         if ref is None:
             continue
         key = (ref.ats, ref.token.lower(), ref.region)
@@ -137,7 +259,7 @@ def find_ats_refs_in_html(page: str) -> list[AtsRef]:
 
 
 def board_url(ats: str, token: str, region: str = "us") -> str | None:
-    """The public job board a watchlist company's token points at (``None`` for Workday)."""
+    """The public job board a watchlist company's token points at."""
     eu = region == "eu"
     if ats == "greenhouse":
         return f"https://job-boards.{'eu.' if eu else ''}greenhouse.io/{token}"
@@ -145,6 +267,8 @@ def board_url(ats: str, token: str, region: str = "us") -> str | None:
         return f"https://jobs.{'eu.' if eu else ''}lever.co/{token}"
     if ats == "ashby":
         return f"https://{_ASHBY_HOST}/{token}"
+    if ats == "workday" and (board := workday_board(token)) is not None:
+        return board.board_url
     return None
 
 

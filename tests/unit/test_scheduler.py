@@ -157,7 +157,7 @@ async def test_worker_jobs_follow_the_config() -> None:
     for _, job in jobs.values():
         await job()
     assert ran == [
-        ("watchlist", ("greenhouse", "lever", "ashby")),
+        ("watchlist", ("greenhouse", "lever", "ashby", "workday")),
         ("simplify", ("simplify",)),
         ("job_boards", ("indeed", "linkedin")),
     ]

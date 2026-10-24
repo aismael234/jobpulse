@@ -1,11 +1,15 @@
 """Score = w_fresh·freshness + w_prio·company_priority + w_title·title_match
 + w_stack·stack_match - w_level·level_mismatch + w_appl·applicant_signal.
 
-Every component is in [0, 1]. Stack and applicant terms count only when known.
+Every component is in [0, 1]. Stack and applicant terms count only when known. The LLM layer
+(``core.assessment``) may add a last term, ``w_llm·(2·signal - 1)``, for postings near the
+instant threshold.
 """
 
 from dataclasses import dataclass
 from datetime import timedelta
+
+from jobpulse.core.applicants import ApplicantCount
 
 
 @dataclass(frozen=True, slots=True)
@@ -16,6 +20,7 @@ class Weights:
     stack: float = 0.25
     level_mismatch: float = 0.50
     applicants: float = 0.10
+    llm: float = 0.15  # the most the LLM layer's second opinion adds or subtracts
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +46,15 @@ def freshness_component(age: timedelta, window: timedelta) -> float:
 
 def priority_component(priority: int, cap: int) -> float:
     return _clamp(priority / cap) if cap > 0 else 0.0
+
+
+def applicant_component(count: ApplicantCount, cap: int) -> float:
+    """1.0 for no applicants, falling linearly to 0.0 at ``cap``. A range counts from its known
+    end: "Be among the first 25" from 25, "Over 200" from 200."""
+    estimate = count.minimum if count.minimum is not None else count.maximum
+    if estimate is None or cap <= 0:
+        return 0.0
+    return _clamp(1.0 - estimate / cap)
 
 
 def _rounded(value: float) -> float:

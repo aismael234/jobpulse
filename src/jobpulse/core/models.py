@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal
 
+from jobpulse.core.applicants import ApplicantCount
+
 SourceName = Literal["greenhouse", "lever", "ashby", "simplify", "indeed", "linkedin", "workday"]
 AtsName = Literal["greenhouse", "lever", "ashby", "workday"]
 SearchSite = Literal["indeed", "linkedin"]
@@ -44,6 +46,7 @@ class Posting:
     department: str | None = None
     compensation: dict[str, Any] | None = None
     raw: dict[str, Any] = field(default_factory=dict)
+    applicants: ApplicantCount | None = None  # LinkedIn's applicant line, from its job page
 
     def __post_init__(self) -> None:
         if not self.external_id:
@@ -56,7 +59,8 @@ class Posting:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class CompanyTarget:
-    """A watchlist company whose ATS board returns its complete list of open jobs."""
+    """A watchlist company whose ATS board returns its complete list of open jobs (a Workday
+    board searched by ``keywords`` returns only the matches)."""
 
     company_id: int
     ats: AtsName
@@ -65,6 +69,7 @@ class CompanyTarget:
     region: Region = "us"
     priority: int = 0
     baseline_done: bool = False
+    keywords: tuple[str, ...] = ()
 
     @property
     def source(self) -> str:

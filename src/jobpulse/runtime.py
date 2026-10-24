@@ -10,12 +10,14 @@ import httpx
 from sqlalchemy import inspect
 from sqlalchemy.orm import Session, sessionmaker
 
-from jobpulse.config import AppConfig, Settings, location_aliases
+from jobpulse.config import AppConfig, Settings, location_aliases, read_resume
 from jobpulse.db import migrate
 from jobpulse.db.session import create_engine_for, display_url, make_session_factory
 from jobpulse.digest import Digest, DigestResult
 from jobpulse.discovery import Discoverer
 from jobpulse.httpclient import HttpClient, RetryPolicy, build_user_agent
+from jobpulse.llm.claude import ClaudeClient
+from jobpulse.llm.scorer import LlmScorer
 from jobpulse.notify.base import FanOutNotifier, Notification, Notifier
 from jobpulse.notify.discord import DiscordNotifier
 from jobpulse.notify.ntfy import NtfyNotifier
@@ -33,13 +35,16 @@ from jobpulse.sources.ashby import AshbyAdapter
 from jobpulse.sources.ats_detect import AtsDetector
 from jobpulse.sources.base import SourceAdapter
 from jobpulse.sources.greenhouse import GreenhouseAdapter
-from jobpulse.sources.jobspy_boards import JobSpyAdapter, Pacing, Scrape
+from jobpulse.sources.jobspy_boards import JobSpyAdapter, Scrape
 from jobpulse.sources.lever import LeverAdapter
+from jobpulse.sources.linkedin_gate import LinkedInGate, Pacing
+from jobpulse.sources.linkedin_guest import LinkedInJobPages, LinkedInSource
 from jobpulse.sources.simplify import SimplifyAdapter
+from jobpulse.sources.workday import WorkdayAdapter
 
 log = logging.getLogger(__name__)
 
-WATCHLIST_SOURCES: tuple[str, ...] = ("greenhouse", "lever", "ashby")
+WATCHLIST_SOURCES: tuple[str, ...] = ("greenhouse", "lever", "ashby", "workday")
 FEED_SOURCES: tuple[str, ...] = ("simplify",)
 BOARD_SOURCES: tuple[str, ...] = ("indeed", "linkedin")
 KNOWN_SOURCES: tuple[str, ...] = WATCHLIST_SOURCES + FEED_SOURCES + BOARD_SOURCES
@@ -96,25 +101,28 @@ def build_http(
 def build_adapters(
     http: HttpClient, config: AppConfig, *, scrape: Scrape | None = None
 ) -> dict[str, SourceAdapter]:
-    """Every source's adapter. ``scrape`` replaces JobSpy's ``scrape_jobs`` (fixture mode)."""
+    """Every source's adapter. ``scrape`` replaces JobSpy's ``scrape_jobs`` (fixture mode).
+    LinkedIn's searches and job pages share one gate, so all LinkedIn requests are paced and
+    cooled down together."""
     aliases = location_aliases(config)
     linkedin = config.linkedin
-    boards = JobSpyAdapter(
-        scrape=scrape,
-        aliases=aliases,
-        pacing=Pacing(
+    gate = LinkedInGate(
+        Pacing(
             delay_min=linkedin.delay_min_seconds,
             delay_max=linkedin.delay_max_seconds,
             cooldown=timedelta(minutes=linkedin.cooldown_minutes),
-        ),
+        )
     )
+    boards = JobSpyAdapter(scrape=scrape, aliases=aliases, gate=gate)
+    pages = LinkedInJobPages(http, gate, max_per_hour=linkedin.max_job_pages_per_hour)
     return {
         "greenhouse": GreenhouseAdapter(http, aliases=aliases),
         "lever": LeverAdapter(http, aliases=aliases),
         "ashby": AshbyAdapter(http, aliases=aliases),
+        "workday": WorkdayAdapter(http, aliases=aliases, max_pages=config.workday.max_pages),
         "simplify": SimplifyAdapter(http, aliases=aliases),
         "indeed": boards,
-        "linkedin": boards,
+        "linkedin": LinkedInSource(boards, pages) if linkedin.job_pages else boards,
     }
 
 
@@ -128,6 +136,31 @@ def build_discoverer(http: HttpClient, config: AppConfig) -> Discoverer | None:
         max_page_fetches=discovery.max_page_fetches_per_cycle,
         require_match=discovery.require_match,
         max_board_jobs=discovery.max_board_jobs,
+    )
+
+
+def build_llm(config: AppConfig, settings: Settings, *, dry_run: bool = False) -> LlmScorer | None:
+    """The LLM layer when ``llm.enabled``; ``None`` otherwise. Dry runs get no client: they
+    only read answers already cached."""
+    llm = config.llm
+    if not llm.enabled:
+        return None
+    key = settings.llm_api_key.get_secret_value() if settings.llm_api_key else ""
+    client = (
+        ClaudeClient(api_key=key, model=llm.model, effort=llm.effort)
+        if key and not dry_run
+        else None
+    )
+    return LlmScorer(
+        client,
+        resume=read_resume(config),
+        model=llm.model,
+        effort=llm.effort,
+        band=llm.band,
+        threshold=config.scoring.instant_threshold,
+        weight=config.scoring.weights.llm,
+        wanted_levels=llm.wanted_levels,
+        max_calls_per_day=llm.max_calls_per_day,
     )
 
 
@@ -169,15 +202,21 @@ async def poll_once(
 ) -> CycleReport:
     """One cycle over ``sources`` (every source by default)."""
     sessions = open_database(database_url)
-    async with build_http(config, transport=transport) as http:
-        poller = Poller(
-            config=config,
-            sessions=sessions,
-            adapters=build_adapters(http, config, scrape=scrape),
-            notifier=None if dry_run else build_notifier(http, config, settings),
-            discoverer=build_discoverer(http, config),
-        )
-        return await poller.run_cycle(sources=sources, target_key=target, dry_run=dry_run)
+    llm = build_llm(config, settings, dry_run=dry_run)
+    try:
+        async with build_http(config, transport=transport) as http:
+            poller = Poller(
+                config=config,
+                sessions=sessions,
+                adapters=build_adapters(http, config, scrape=scrape),
+                notifier=None if dry_run else build_notifier(http, config, settings),
+                discoverer=build_discoverer(http, config),
+                llm=llm,
+            )
+            return await poller.run_cycle(sources=sources, target_key=target, dry_run=dry_run)
+    finally:
+        if llm is not None:
+            await llm.aclose()
 
 
 def render_report(report: CycleReport) -> list[str]:
@@ -242,6 +281,7 @@ def render_report(report: CycleReport) -> list[str]:
             f"discovery: {boards} not added: discovery.max_auto_companies reached "
             "(raise it, or block companies you don't want)"
         )
+    lines.extend(_llm_lines(report))
     if report.pruned_runs:
         lines.append(
             f"housekeeping: deleted {_count(report.pruned_runs, 'run')} older than "
@@ -252,10 +292,33 @@ def render_report(report: CycleReport) -> list[str]:
     return lines
 
 
+def _llm_lines(report: CycleReport) -> list[str]:
+    lines: list[str] = []
+    if report.llm_asked or report.llm_failed:
+        parts = [f"{report.llm_asked} answered"]
+        if report.llm_cached:
+            parts.append(f"{report.llm_cached} from the cache")
+        if report.llm_failed:
+            parts.append(f"{report.llm_failed} failed")
+        lines.append("llm: " + ", ".join(parts))
+    elif report.llm_cached:
+        lines.append(f"llm: {_count(report.llm_cached, 'answer')} from the cache")
+    if report.llm_over_limit:
+        left = _count(report.llm_over_limit, "posting")
+        lines.append(f"llm: {left} left to the rules: llm.max_calls_per_day reached")
+    if report.llm_would_ask:
+        asked = _count(report.llm_would_ask, "posting")
+        lines.append(f"llm: would ask about {asked} (a dry run never calls it)")
+    if report.llm_stopped:
+        lines.append(f"llm: stopped asking until a restart: {report.llm_stopped}")
+    return lines
+
+
 async def run_worker(*, config: AppConfig, settings: Settings, database_url: str) -> None:
     """Poll each source on its own jittered schedule and send the digest at its times, until
     SIGINT or SIGTERM. Raises ``WorkerStalled`` when a source stops finishing runs."""
     sessions = open_database(database_url)
+    llm = build_llm(config, settings)
     async with build_http(config) as http:
         notifier = build_notifier(http, config, settings)
         poller = Poller(
@@ -264,6 +327,7 @@ async def run_worker(*, config: AppConfig, settings: Settings, database_url: str
             adapters=build_adapters(http, config),
             notifier=notifier,
             discoverer=build_discoverer(http, config),
+            llm=llm,
         )
         digest = Digest(config=config, sessions=sessions, notifier=notifier)
 
@@ -297,6 +361,8 @@ async def run_worker(*, config: AppConfig, settings: Settings, database_url: str
             worker.shutdown()
             for task in (watchdog, stopped):
                 task.cancel()
+            if llm is not None:
+                await llm.aclose()
             log.info("worker stopped")
         if watchdog.done() and not watchdog.cancelled():
             limit = worker.watchdog_limit or 0

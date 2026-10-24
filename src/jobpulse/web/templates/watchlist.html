@@ -10,7 +10,7 @@
     <input type="url" name="url" required placeholder="https://jobs.lever.co/… or any careers page" aria-label="Careers page or job board URL">
     <button type="submit">Detect</button>
   </form>
-  <p class="hint">Greenhouse, Lever and Ashby boards are recognized from the URL. For any other page, jobpulse reads it once to find a board, then checks the board with one API call before you add it.</p>
+  <p class="hint">Greenhouse, Lever, Ashby and Workday boards are recognized from the URL. For any other page, jobpulse reads it once to find a board, then checks the board with one API call before you add it.</p>
   <div id="detect-result">
     {% if detection %}{% include "_detect.html" %}{% endif %}
     {% if added %}<p class="notice success">Added {{ added }}. Its first poll stores the jobs it has now without notifying you.</p>{% endif %}

@@ -5,7 +5,7 @@ between phases (or only flushes, in a dry run), and never awaits while a transac
 """
 
 from collections import defaultdict
-from collections.abc import Callable, Collection, Iterable, Iterator, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, cast
@@ -17,8 +17,10 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
 from jobpulse.config import SearchEntry, SimplifyConfig, WatchlistEntry
+from jobpulse.core.applicants import ApplicantCount
+from jobpulse.core.assessment import LEVELS, Assessment
 from jobpulse.core.atsurls import gh_jid
-from jobpulse.core.dedupe import canonicalize_url, merge_also_seen
+from jobpulse.core.dedupe import canonicalize_url, merge_also_seen, posting_fingerprint
 from jobpulse.core.detection import PresencePlan, PresenceRow
 from jobpulse.core.filters import Blocklist
 from jobpulse.core.models import (
@@ -38,7 +40,16 @@ from jobpulse.core.models import (
     Target,
     Tier,
 )
-from jobpulse.db.tables import Company, HealthIncident, PostingRow, Run, Search, SourceState
+from jobpulse.db.tables import (
+    Company,
+    HealthIncident,
+    LlmAssessment,
+    PostingRow,
+    Run,
+    Search,
+    SourceState,
+)
+from jobpulse.llm.base import LlmReply
 
 CHUNK = 500
 MAX_ERROR_CHARS = 2000
@@ -88,6 +99,15 @@ def _chunks[T](items: Sequence[T]) -> Iterator[Sequence[T]]:
 # --- watchlist ---------------------------------------------------------------------------
 
 
+def _company_params(entry: WatchlistEntry) -> dict[str, Any] | None:
+    return {"keywords": list(entry.keywords)} if entry.keywords else None
+
+
+def _keywords(params: dict[str, Any] | None) -> tuple[str, ...]:
+    words = (params or {}).get("keywords")
+    return tuple(str(word) for word in words) if isinstance(words, list) else ()
+
+
 def sync_watchlist(
     session: Session, entries: Sequence[WatchlistEntry], *, now: datetime
 ) -> SyncReport:
@@ -95,7 +115,8 @@ def sync_watchlist(
 
     Config entries own their rows: a company that came from the dashboard or discovery and
     is then added to config becomes config-owned. Config-owned companies that left config are
-    deactivated, never deleted, so their history stays.
+    deactivated, never deleted, so their history stays. A Workday board whose keywords
+    changed finds a different set of jobs, so it starts a new silent baseline.
     """
     by_key = {(c.ats_type, c.token.lower()): c for c in session.scalars(select(Company))}
     added: list[str] = []
@@ -116,6 +137,7 @@ def sync_watchlist(
                     priority=entry.priority,
                     active=entry.active,
                     source_of_discovery="config",
+                    params=_company_params(entry),
                     created_at=now,
                     updated_at=now,
                 )
@@ -128,7 +150,10 @@ def sync_watchlist(
             "priority": entry.priority,
             "active": entry.active,
             "source_of_discovery": "config",
+            "params": _company_params(entry),
         }
+        if _keywords(company.params) != tuple(entry.keywords):
+            company.baseline_done_at = None
         if any(getattr(company, field) != value for field, value in wanted.items()):
             for field, value in wanted.items():
                 setattr(company, field, value)
@@ -189,6 +214,7 @@ def company_targets(
             region=cast(Region, c.region),
             priority=c.priority,
             baseline_done=c.baseline_done_at is not None,
+            keywords=_keywords(c.params),
         )
         for c in session.scalars(query)
     ]
@@ -381,9 +407,10 @@ def add_company(
     priority: int,
     discovered_from: str | None,
     now: datetime,
+    params: dict[str, Any] | None = None,
 ) -> bool:
     """Add a board from the dashboard or discovery (baseline pending). False if it existed,
-    under any capitalization of its token."""
+    under any capitalization of its token. ``params`` holds a Workday board's keywords."""
     existing = session.scalars(
         select(Company.id).where(
             Company.ats_type == ats, func.lower(Company.token) == token.lower()
@@ -402,6 +429,7 @@ def add_company(
             active=True,
             source_of_discovery=source,
             discovered_from=discovered_from,
+            params=params,
             created_at=now,
             updated_at=now,
         )
@@ -677,6 +705,10 @@ def merge_into(
         primary.department = posting.department
     if primary.compensation is None and posting.compensation:
         primary.compensation = posting.compensation
+    if primary.applicant_label is None and posting.applicants is not None:
+        primary.applicant_label = posting.applicants.label
+        primary.applicant_min = posting.applicants.minimum
+        primary.applicant_max = posting.applicants.maximum
     session.execute(
         update(PostingRow)
         .where(PostingRow.id == duplicate_id)
@@ -818,7 +850,9 @@ def set_decision(session: Session, row_id: int, decision: Decision) -> None:
 
 
 def save_evaluation(session: Session, row_id: int, posting: Posting, decision: Decision) -> None:
-    """Store what enrichment added and the final decision."""
+    """Store what enrichment added and the final decision. A detail call can name places the
+    list didn't (Workday's "2 Locations"), so the fingerprint is taken again."""
+    applicants = posting.applicants
     session.execute(
         update(PostingRow)
         .where(PostingRow.id == row_id)
@@ -828,6 +862,13 @@ def save_evaluation(session: Session, row_id: int, posting: Posting, decision: D
             compensation=posting.compensation,
             posted_at=posting.posted_at,
             posted_at_precision=posting.posted_at_precision,
+            locations=list(posting.locations),
+            is_remote=posting.is_remote,
+            workplace_type=posting.workplace_type,
+            fingerprint=posting_fingerprint(posting),
+            applicant_label=applicants.label if applicants else None,
+            applicant_min=applicants.minimum if applicants else None,
+            applicant_max=applicants.maximum if applicants else None,
             tier=decision.tier,
             tier_reason=decision.reason,
             score=decision.score,
@@ -964,6 +1005,61 @@ def update_company(
         company.active = active
     session.flush()
     return company
+
+
+# --- the LLM layer --------------------------------------------------------------------------
+
+
+def cached_assessments(session: Session, questions: Mapping[int, str]) -> dict[int, Assessment]:
+    """The stored answers to ``questions`` ({posting id: input hash}), by posting id. Only an
+    answer to that exact question counts; failed calls are never answers."""
+    found: dict[int, Assessment] = {}
+    for chunk in _chunks(list(questions)):
+        rows = session.scalars(
+            select(LlmAssessment)
+            .where(LlmAssessment.posting_id.in_(chunk), LlmAssessment.ok.is_(True))
+            .order_by(LlmAssessment.id)
+        )
+        for row in rows:
+            if row.input_hash == questions[row.posting_id] and row.level in LEVELS:
+                found[row.posting_id] = Assessment(
+                    level=row.level,
+                    backend_focus=row.backend_focus or 0.0,
+                    fit=row.fit or 0.0,
+                    reason=row.reason or "",
+                )
+    return found
+
+
+def count_llm_calls(session: Session, *, since: datetime) -> int:
+    """LLM calls made since ``since``, failed ones included: what the daily cap counts."""
+    count = session.scalar(
+        select(func.count(LlmAssessment.id)).where(LlmAssessment.created_at >= since)
+    )
+    return int(count or 0)
+
+
+def record_assessment(
+    session: Session, *, posting_id: int, input_hash: str, reply: LlmReply, now: datetime
+) -> None:
+    answer = reply.assessment
+    session.add(
+        LlmAssessment(
+            posting_id=posting_id,
+            input_hash=input_hash,
+            model=reply.model,
+            created_at=now,
+            ok=answer is not None,
+            level=answer.level if answer else None,
+            backend_focus=answer.backend_focus if answer else None,
+            fit=answer.fit if answer else None,
+            reason=answer.reason if answer else None,
+            error=reply.error[:MAX_ERROR_CHARS] if reply.error else None,
+            input_tokens=reply.input_tokens,
+            output_tokens=reply.output_tokens,
+        )
+    )
+    session.flush()
 
 
 # --- runs ---------------------------------------------------------------------------------
@@ -1117,4 +1213,9 @@ def row_to_posting(row: PostingRow, *, company_token: str | None = None) -> Post
         department=row.department,
         compensation=row.compensation,
         raw=dict(row.raw or {}),
+        applicants=(
+            ApplicantCount(row.applicant_label, row.applicant_min, row.applicant_max)
+            if row.applicant_label
+            else None
+        ),
     )
