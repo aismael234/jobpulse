@@ -52,13 +52,21 @@ class Clock:
 
 
 def discoverer(
-    detector: FakeDetector, *, validations: int = 10, pages: int = 5, clock: Clock | None = None
+    detector: FakeDetector,
+    *,
+    validations: int = 10,
+    pages: int = 5,
+    clock: Clock | None = None,
+    require_match: bool = False,
+    max_board_jobs: int | None = None,
 ) -> Discoverer:
     return Discoverer(
         detector,  # type: ignore[arg-type]
         max_validations=validations,
         max_page_fetches=pages,
         clock=clock or Clock(),
+        require_match=require_match,
+        max_board_jobs=max_board_jobs,
     )
 
 
@@ -225,3 +233,80 @@ async def test_an_unreadable_page_is_retried_after_the_transient_ttl() -> None:
     clock.now += timedelta(hours=3)
     await finder.run(sightings, known=(), greenhouse_hosts=())
     assert len(detector.fetched) == 2
+
+
+# --- narrowing: matching postings, board size, total cap ---------------------------------------
+
+
+def test_with_require_match_only_boards_with_a_matching_posting_are_planned() -> None:
+    plan = discoverer(FakeDetector(), require_match=True).plan(
+        [
+            seen("https://jobs.lever.co/sales-only", "Sales Co"),
+            seen("https://jobs.lever.co/mixed", "Mixed"),
+            seen(
+                "https://jobs.lever.co/mixed/11111111-2222-4333-8444-555555555555",
+                "Mixed",
+                relevant=True,
+            ),
+            seen(ZETA_GH_JID, "Zeta"),  # its page could reveal a board, but nothing matched
+            seen("https://careers.yotta.example/jobs?gh_jid=77", "Yotta", relevant=True),
+        ],
+        known=(),
+        greenhouse_hosts=(),
+    )
+    assert [candidate.ref.token for candidate in plan.candidates] == ["mixed"]
+    assert [page.company_name for page in plan.pages] == ["Yotta"]
+    assert plan.deferred == 0
+
+
+async def test_a_board_over_the_size_limit_is_skipped_and_remembered() -> None:
+    big = Validation(AtsRef("greenhouse", "spacex"), ok=True, name="SpaceX", job_count=2817)
+    detector = FakeDetector(boards={"spacex": big})
+    finder = discoverer(detector, max_board_jobs=1000)
+    sightings = [seen("https://boards.greenhouse.io/spacex/jobs/8436708002", "SpaceX")]
+
+    outcome = await finder.run(sightings, known=(), greenhouse_hosts=())
+    assert outcome.valid == []
+    [found] = outcome.too_big
+    assert found.validation.job_count == 2817
+
+    await finder.run(sightings, known=(), greenhouse_hosts=())
+    assert len(detector.validated) == 1  # not downloaded again
+
+
+async def test_room_limits_validations_and_the_rest_are_capped() -> None:
+    detector = FakeDetector(boards={t: valid(AtsRef("lever", t)) for t in ("aaa", "bbb", "ccc")})
+    sightings = [seen(f"https://jobs.lever.co/{token}") for token in ("aaa", "bbb", "ccc")]
+    finder = discoverer(detector)
+
+    outcome = await finder.run(sightings, known=(), greenhouse_hosts=(), room=1)
+    assert [found.candidate.ref.token for found in outcome.valid] == ["aaa"]
+    assert outcome.capped == 2
+    assert outcome.deferred == 0
+
+    none_left = await finder.run(sightings, known={("lever", "aaa")}, greenhouse_hosts=(), room=0)
+    assert none_left.valid == []
+    assert none_left.capped == 2
+    assert [ref.token for ref in detector.validated] == ["aaa"]
+
+
+async def test_room_beyond_the_cycle_cap_defers_rather_than_caps() -> None:
+    detector = FakeDetector(boards={t: valid(AtsRef("lever", t)) for t in ("aaa", "bbb")})
+    sightings = [seen(f"https://jobs.lever.co/{token}") for token in ("aaa", "bbb")]
+    outcome = await discoverer(detector, validations=1).run(
+        sightings, known=(), greenhouse_hosts=(), room=40
+    )
+    assert (len(outcome.valid), outcome.deferred, outcome.capped) == (1, 1, 0)
+
+
+async def test_a_rejected_board_is_left_alone_for_a_while() -> None:
+    clock = Clock()
+    detector = FakeDetector(boards={"delta": valid(AtsRef("lever", "delta"))})
+    finder = discoverer(detector, clock=clock)
+    finder.reject(AtsRef("lever", "Delta"))
+    outcome = await finder.run([seen(LEVER_DELTA)], known=(), greenhouse_hosts=())
+    assert outcome.valid == []
+    assert detector.validated == []
+    clock.now += timedelta(days=8)
+    outcome = await finder.run([seen(LEVER_DELTA)], known=(), greenhouse_hosts=())
+    assert len(outcome.valid) == 1

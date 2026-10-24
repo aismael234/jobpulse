@@ -6,8 +6,13 @@ baseline like any new company's.
 A ``gh_jid`` link on a custom domain names a Greenhouse job but not its board, so that page
 is fetched once per host to find the token. Other non-ATS links are never fetched. Page
 fetches and validations are capped per cycle, best candidates first (boards with a
-title-matching posting, then the most referenced), and misses are remembered for a while
-so they aren't retried every cycle.
+matching posting, then the most referenced), and misses are remembered for a while so they
+aren't retried every cycle.
+
+Narrowing (``discovery`` in config.yaml): with ``require_match`` a board is considered only
+when one of its postings passes your title and location filters; boards with more than
+``max_board_jobs`` open jobs are skipped; and no more than ``max_auto_companies``
+discovered companies are polled at once. Blocked companies and boards are never added.
 """
 
 import asyncio
@@ -54,6 +59,7 @@ class Plan:
     candidates: tuple[Candidate, ...] = ()  # validate these this cycle, best first
     pages: tuple[Sighting, ...] = ()  # gh_jid pages to fetch this cycle, one per host
     deferred: int = 0  # candidates and pages left for later cycles by the caps
+    capped: int = 0  # candidates that max_auto_companies leaves no room for
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,7 +72,9 @@ class Found:
 class Outcome:
     valid: list[Found] = field(default_factory=list)
     invalid: list[Found] = field(default_factory=list)
+    too_big: list[Found] = field(default_factory=list)
     deferred: int = 0
+    capped: int = 0
 
 
 @dataclass
@@ -94,7 +102,11 @@ class Discoverer:
         max_validations: int,
         max_page_fetches: int,
         clock: Callable[[], datetime] = utcnow,
+        require_match: bool = False,
+        max_board_jobs: int | None = None,
     ) -> None:
+        self._require_match = require_match
+        self._max_board_jobs = max_board_jobs
         self._detector = detector
         self._max_validations = max_validations
         self._max_page_fetches = max_page_fetches
@@ -114,16 +126,28 @@ class Discoverer:
         ttl = PERMANENT_MISS_TTL if permanent else TRANSIENT_MISS_TTL
         self._skip_until[key] = self._clock() + ttl
 
+    def reject(self, ref: AtsRef) -> None:
+        """Leave this board alone for a while (it validated, but someone decided against it)."""
+        self._remember(_board_key(ref.ats, ref.token), permanent=True)
+
+    def _budget(self, room: int | None) -> tuple[int, bool]:
+        """Validations allowed this cycle, and whether ``room`` (not the cycle cap) set it."""
+        if room is None or room >= self._max_validations:
+            return self._max_validations, False
+        return max(0, room), True
+
     def plan(
         self,
         sightings: Iterable[Sighting],
         *,
         known: Collection[tuple[str, str]],
         greenhouse_hosts: Collection[str],
+        room: int | None = None,
     ) -> Plan:
         """What to look at this cycle. ``known`` holds (ats, lowercase token) for every
-        company already stored, active or not; ``greenhouse_hosts`` the custom domains whose
-        Greenhouse token is already known."""
+        company already stored, active or not, and every blocked board; ``greenhouse_hosts``
+        the custom domains whose Greenhouse token is already known. ``room`` is how many more
+        companies discovery may add in total (``None``: no limit)."""
         now = self._clock()
         known_keys = {_board_key(ats, token) for ats, token in known}
         mapped = {host.lower().removeprefix("www.") for host in greenhouse_hosts}
@@ -139,6 +163,8 @@ class Discoverer:
                 tally.sightings += 1
                 tally.relevant += sighting.relevant
             elif gh_jid(sighting.url) and is_fetchable_url(sighting.url):
+                if self._require_match and not sighting.relevant:
+                    continue
                 host = _page_host(sighting.url)
                 if host in mapped or self._skipped(("page", host), now):
                     continue
@@ -146,17 +172,24 @@ class Discoverer:
                 if current is None or (sighting.relevant and not current.relevant):
                     pages[host] = sighting
         ranked = sorted(boards.values(), key=lambda t: (-t.relevant, -t.sightings, t.first))
+        if self._require_match:  # a board earns a place with a posting that passes the filters
+            ranked = [tally for tally in ranked if tally.relevant]
         candidates = [
             Candidate(t.ref, t.sighting.company_name, t.sighting.url, t.sightings, t.relevant)
             for t in ranked
         ]
         page_list = sorted(pages.values(), key=lambda sighting: not sighting.relevant)
-        chosen = candidates[: self._max_validations]
+        budget, room_limited = self._budget(room)
+        chosen = candidates[:budget]
         # A page is worth reading only if the board it reveals can be validated this cycle.
-        room = min(self._max_page_fetches, self._max_validations - len(chosen))
-        chosen_pages = page_list[:room]
-        deferred = len(candidates) - len(chosen) + len(page_list) - len(chosen_pages)
-        return Plan(tuple(chosen), tuple(chosen_pages), deferred)
+        page_room = max(0, min(self._max_page_fetches, budget - len(chosen)))
+        chosen_pages = page_list[:page_room]
+        left_candidates = len(candidates) - len(chosen)
+        left_pages = len(page_list) - len(chosen_pages)
+        pages_out_of_room = room_limited and len(chosen) + len(chosen_pages) >= budget
+        capped = (left_candidates if room_limited else 0) + (left_pages if pages_out_of_room else 0)
+        deferred = left_candidates + left_pages - capped
+        return Plan(tuple(chosen), tuple(chosen_pages), deferred, capped)
 
     async def run(
         self,
@@ -164,10 +197,12 @@ class Discoverer:
         *,
         known: Collection[tuple[str, str]],
         greenhouse_hosts: Collection[str],
+        room: int | None = None,
     ) -> Outcome:
-        """Plan, fetch the gh_jid pages, then validate; misses go into the cache."""
-        plan = self.plan(sightings, known=known, greenhouse_hosts=greenhouse_hosts)
-        outcome = Outcome(deferred=plan.deferred)
+        """Plan, fetch the gh_jid pages, then validate; misses go into the cache. Boards
+        bigger than ``max_board_jobs`` come back in ``too_big`` and are remembered too."""
+        plan = self.plan(sightings, known=known, greenhouse_hosts=greenhouse_hosts, room=room)
+        outcome = Outcome(deferred=plan.deferred, capped=plan.capped)
         candidates = list(plan.candidates)
         queued = {_board_key(ats, token) for ats, token in known}
         queued |= {_board_key(c.ref.ats, c.ref.token) for c in candidates}
@@ -193,8 +228,12 @@ class Discoverer:
                 Candidate(board, sighting.company_name, sighting.url, 1, sighting.relevant)
             )
 
-        to_validate = candidates[: self._max_validations]
-        outcome.deferred += len(candidates) - len(to_validate)
+        budget, room_limited = self._budget(room)
+        to_validate = candidates[:budget]
+        if room_limited:
+            outcome.capped += len(candidates) - len(to_validate)
+        else:
+            outcome.deferred += len(candidates) - len(to_validate)
         validations = await asyncio.gather(
             *(self._detector.validate(candidate.ref) for candidate in to_validate)
         )
@@ -203,9 +242,12 @@ class Discoverer:
             if key in page_of:  # resolved: no need to read that page again for a while
                 self._remember(("page", page_of[key]), permanent=True)
             found = Found(candidate, validation)
-            if validation.ok:
-                outcome.valid.append(found)
-            else:
+            if not validation.ok:
                 outcome.invalid.append(found)
                 self._remember(key, permanent=validation.permanent)
+            elif self._max_board_jobs is not None and validation.job_count > self._max_board_jobs:
+                outcome.too_big.append(found)
+                self._remember(key, permanent=True)  # no need to download it every cycle
+            else:
+                outcome.valid.append(found)
         return outcome

@@ -219,3 +219,112 @@ async def test_an_unreachable_board_is_retried_after_a_while(
     feed.respond(listing, simplify_listing("x2", posted=OLD), etag='W/"3"')
     await env.poll(sources=["simplify"])
     assert "delta" in {c.token for c in env.companies()}
+
+
+# --- narrowing ---------------------------------------------------------------------------------
+
+
+async def test_only_boards_with_a_matching_posting_are_checked(
+    env: Env, feed: SimplifyMock, respx_mock: respx.MockRouter
+) -> None:
+    # The sales board has no route: validating it would fail the test.
+    wanted = respx_mock.get("https://api.lever.co/v0/postings/bbb?mode=json").respond(200, json=[])
+    feed.respond(
+        simplify_listing(
+            "s1",
+            "Account Executive",
+            company="Sales Co",
+            url="https://jobs.lever.co/aaa",
+            posted=OLD,
+        ),
+        simplify_listing(
+            "b1",
+            "Backend Engineer",
+            company="Builders",
+            url="https://jobs.lever.co/bbb",
+            posted=OLD,
+        ),
+        etag='W/"1"',
+    )
+    report = await env.poll(sources=["simplify"])
+    assert wanted.call_count == 1
+    assert {c.token for c in env.companies()} == {"acme", "beta", "bbb"}
+    assert report.discovery_deferred == 0
+
+
+async def test_a_location_filter_narrows_discovery_too(
+    env: Env, feed: SimplifyMock, respx_mock: respx.MockRouter
+) -> None:
+    env.reconfigure(
+        filters={**env.config.filters.model_dump(), "locations": {"include": ["^Remote"]}}
+    )
+    env.rebuild_discoverer()
+    wanted = respx_mock.get("https://api.lever.co/v0/postings/remote-co?mode=json").respond(
+        200, json=[]
+    )
+    feed.respond(
+        simplify_listing(
+            "l1",
+            "Backend Engineer",
+            url="https://jobs.lever.co/office-co",
+            posted=OLD,
+            locations=("Austin, TX",),
+        ),
+        simplify_listing(
+            "l2",
+            "Backend Engineer",
+            url="https://jobs.lever.co/remote-co",
+            posted=OLD,
+            locations=("Remote in USA",),
+        ),
+        etag='W/"1"',
+    )
+    await env.poll(sources=["simplify"])
+    assert wanted.call_count == 1
+    assert "office-co" not in {c.token for c in env.companies()}
+
+
+async def test_a_board_over_the_size_limit_is_reported_and_not_rechecked(
+    env: Env, feed: SimplifyMock, respx_mock: respx.MockRouter
+) -> None:
+    env.reconfigure(discovery={**env.config.discovery.model_dump(), "max_board_jobs": 1})
+    env.rebuild_discoverer()
+    big = respx_mock.get(DELTA_LIST).respond(
+        200,
+        json=[
+            *delta_board(),
+            lever_posting(
+                "7f6e5d4c-3b2a-4190-8a7b-6c5d4e3f2a1b",
+                "Account Executive",
+                created=OLD,
+                token="delta",
+            ),
+        ],
+    )
+    feed.respond(simplify_listing("d1", url=DELTA_URL, posted=OLD), etag='W/"1"')
+    report = await env.poll(sources=["simplify"])
+
+    assert "delta" not in {c.token for c in env.companies()}
+    assert report.discovery_skipped == [
+        "lever/delta (Delta, 2 jobs): more than discovery.max_board_jobs (1)"
+    ]
+    feed.respond(
+        simplify_listing("d1", url=DELTA_URL, posted=OLD),
+        simplify_listing("x1", posted=OLD),
+        etag='W/"2"',
+    )
+    await env.poll(sources=["simplify"])
+    assert big.call_count == 1
+
+
+async def test_discovery_stops_at_max_auto_companies(
+    env: Env, feed: SimplifyMock, respx_mock: respx.MockRouter
+) -> None:
+    env.reconfigure(discovery={**env.config.discovery.model_dump(), "max_auto_companies": 1})
+    env.add_company("Old Find", "ashby", "oldfind")  # already discovered and polled
+    feed.respond(simplify_listing("d1", url=DELTA_URL, posted=OLD), etag='W/"1"')
+    report = await env.poll(sources=["simplify"])
+
+    assert "delta" not in {c.token for c in env.companies()}
+    assert report.discovery_capped == 1
+    assert len(respx_mock.calls) == 1  # the feed, and no validation

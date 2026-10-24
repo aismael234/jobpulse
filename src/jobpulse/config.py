@@ -26,6 +26,7 @@ from pydantic_core import ErrorDetails, PydanticCustomError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from jobpulse.core import filters as core_filters
+from jobpulse.core.dedupe import normalize_company
 from jobpulse.core.locations import DEFAULT_SHORT_LABELS, merge_aliases
 from jobpulse.core.scoring import Weights
 
@@ -43,6 +44,7 @@ NTFY_TOPIC_PATTERN = re.compile(r"[A-Za-z0-9_-]{24,64}")
 EMAIL_PATTERN = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
 TIME_OF_DAY_PATTERN = re.compile(r"([01]\d|2[0-3]):[0-5]\d")
 SLUG_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]*$"
+BOARD_REF_PATTERN = re.compile(r"(greenhouse|lever|ashby|workday)/[A-Za-z0-9][A-Za-z0-9._-]*")
 
 DEFAULT_HOST_LIMITS = {
     "boards-api.greenhouse.io": 4,
@@ -104,8 +106,25 @@ def _check_regex(pattern: str) -> str:
     return pattern
 
 
+def _check_board_ref(value: str) -> str:
+    if not BOARD_REF_PATTERN.fullmatch(value.strip()):
+        raise ValueError(
+            f"{value!r} is not ats/token, e.g. greenhouse/stripe "
+            "(ats is greenhouse, lever, ashby or workday)"
+        )
+    return value.strip()
+
+
+def _check_company_name(value: str) -> str:
+    if not normalize_company(value):
+        raise ValueError(f"{value!r} is empty once case, punctuation and Inc/LLC/Ltd are dropped")
+    return value
+
+
 Regex = Annotated[str, AfterValidator(_check_regex)]
 Slug = Annotated[str, Field(min_length=1, max_length=200, pattern=SLUG_PATTERN)]
+BoardRef = Annotated[str, AfterValidator(_check_board_ref)]
+CompanyName = Annotated[str, AfterValidator(_check_company_name)]
 
 
 class _Model(BaseModel):
@@ -306,8 +325,16 @@ class SimplifyConfig(_Model):
 
 class DiscoveryConfig(_Model):
     enabled: bool = True
+    require_match: bool = True
+    max_board_jobs: int | None = Field(default=1000, ge=1)
+    max_auto_companies: int | None = Field(default=50, ge=0)
     max_validations_per_cycle: int = Field(default=10, ge=0, le=100)
     max_page_fetches_per_cycle: int = Field(default=5, ge=0, le=50)
+
+
+class BlocklistConfig(_Model):
+    companies: list[CompanyName] = []
+    boards: list[BoardRef] = []
 
 
 class HealthConfig(_Model):
@@ -338,6 +365,7 @@ class AppConfig(_Model):
     linkedin: LinkedInPacing = LinkedInPacing()
     simplify: SimplifyConfig = SimplifyConfig()
     discovery: DiscoveryConfig = DiscoveryConfig()
+    blocklist: BlocklistConfig = BlocklistConfig()
     health: HealthConfig = HealthConfig()
     dashboard: DashboardConfig = DashboardConfig()
 
@@ -374,6 +402,27 @@ class AppConfig(_Model):
                 )
             seen[key] = index
         return value
+
+    @model_validator(mode="after")
+    def _blocklist_spares_the_watchlist(self) -> Self:
+        names = {normalize_company(name): i for i, name in enumerate(self.blocklist.companies)}
+        boards = {board.lower(): i for i, board in enumerate(self.blocklist.boards)}
+        for index, entry in enumerate(self.watchlist):
+            if not entry.active:
+                continue
+            board = f"{entry.ats}/{entry.token}".lower()
+            name = normalize_company(entry.name)
+            if board in boards:
+                field = f"blocklist.boards[{boards[board]}]"
+            elif name in names:
+                field = f"blocklist.companies[{names[name]}]"
+            else:
+                continue
+            raise ValueError(
+                f"{field} blocks watchlist[{index}] ({entry.name}), which is active; remove one "
+                "of them, or set active: false on the watchlist entry"
+            )
+        return self
 
     @field_validator("searches")
     @classmethod
@@ -606,6 +655,13 @@ def filter_rules(config: AppConfig) -> core_filters.FilterRules:
             exclude=_patterns(filters.locations.exclude),
             unknown_passes=filters.locations.unknown_location_passes,
         ),
+        blocklist=company_blocklist(config),
+    )
+
+
+def company_blocklist(config: AppConfig) -> core_filters.Blocklist:
+    return core_filters.Blocklist.build(
+        companies=config.blocklist.companies, boards=config.blocklist.boards
     )
 
 

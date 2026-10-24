@@ -14,12 +14,14 @@ from jobpulse.config import (
     AppConfig,
     ConfigError,
     Settings,
+    company_blocklist,
     config_warnings,
     load_config,
     load_settings,
     require_secrets,
     resolve_config_path,
 )
+from jobpulse.core.filters import Blocklist
 from jobpulse.core.timeparse import utcnow
 from jobpulse.db import migrate, repo
 from jobpulse.db.session import display_url, resolve_database_url, session_scope
@@ -265,8 +267,10 @@ def worker(ctx: typer.Context) -> None:
 def companies_list(ctx: typer.Context) -> None:
     """List watchlist companies with their baseline state and open postings."""
     state = _state(ctx)
+    config = _load_config(state) if state.config_path.exists() else None
+    blocklist = company_blocklist(config) if config else Blocklist()
     try:
-        sessions = open_database(_database_url(state))
+        sessions = open_database(_database_url(state, config))
     except DatabaseNotReady as exc:
         _fail(exc)
     with session_scope(sessions) as session:
@@ -279,7 +283,10 @@ def companies_list(ctx: typer.Context) -> None:
             if company.baseline_done_at
             else "baseline pending"
         )
-        status = "active" if company.active else "inactive"
+        blocked = blocklist.blocks_board(company.ats, company.token) or blocklist.blocks_company(
+            company.name
+        )
+        status = "inactive" if not company.active else "blocked" if blocked else "active"
         typer.echo(
             f"{company.ats:<10} {company.token:<24} {company.name:<24} priority {company.priority:<3}"
             f" {status:<8} {baseline:<20} {company.open_postings} open ({company.source_of_discovery})"

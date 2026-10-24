@@ -24,7 +24,7 @@ from jobpulse.config import (
 )
 from jobpulse.core.dedupe import posting_fingerprint
 from jobpulse.core.detection import EvaluationContext, evaluate, plan_presence, prescreen
-from jobpulse.core.filters import check_title
+from jobpulse.core.filters import check_locations, check_title
 from jobpulse.core.models import (
     ATS_SOURCES,
     DEDUPE_SOURCES,
@@ -101,6 +101,8 @@ class CycleReport:
     held_back: int = 0
     discovered: list[str] = field(default_factory=list)  # boards added (or that would be)
     discovery_deferred: int = 0
+    discovery_skipped: list[str] = field(default_factory=list)  # valid, but over a limit
+    discovery_capped: int = 0
     health: list[str] = field(default_factory=list)  # health messages sent (or due)
 
 
@@ -159,6 +161,7 @@ class Poller:
             HealthMonitor(HealthRules.from_config(config.health)) if config.health.enabled else None
         )
         self._rules = filter_rules(config)
+        self._blocklist = self._rules.blocklist
         self._weights = scoring_weights(config)
         self._short_labels = short_labels(config)
         self._freshness = timedelta(hours=config.detection.freshness_hours)
@@ -235,7 +238,15 @@ class Poller:
         for target in targets:
             if target.source not in self._adapters:
                 log.warning("no adapter for %s/%s; skipped", target.source, target.key)
-        return runnable
+        return [target for target in runnable if not self._blocked(target)]
+
+    def _blocked(self, target: Target) -> bool:
+        """A company board stays unpolled while the blocklist names it or its company."""
+        if not isinstance(target, CompanyTarget):
+            return False
+        return self._blocklist.blocks_board(target.ats, target.token) or (
+            self._blocklist.blocks_company(target.name)
+        )
 
     async def _fetch(self, target: Target) -> FetchResult:
         try:
@@ -460,14 +471,20 @@ class Poller:
         return survivors
 
     def _sightings(self, result: FetchResult) -> list[Sighting]:
-        """Every URL on a feed or job-board posting, for watchlist discovery."""
+        """Every URL on a feed or job-board posting, for watchlist discovery. A sighting is
+        relevant when its posting passes the title and location filters."""
         if self._discoverer is None or not result.ok:
             return []
         sightings: list[Sighting] = []
         for posting in result.postings:
             if posting.source not in DEDUPE_SOURCES:
                 continue
-            relevant = check_title(posting.title, self._rules).passed
+            if self._blocklist.blocks_company(posting.company_name):
+                continue
+            relevant = (
+                check_title(posting.title, self._rules).passed
+                and check_locations(posting.locations, self._rules.locations).passed
+            )
             for url in dict.fromkeys(url for url in (posting.url, posting.apply_url) if url):
                 sightings.append(
                     Sighting(
@@ -502,6 +519,13 @@ class Poller:
         session = unit.session
         now = self._clock()
         due = repo.instant_unnotified(session, since=now - self._freshness)
+        # Rows decided before their company joined the blocklist are dropped, not pushed.
+        blocked = {row.id for row in due if self._blocklist.blocks_company(row.company_name)}
+        for row_id in blocked:
+            repo.set_decision(
+                session, row_id, Decision(tier="filtered", reason="company is on the blocklist")
+            )
+        due = [row for row in due if row.id not in blocked]
         cap = self._config.notify.max_instant_per_cycle
         to_send, held = due[:cap], due[cap:]
         for row in held:
@@ -579,15 +603,37 @@ class Poller:
         if self._discoverer is None or not sightings:
             return
         session = unit.session
-        known = repo.known_companies(session)
+        # Blocked boards are as good as known: never validated, never added.
+        known = repo.known_companies(session) | self._blocklist.boards
         hosts = repo.greenhouse_hosts(session)
+        limit = self._config.discovery.max_auto_companies
+        room = (
+            None
+            if limit is None
+            else max(0, limit - repo.count_polled_auto_companies(session, self._blocklist))
+        )
         unit.checkpoint()  # nothing stays open while pages and validations run
-        outcome = await self._discoverer.run(sightings, known=known, greenhouse_hosts=hosts.keys())
+        outcome = await self._discoverer.run(
+            sightings, known=known, greenhouse_hosts=hosts.keys(), room=room
+        )
         report.discovery_deferred = outcome.deferred
+        report.discovery_capped = outcome.capped
+        for found in outcome.too_big:
+            ref = found.validation.ref
+            name = found.candidate.company_name or found.validation.name or ref.token
+            report.discovery_skipped.append(
+                f"{ref.ats}/{ref.token} ({name}, {found.validation.job_count} jobs): more than "
+                f"discovery.max_board_jobs ({self._config.discovery.max_board_jobs})"
+            )
         now = self._clock()
         for found in outcome.valid:
             ref = found.validation.ref
             name = found.candidate.company_name or found.validation.name or ref.token
+            official = found.validation.name
+            if official and self._blocklist.blocks_company(official):
+                self._discoverer.reject(ref)
+                log.info("discovery: %s/%s not added: %s is blocked", ref.ats, ref.token, official)
+                continue
             if repo.add_discovered_company(
                 session,
                 ats=ref.ats,

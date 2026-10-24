@@ -3,6 +3,7 @@
 import pytest
 
 from jobpulse.core.filters import (
+    Blocklist,
     FilterRules,
     LocationRules,
     check_description,
@@ -152,3 +153,29 @@ def test_unknown_location() -> None:
 
 def test_empty_location_rules_accept_anything() -> None:
     assert check_locations(["Anywhere, Earth"], LocationRules()).passed
+
+
+# --- the company blocklist ---------------------------------------------------------------
+
+
+def test_blocklist_matches_names_without_case_punctuation_or_legal_suffixes() -> None:
+    blocklist = Blocklist.build(companies=["Acme, Inc.", "Jobot", "Meta"])
+    assert blocklist.blocks_company("ACME")
+    assert blocklist.blocks_company("Acme Inc")
+    assert blocklist.blocks_company("jobot")
+    assert not blocklist.blocks_company("Acme Widgets")
+    assert not blocklist.blocks_company("Metabase")  # whole names only, never substrings
+    assert not blocklist.blocks_company("")
+
+
+def test_blocklist_boards_are_ats_and_token() -> None:
+    blocklist = Blocklist.build(boards=["greenhouse/SpaceX", "lever/veeva"])
+    assert blocklist.blocks_board("greenhouse", "spacex")
+    assert blocklist.blocks_board("lever", "Veeva")
+    assert not blocklist.blocks_board("lever", "spacex")
+    assert blocklist.boards == frozenset({("greenhouse", "spacex"), ("lever", "veeva")})
+
+
+def test_an_empty_blocklist_blocks_nothing() -> None:
+    assert not Blocklist().blocks_company("Acme")
+    assert not Blocklist().blocks_board("greenhouse", "acme")

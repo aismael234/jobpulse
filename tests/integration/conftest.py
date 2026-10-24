@@ -36,8 +36,7 @@ from jobpulse.discovery import Discoverer
 from jobpulse.httpclient import HttpClient
 from jobpulse.notify.base import Notification, NotifierError
 from jobpulse.poller import CycleReport, Poller
-from jobpulse.runtime import build_adapters
-from jobpulse.sources.ats_detect import AtsDetector
+from jobpulse.runtime import build_adapters, build_discoverer
 from jobpulse.sources.jobspy_boards import JobSpyAdapter
 from tests.factories import NOW, FakeMonotonic, FakeSleep
 
@@ -348,7 +347,32 @@ class Env:
         self.reconfigure(searches=[*self.config.searches, entry])
 
     def reconfigure(self, **sections: Any) -> None:
-        self.config = self.config.model_copy(update=sections)
+        """Swap whole config sections (validated, so cross-section rules still apply)."""
+        data = self.config.model_dump()
+        data.update(
+            {
+                name: value.model_dump() if hasattr(value, "model_dump") else value
+                for name, value in sections.items()
+            }
+        )
+        self.config = AppConfig.model_validate(data)
+
+    def rebuild_discoverer(self) -> None:
+        """A discoverer built from the current config (its miss cache starts empty)."""
+        self.discoverer = build_discoverer(self.http, self.config)
+
+    def add_company(self, name: str, ats: str, token: str, **fields: Any) -> None:
+        """A company that discovery (or the dashboard) added, not config."""
+        with self.sessions() as session:
+            values: dict[str, Any] = {
+                "source_of_discovery": "auto",
+                "baseline_done_at": NOW - timedelta(days=2),
+                "created_at": NOW - timedelta(days=2),
+                "updated_at": NOW - timedelta(days=2),
+                **fields,
+            }
+            session.add(Company(name=name, ats_type=ats, token=token, **values))
+            session.commit()
 
     def search(self, name: str = "backend-sf") -> Search:
         with self.sessions() as session:
@@ -407,8 +431,9 @@ def env(
     config = make_config()
     adapters: dict[str, Any] = dict(build_adapters(http, config))
     adapters["linkedin"] = FakeBoardAdapter("linkedin")
-    discoverer = Discoverer(AtsDetector(http), max_validations=10, max_page_fetches=5)
-    return Env(database, http, config, RecordingNotifier(), adapters, discoverer)
+    return Env(
+        database, http, config, RecordingNotifier(), adapters, build_discoverer(http, config)
+    )
 
 
 @pytest.fixture

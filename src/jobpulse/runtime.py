@@ -112,6 +112,8 @@ def build_discoverer(http: HttpClient, config: AppConfig) -> Discoverer | None:
         AtsDetector(http),
         max_validations=discovery.max_validations_per_cycle,
         max_page_fetches=discovery.max_page_fetches_per_cycle,
+        require_match=discovery.require_match,
+        max_board_jobs=discovery.max_board_jobs,
     )
 
 
@@ -216,9 +218,15 @@ def render_report(report: CycleReport) -> list[str]:
     lines.extend(f"{health}: {title}" for title in report.health)
     added = "would add" if report.dry_run else "added"
     lines.extend(f"discovery: {added} {board}" for board in report.discovered)
+    lines.extend(f"discovery: skipped {board}" for board in report.discovery_skipped)
     if report.discovery_deferred:
+        waiting = _count(report.discovery_deferred, "more candidate waits", "more candidates wait")
+        lines.append(f"discovery: {waiting} for later cycles")
+    if report.discovery_capped:
+        boards = _count(report.discovery_capped, "matching board", "matching boards")
         lines.append(
-            f"discovery: {report.discovery_deferred} more candidates wait for later cycles"
+            f"discovery: {boards} not added: discovery.max_auto_companies reached "
+            "(raise it, or block companies you don't want)"
         )
     if report.dry_run:
         lines.append("dry run: rolled back")

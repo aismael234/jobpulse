@@ -18,4 +18,6 @@ scripts/check.sh                          # lint, types, tests
 
 The first real poll of each board, search and feed stores what's there silently. After that, `uv run jobpulse worker` polls each on its own schedule and pushes fresh matches through ntfy. Put `NTFY_TOPIC` in `.env` first; see `.env.example`.
 
-Indeed and LinkedIn searches go in `searches:` in `config.yaml` (examples in `config.example.yaml`). Boards linked from the feed and from job-board postings are added to the watchlist automatically (`discovery:`); `uv run jobpulse companies list` shows where each company came from.
+Indeed and LinkedIn searches go in `searches:` in `config.yaml` (examples in `config.example.yaml`). Boards linked from the feed and from job-board postings are added to the watchlist automatically when one of their postings passes your filters (`discovery:`, at most 50 by default); `uv run jobpulse companies list` shows where each company came from.
+
+To never hear about a company again, add it to `blocklist.companies` (or a board to `blocklist.boards`): its postings are kept but never pushed, and discovery leaves it alone.

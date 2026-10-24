@@ -58,7 +58,9 @@ def test_dry_run_of_a_first_poll_prints_baseline_lines_and_saves_nothing(
         "discovery: would add lever/delta (Delta, 2 jobs) from "
         "https://jobs.lever.co/delta/98959f08-1d1b-4b75-919e-833f825394b0/apply"
     ) in output
-    assert "discovery: 4 more candidates wait for later cycles" in output
+    # Only Delta has a posting that passes the scenario's title rule; Zeta's page is over the
+    # scenario's page cap of 0.
+    assert "discovery: 1 more candidate waits for later cycles" in output
     assert "would notify: nothing" in output
     for name in ("postings", "runs", "companies", "searches", "source_state"):
         assert count_rows(db_url, name) == 0
@@ -144,6 +146,23 @@ def test_unknown_source_is_rejected(cli: tuple[list[str], str]) -> None:
     result = runner.invoke(app, [*base, "poll", "--dry-run", "--source", "monster"])
     assert result.exit_code == 2
     assert "monster" in result.output
+
+
+def test_companies_list_marks_blocked_companies(cli: tuple[list[str], str], tmp_path: Path) -> None:
+    base, _ = cli
+    poll(base, "first_poll")  # discovery adds Delta
+    blocking = tmp_path / "blocking.yaml"
+    blocking.write_text(
+        CONFIG.read_text(encoding="utf-8") + "blocklist: {companies: [Delta]}\n", encoding="utf-8"
+    )
+    listed = runner.invoke(
+        app, ["--config", str(blocking), "--env-file", str(tmp_path / ".env"), "companies", "list"]
+    )
+    assert listed.exit_code == 0, listed.output
+    [delta] = [line for line in listed.output.splitlines() if " delta " in line]
+    assert "blocked" in delta
+    assert "(auto)" in delta
+    assert all("blocked" not in line for line in listed.output.splitlines() if " acme " in line)
 
 
 def test_companies_sync_and_list(cli: tuple[list[str], str]) -> None:

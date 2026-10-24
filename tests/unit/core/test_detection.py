@@ -1,5 +1,6 @@
 """Items 1, 3 and 7 (pure part): presence planning, closures and the freshness gate."""
 
+import dataclasses
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -15,7 +16,7 @@ from jobpulse.core.detection import (
     posting_age,
     prescreen,
 )
-from jobpulse.core.filters import FilterRules, LocationRules
+from jobpulse.core.filters import Blocklist, FilterRules, LocationRules
 from jobpulse.core.models import FetchResult, Posting
 from jobpulse.core.scoring import Weights
 from jobpulse.core.timeparse import end_of_day, start_of_day
@@ -186,6 +187,20 @@ def test_prescreen_marks_known_old_postings_stale() -> None:
     decision = prescreen(make_posting(posted_at=NOW - timedelta(days=5)), context())
     assert decision is not None
     assert decision.tier == "stale"
+
+
+def test_prescreen_filters_blocked_companies_first() -> None:
+    rules = dataclasses.replace(RULES, blocklist=Blocklist.build(companies=["Acme Inc"]))
+    decision = prescreen(make_posting(company_name="ACME, Inc."), context(rules=rules))
+    assert decision is not None
+    assert decision.tier == "filtered"
+    assert decision.reason == "company is on the blocklist"
+    assert prescreen(make_posting(company_name="Acme Widgets"), context(rules=rules)) is None
+    stale = prescreen(
+        make_posting(company_name="Acme", posted_at=NOW - timedelta(days=5)), context(rules=rules)
+    )
+    assert stale is not None
+    assert stale.tier == "filtered"  # blocked, whatever else is wrong with it
 
 
 def test_prescreen_passes_survivors_on() -> None:

@@ -46,7 +46,8 @@ Personal job-posting watcher. Read PROGRESS.md first: milestone checklists, deci
 - JobSpy frames under pandas 3 hold `nan` (a float) for missing text cells; `jobspy_boards._clean` turns them into None. LinkedIn's page delay is the class attribute `jobspy.linkedin.LinkedIn.delay`, set from config on first use.
 - The Simplify feed skips the in-memory ETag cache: its ETag lives in `source_state` and is saved in the same commit as that cycle's rows.
 - Two postings with the same company, title and city fingerprint-merge within 30 days, even inside one source. Fixtures need distinct titles.
-- Discovery's miss cache is in memory: each `poll --once` starts fresh, the worker keeps it.
+- Discovery's miss cache is in memory: each `poll --once` starts fresh, the worker keeps it. Integration tests build the discoverer from config; after changing `discovery` settings, call `env.rebuild_discoverer()`.
+- Blocking an active watchlist entry is a config error, so tests that block a watched company use a job-board or feed company, or `env.add_company()` for a discovered one.
 - time-machine 3 doesn't patch `monotonic`, so asyncio runs in real time. Anything that sleeps takes an injected `sleep`.
 
 ## Verified API facts (2026-10-23)

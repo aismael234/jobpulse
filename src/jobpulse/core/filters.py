@@ -1,9 +1,11 @@
 """Title, description and location rules. Patterns arrive compiled (case-insensitive)."""
 
 import re
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Literal
+
+from jobpulse.core.dedupe import normalize_company
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,6 +22,32 @@ class LocationRules:
 
 
 @dataclass(frozen=True, slots=True)
+class Blocklist:
+    """Companies (normalized names) and ATS boards (ats, lowercase token) to stay away from."""
+
+    companies: frozenset[str] = frozenset()
+    boards: frozenset[tuple[str, str]] = frozenset()
+
+    @classmethod
+    def build(cls, *, companies: Iterable[str] = (), boards: Iterable[str] = ()) -> "Blocklist":
+        """From config: company names as written, boards as ``ats/token``."""
+        names = frozenset(name for name in map(normalize_company, companies) if name)
+        refs = frozenset(
+            (ats.strip().lower(), token.strip().lower())
+            for ats, _, token in (board.partition("/") for board in boards)
+        )
+        return cls(names, refs)
+
+    def blocks_company(self, name: str) -> bool:
+        """Whole names only, compared like fingerprints: "Acme, Inc." is "ACME", never
+        "Acme Widgets"."""
+        return bool(self.companies) and normalize_company(name) in self.companies
+
+    def blocks_board(self, ats: str, token: str) -> bool:
+        return (ats, token.lower()) in self.boards
+
+
+@dataclass(frozen=True, slots=True)
 class FilterRules:
     title_include: tuple[WeightedRegex, ...] = ()
     title_exclude: tuple[re.Pattern[str], ...] = ()
@@ -32,6 +60,7 @@ class FilterRules:
     stack: tuple[WeightedRegex, ...] = ()
     stack_saturation: float = 2.0
     locations: LocationRules = field(default_factory=LocationRules)
+    blocklist: Blocklist = field(default_factory=Blocklist)
 
 
 @dataclass(frozen=True, slots=True)

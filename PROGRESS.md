@@ -20,7 +20,9 @@ Source of truth for what is built, what was decided, and what is left. The appro
 - **Simplify ETag** lives in `source_state` and is saved in the same commit as the fetched rows, so a crash can't skip a feed version. A 304 is a successful run with `not_modified`, which the busy-zero health rule ignores. The feed doesn't use the in-memory body cache: its closures come from `active: false`, so there is nothing to replay.
 - **Simplify closures** follow the spec: only `active: false` closes. Listings with `is_visible: false` are ignored (all 14 in today's feed are also inactive).
 - **Discovery fetches page HTML only for `gh_jid` links** on custom domains not yet mapped, once per host and capped per cycle. Other non-ATS links (Workday, iCIMS and so on, about 70% of the feed) are never fetched. The M3 paste flow does the full URL-then-HTML detection.
-- **Discovery order:** boards with a title-matching posting first, then the most referenced. Validations are capped per cycle. Negative results are cached in memory for the worker's lifetime: 7 days for a missing board, 2 h for transient errors.
+- **Discovery order:** boards with the most matching postings first, then the most referenced. Validations are capped per cycle. Negative results are cached in memory for the worker's lifetime: 7 days for a missing board, 2 h for transient errors.
+- **Narrower discovery (your call, 2026-10-23):** the spec adds every board any URL points at; now a board must have a feed or job-board posting that passes your title and location filters (`discovery.require_match`). Boards with more than `max_board_jobs` (1000) open jobs are skipped, reported and not downloaded again for 7 days. At most `max_auto_companies` (50) discovered companies are polled. With the example filters, today's feed has 131 matching boards instead of 381; SpaceX (2,817 jobs) and Anduril (2,506) are over the size limit.
+- **Company blocklist:** `blocklist.companies` (whole names, normalized like fingerprints) and `blocklist.boards` (`ats/token`). A blocked company's postings, from any source, are stored as `filtered` and never pushed; a push still waiting when the company is blocked is dropped. Discovery never adds a blocked company or board, and a discovered board that becomes blocked isn't polled (unblocking resumes it without a new baseline). Blocked companies don't count toward `max_auto_companies`. Blocking an active watchlist entry is a config error.
 - **LinkedIn back-off:** after a 429, LinkedIn searches are skipped for `linkedin.cooldown_minutes` (30). A skipped search records no run, so it neither fails nor recovers in health checks. JobSpy's own delay between LinkedIn result pages is set from `linkedin.delay_*_seconds`.
 - **Search changes:** a changed site, term, location, `is_remote`, country or company-id list resets that search's baseline. A changed `results_wanted` or `hours_old` doesn't.
 - **Reverse link:** a new ATS row, in a baseline or not, adopts unmerged feed and job-board copies (same ATS key, `gh_jid` or fingerprint in the window). It inherits their `notified_at`, `digest_sent_at`, status and applicant data, and a baseline row also takes over a match tier (`instant`/`digest`). The ATS row is always the primary.
@@ -89,6 +91,7 @@ Source of truth for what is built, what was decided, and what is left. The appro
 - [ ] source-health page; watchlist page (paste URL → detect → validate → add)
 - [ ] 127.0.0.1 by default, basic auth when configured, CSRF-safe POSTs
 - [ ] twice-daily digest, `digest_sent_at`, at most one digest per posting
+- [ ] digest and dashboard leave out blocked companies (rows decided before the company was blocked)
 - [ ] Dockerfile, docker-compose (`migrate`, `worker`, `web`, `postgres` profile)
 - [ ] worker watchdog: exit non-zero when no job finished within 3× the longest interval (in the approved plan; M1 didn't build it)
 - [ ] README complete; optional ruff hook
@@ -144,3 +147,7 @@ LinkedIn applicant enrichment, the Workday adapter and the LLM scoring layer are
   - **Fixed after that run:** gh_jid pages are read only while the validation cap has room, so a cycle never reads a page whose board it can't validate.
   - **Schema check:** the CLI and worker refuse to run on a database behind the newest migration, with a message to run `jobpulse db upgrade`. An M1 database (at 0001) used to crash on the first query that touched a new column.
   - **For M3:** the dashboard's paste flow can call `AtsDetector.detect` with page fetches on; the health page can read `runs` and `health_incidents`.
+- **2026-10-23** — Narrower discovery and a company blocklist (your request, before M3).
+  - **Test-first:** 29 new tests failed against stubs, all on missing behavior (non-matching boards still validated, blocked companies pushed and polled, config rules not enforced). Now 604 tests pass.
+  - **Measured on today's feed:** 381 unwatched boards, 131 with a posting that passes the example title filter, 28 with two or more.
+  - **Real dry run** (scratch database): 8 boards to add and 2 skipped for size (SpaceX, Anduril) in the first cycle, 138 candidates left; the cycle took 4 s.

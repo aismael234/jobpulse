@@ -120,8 +120,11 @@ def _stale(posting: Posting, ctx: EvaluationContext) -> Decision:
 
 
 def prescreen(posting: Posting, ctx: EvaluationContext) -> Decision | None:
-    """Cheap checks before any detail fetch: title, location, and freshness when the list
-    already carries a timestamp. ``None`` means the posting survives."""
+    """Cheap checks before any detail fetch: the company blocklist, title, location, and
+    freshness when the list already carries a timestamp. ``None`` means the posting
+    survives."""
+    if ctx.rules.blocklist.blocks_company(posting.company_name):
+        return Decision(tier="filtered", reason="company is on the blocklist")
     title = check_title(posting.title, ctx.rules)
     if not title.passed:
         return Decision(tier="filtered", reason=title.reason)

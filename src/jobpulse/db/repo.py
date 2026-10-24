@@ -20,6 +20,7 @@ from jobpulse.config import SearchEntry, SimplifyConfig, WatchlistEntry
 from jobpulse.core.atsurls import gh_jid
 from jobpulse.core.dedupe import canonicalize_url, merge_also_seen
 from jobpulse.core.detection import PresencePlan, PresenceRow
+from jobpulse.core.filters import Blocklist
 from jobpulse.core.models import (
     ATS_SOURCES,
     DEDUPE_SOURCES,
@@ -348,6 +349,21 @@ def known_companies(session: Session) -> set[tuple[str, str]]:
         (ats, token.lower())
         for ats, token in session.execute(select(Company.ats_type, Company.token))
     }
+
+
+def count_polled_auto_companies(session: Session, blocklist: Blocklist) -> int:
+    """Active companies that discovery added and the blocklist doesn't stop: the number
+    ``discovery.max_auto_companies`` caps."""
+    rows = session.execute(
+        select(Company.ats_type, Company.token, Company.name).where(
+            Company.active.is_(True), Company.source_of_discovery == "auto"
+        )
+    )
+    return sum(
+        1
+        for ats, token, name in rows
+        if not (blocklist.blocks_board(ats, token) or blocklist.blocks_company(name))
+    )
 
 
 def add_discovered_company(

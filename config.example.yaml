@@ -126,8 +126,21 @@ simplify:
 # board's first poll is a silent baseline. Boards you removed from config are never re-added.
 discovery:
   enabled: true
+  require_match: true           # only boards with a posting that passes your title and location filters
+  max_board_jobs: 1000          # skip boards with more open jobs (add them to the watchlist yourself); null = no limit
+  max_auto_companies: 50        # stop adding once this many discovered companies are polled; null = no limit
   max_validations_per_cycle: 10
   max_page_fetches_per_cycle: 5 # gh_jid links on company sites: the page is read once for the board
+
+# Companies and boards to stay away from. A blocked company's postings (from any source) are
+# stored but never pushed or put in a digest, discovery never adds its boards, and a board it
+# added earlier is no longer polled. Names match whole, ignoring case, punctuation and
+# Inc/LLC/Ltd: "Acme, Inc." blocks "ACME" but not "Acme Widgets". Blocked boards (ats/token)
+# are never added or polled, though their jobs can still reach you through the feed or a
+# search. To drop a company from the watchlist above, remove it there instead.
+blocklist:
+  companies: []                 # e.g. [Jobot, Revature]
+  boards: []                    # e.g. [greenhouse/spacex]
 
 # One push when a source keeps failing or a busy one goes quiet, and one more when it recovers.
 health:

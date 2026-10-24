@@ -9,11 +9,14 @@ from jobpulse.config import (
     DEFAULT_DATABASE_URL,
     SIMPLIFY_NEW_GRAD_URL,
     ConfigError,
+    company_blocklist,
     config_warnings,
+    filter_rules,
     load_config,
     load_settings,
     require_secrets,
 )
+from jobpulse.core.filters import Blocklist
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 EXAMPLE_CONFIG = REPO_ROOT / "config.example.yaml"
@@ -376,3 +379,89 @@ def test_empty_env_value_counts_as_unset(tmp_path: Path) -> None:
     settings = load_settings(write_env(tmp_path, "NTFY_TOPIC=\nDISCORD_WEBHOOK_URL=\n"))
     assert settings.ntfy_topic is None
     assert settings.discord_webhook_url is None
+
+
+# --- narrower discovery and the company blocklist -----------------------------------------
+
+
+def test_discovery_narrowing_and_blocklist_defaults(tmp_path: Path) -> None:
+    config = load_config(write_config(tmp_path))
+    assert config.discovery.require_match is True
+    assert config.discovery.max_board_jobs == 1000
+    assert config.discovery.max_auto_companies == 50
+    assert config.blocklist.companies == []
+    assert config.blocklist.boards == []
+    assert company_blocklist(config) == Blocklist()
+
+
+@pytest.mark.parametrize(
+    ("body", "field"),
+    [
+        ("blocklist: {boards: [spacex]}\n", "blocklist.boards[0]"),
+        ("blocklist: {boards: [greenhouse/acme, 'workable/acme']}\n", "blocklist.boards[1]"),
+        ("blocklist: {companies: ['Inc.']}\n", "blocklist.companies[0]"),
+        ("blocklist: {companies: [Acme, '']}\n", "blocklist.companies[1]"),
+        ("discovery: {max_board_jobs: 0}\n", "discovery.max_board_jobs"),
+        ("discovery: {max_auto_companies: -1}\n", "discovery.max_auto_companies"),
+    ],
+)
+def test_blocklist_and_narrowing_name_bad_fields(tmp_path: Path, body: str, field: str) -> None:
+    message = config_error(write_config(tmp_path, body))
+    assert field in message
+
+
+def test_limits_can_be_turned_off(tmp_path: Path) -> None:
+    config = load_config(
+        write_config(tmp_path, "discovery: {max_board_jobs: null, max_auto_companies: null}\n")
+    )
+    assert config.discovery.max_board_jobs is None
+    assert config.discovery.max_auto_companies is None
+
+
+@pytest.mark.parametrize(
+    "blocklist",
+    ["{companies: ['ACME, Inc']}", "{boards: [greenhouse/Acme]}"],
+    ids=["by-name", "by-board"],
+)
+def test_blocking_an_active_watchlist_company_is_an_error(tmp_path: Path, blocklist: str) -> None:
+    path = write_config(
+        tmp_path,
+        f"""
+        watchlist:
+          - {{name: Beta, ats: lever, token: beta}}
+          - {{name: Acme, ats: greenhouse, token: acme}}
+        blocklist: {blocklist}
+        """,
+    )
+    message = config_error(path)
+    assert "watchlist[1]" in message
+    assert "blocklist." in message
+    assert str(path) in message
+
+
+def test_an_inactive_watchlist_company_may_be_blocked(tmp_path: Path) -> None:
+    config = load_config(
+        write_config(
+            tmp_path,
+            """
+            watchlist:
+              - {name: Acme, ats: greenhouse, token: acme, active: false}
+            blocklist: {companies: [Acme], boards: [greenhouse/acme]}
+            """,
+        )
+    )
+    assert config.blocklist.companies == ["Acme"]
+
+
+def test_the_blocklist_compiles_into_the_filter_rules(tmp_path: Path) -> None:
+    config = load_config(
+        write_config(
+            tmp_path,
+            "blocklist: {companies: ['Jobot', 'Revature LLC'], boards: [greenhouse/SpaceX]}\n",
+        )
+    )
+    blocklist = company_blocklist(config)
+    assert blocklist == Blocklist.build(
+        companies=["Jobot", "Revature"], boards=["greenhouse/spacex"]
+    )
+    assert filter_rules(config).blocklist == blocklist
