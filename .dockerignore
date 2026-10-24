@@ -1,0 +1,22 @@
+# Secrets and local state stay out of the build context (and so out of the image).
+.env
+.env.*
+config.yaml
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# Not needed to build or run
+.git
+.venv
+.claude/
+tests/
+scripts/
+dist/
+build/
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/

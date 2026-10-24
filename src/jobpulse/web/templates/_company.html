@@ -1,0 +1,36 @@
+<tr id="company-{{ company.id }}"{% if blocked or not company.active %} class="muted"{% endif %}>
+  <td>
+    {{ company.name }}
+    {% set found_at = company.discovered_from|http_url %}
+    {% if found_at %}<a class="muted small" href="{{ found_at }}" target="_blank" rel="noopener noreferrer" title="Where this board was found">found here</a>{% endif %}
+  </td>
+  <td>
+    {% set href = company|board %}
+    {% if href %}<a href="{{ href }}" target="_blank" rel="noopener noreferrer">{{ company.ats }}/{{ company.token }}</a>{% else %}{{ company.ats }}/{{ company.token }}{% endif %}
+    {% if company.region == "eu" %}<span class="badge">EU</span>{% endif %}
+  </td>
+  <td>
+    {% if company.source_of_discovery == "config" %}
+    <span title="Set in config.yaml">{{ company.priority }}</span>
+    {% else %}
+    <form class="inline" method="post" action="/watchlist/{{ company.id }}/priority" hx-post="/watchlist/{{ company.id }}/priority" hx-target="#company-{{ company.id }}" hx-swap="outerHTML">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="number" name="priority" value="{{ company.priority }}" min="0" max="1000" aria-label="Priority of {{ company.name }}">
+      <button type="submit">Set</button>
+    </form>
+    {% endif %}
+  </td>
+  <td>
+    {% if blocked %}blocked{% elif company.active %}active{% elif company.source_of_discovery == "config" %}inactive{% else %}paused{% endif %}
+    {% if company.source_of_discovery != "config" and not blocked %}
+    <form class="inline" method="post" action="/watchlist/{{ company.id }}/active" hx-post="/watchlist/{{ company.id }}/active" hx-target="#company-{{ company.id }}" hx-swap="outerHTML">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="active" value="{{ '0' if company.active else '1' }}">
+      <button type="submit">{{ "Pause" if company.active else "Resume" }}</button>
+    </form>
+    {% endif %}
+  </td>
+  <td>{{ company.source_of_discovery }}</td>
+  <td>{% if company.baseline_done_at %}<span title="{{ company.baseline_done_at|local }}">done {{ company.baseline_done_at|ago }}</span>{% else %}baseline pending{% endif %}</td>
+  <td>{{ company.open_postings }}</td>
+</tr>

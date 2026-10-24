@@ -28,6 +28,17 @@ Source of truth for what is built, what was decided, and what is left. The appro
 - **Reverse link:** a new ATS row, in a baseline or not, adopts unmerged feed and job-board copies (same ATS key, `gh_jid` or fingerprint in the window). It inherits their `notified_at`, `digest_sent_at`, status and applicant data, and a baseline row also takes over a match tier (`instant`/`digest`). The ATS row is always the primary.
 - **No company, no fingerprint merge:** a posting without a company name never fingerprint-merges.
 - **"City, ST, USA" labels** drop the trailing US country, so JobSpy and ATS locations agree.
+- **Dashboard views:** New holds untriaged matches (instant or digest tier). Saved, Applied and Dismissed hold every posting with that status, whatever its tier, so a triaged posting never disappears because of its tier. Merged copies never show; their primary does, with `also_seen_on`.
+- **Blocked companies in the dashboard** are hidden everywhere except Applied, which is also your record of applications. It's decided when the page is read, so unblocking brings them back. The digest leaves them out too.
+- **Digest contents:** digest-tier rows (held-back instant matches included) and instant rows whose 48 h push window passed without a successful send; only open, unmerged, `New` rows. Instant rows still inside their window are left to the poller's retries, so a posting is never both pushed and digested. Nothing is sent when nothing is due.
+- **At most one digest:** rows are claimed (`digest_sent_at`) before the send and released by that exact timestamp if the send fails, which also releases rows that inherited the claim through the reverse link during the send. A crash between claim and send skips those postings' digest rather than repeating it (the spec's "at most one"); they stay on the dashboard.
+- **Digest link and schedule:** the link is `notify.dashboard_url`, else the dashboard's local address. Times are local times in `timezone`, computed with zoneinfo (DST-safe) and run as self-rescheduling one-shot jobs like the polls; `digest_times: []` turns the digest off.
+- **Watchdog:** every interval job must finish a run within 3× the longest interval plus jitter (4.5 h with the defaults). It checks each job, not just "any job", so one hung source is caught too, and it uses the monotonic clock, so a machine waking from sleep doesn't look stalled. The digest isn't watched. The worker exits with code 1 and Docker restarts it.
+- **Dashboard security:** basic auth when both `DASHBOARD_USER` and `DASHBOARD_PASSWORD` are set (only one is an error); `/healthz` is exempt and says only "ok". The CSRF token is per browser, in an `HttpOnly`, `SameSite=Strict` cookie, and every POST sends it back as `X-CSRF-Token` (HTMX) or a form field; cross-site POSTs are refused by `Sec-Fetch-Site`. Strict CSP (no inline scripts or styles), `no-store` on pages, no API docs, secrets masked in every rendered value, and links to source URLs only when they are http(s).
+- **Watchlist paste:** the URL first, then the page once (public hosts only; Workday gets a clear message); one validation call; a board already stored isn't validated again; blocked boards and companies are refused. A board bigger than `discovery.max_board_jobs` can still be added by hand, with a warning. Added boards are `dashboard`-owned with the priority you pick; priority and pause can be changed only for companies that aren't in config.yaml, because each poll applies config.yaml again.
+- **FastAPI 0.150.0, pinned:** the newest release before `exclude-newer` (FastAPI shipped 40+ releases since September). Starlette 1.9's TestClient prefers the new `httpx2` package; its fallback warning is filtered rather than adding a five-month-old dependency.
+- **htmx 2.0.11 vendored** from the npm tarball, its sha512 checked against the registry; a test pins the file's sha256.
+- **Health page "24 h fetched"** sums `fetched_count` over the window, as the spec asks, next to the number of runs.
 
 ## Deviations from the spec layout
 
@@ -38,6 +49,8 @@ Source of truth for what is built, what was decided, and what is left. The appro
 - `postings.missing_count` is the only missing-poll counter; `companies.consecutive_missing` is omitted.
 - `Posting.locations` is a tuple (the dataclass is frozen).
 - Dependencies arrive with the milestone that needs them: JobSpy in M2, FastAPI/Jinja2 in M3. Dockerfile and compose arrive in M3.
+- M3 modules: `web/security.py` (basic auth, CSRF, headers), `web/views.py` (template filters), `db/dashboard.py` (dashboard read models), `core/pay.py` (pay summaries). No schema change in M3.
+- `jobpulse web` and `jobpulse digest` replace the M0 placeholders, so the M0 test that asserted the placeholders ("arrives in M3") was replaced by one that checks the real commands.
 
 ## M0 — Scaffold
 
@@ -83,20 +96,25 @@ Source of truth for what is built, what was decided, and what is left. The appro
 - [x] worker runs watchlist, Simplify and job-board jobs on their own cadences; `poll --once` covers every source; `--fixtures` also serves JobSpy rows
 - [x] tests: items 5, 6, 8, 9 (all forms, discovery from Simplify URLs, one validation call), 10, 12, JobSpy error handling; live Simplify smoke (569 tests, 11 live)
 - [x] acceptance: a fixture dry run shows a LinkedIn duplicate merged onto its Greenhouse row with no alert
-- [ ] commit `feat(m2): …`
+- [x] commit `feat(m2): …` (`b2440be`)
 
 ## M3 — Dashboard and digests
 
-- [ ] FastAPI + Jinja2 + HTMX: New / Saved / Applied / Dismissed, filters, sort, "posted X ago"
-- [ ] source-health page; watchlist page (paste URL → detect → validate → add)
-- [ ] 127.0.0.1 by default, basic auth when configured, CSRF-safe POSTs
-- [ ] twice-daily digest, `digest_sent_at`, at most one digest per posting
-- [ ] digest and dashboard leave out blocked companies (rows decided before the company was blocked)
-- [ ] Dockerfile, docker-compose (`migrate`, `worker`, `web`, `postgres` profile)
-- [ ] worker watchdog: exit non-zero when no job finished within 3× the longest interval (in the approved plan; M1 didn't build it)
-- [ ] README complete; optional ruff hook
-- [ ] tests: routes, auth on/off, watchlist endpoint, digest
-- [ ] commit `feat(m3): …`
+- [x] dependencies: FastAPI (pinned exactly), Jinja2, uvicorn, python-multipart; htmx 2.0.11 vendored from the npm tarball, checksum verified
+- [x] dashboard (FastAPI + Jinja2 + HTMX): New / Saved / Applied / Dismissed with counts, one-click status changes (HTMX, plain-form fallback), filters (source, company, remote, min score, text, open only), sort by score or freshness, paging, "posted X ago" / "first seen X ago", score breakdown, pay, also-seen-on
+- [x] source-health page from `runs`: last run, last success, failures in a row, 24 h runs/fetched/new, last error, open incidents; active targets that never ran
+- [x] watchlist page: companies with priority and status; paste a URL → detect (URL, then the page once) → validate (one API call) → show → set priority → add (`dashboard`); priority and pause for non-config companies
+- [x] security: 127.0.0.1 by default, basic auth (constant-time) when both `DASHBOARD_USER` and `DASHBOARD_PASSWORD` are set, CSRF token (SameSite=Strict cookie + `X-CSRF-Token`/form field) on every POST, cross-site POSTs refused, CSP and other headers, secrets redacted from every rendered value
+- [x] `digest.py`: digest-tier rows plus instant rows whose push window passed; open, `New` and not blocked; claimed with `digest_sent_at` before sending and released if the send fails, so a posting is in at most one digest; one ntfy/Discord message with a dashboard link
+- [x] worker: digest at `schedules.digest_times` in `timezone`; watchdog exits non-zero when a scheduled job hasn't finished within 3× the longest interval
+- [x] dashboard and digest leave out blocked companies (rows decided before the company was blocked)
+- [x] CLI: `web [--host] [--port]`, `digest [--dry-run]`
+- [x] Dockerfile (python:3.12-slim, pinned uv, non-root, `uv sync --frozen --no-dev --extra postgres`), `.dockerignore`, docker-compose (`migrate` → `worker` + `web` on 127.0.0.1:8000, `postgres` profile)
+- [x] README complete (guardrails, uv and Docker setup, `.env`/config reference, ntfy topic and phone, adding companies, adding an adapter, Tailscale); optional ruff hook
+- [x] tests: routes (status transitions, filters, sort, auth on/off, CSRF), watchlist endpoint with respx, digest content and at most one digest, watchdog, digest schedule, CLI
+- [x] verify: `uv run jobpulse web` answers on 127.0.0.1:8000; `docker compose up` and `--profile postgres` (OrbStack, your OK 2026-10-24)
+- [x] tests: 758 pass (154 new), 11 live skipped
+- [x] commit `feat(m3): …`
 
 ## M4 — skipped (decision 2026-10-23)
 
@@ -151,3 +169,12 @@ LinkedIn applicant enrichment, the Workday adapter and the LLM scoring layer are
   - **Test-first:** 29 new tests failed against stubs, all on missing behavior (non-matching boards still validated, blocked companies pushed and polled, config rules not enforced). Now 604 tests pass.
   - **Measured on today's feed:** 381 unwatched boards, 131 with a posting that passes the example title filter, 28 with two or more.
   - **Real dry run** (scratch database): 8 boards to add and 2 skipped for size (SpaceX, Anduril) in the first cycle, 138 candidates left; the cycle took 4 s.
+- **2026-10-24** — M3 done.
+  - **Test-first:** against interface stubs, 152 new tests failed, all on missing behavior (130 `NotImplementedError`, 12 CLI placeholder assertions, 5 missing Docker files, 4 from the worker not knowing daily jobs). One test bug was fixed on the way: it blocked a watched company, which is a config error. Now 758 tests pass (11 live skipped).
+  - **One M0 test replaced:** `test_later_milestone_commands_exit_2` asserted the M3 placeholders; `test_m3_commands_replace_their_placeholders` checks the real commands instead.
+  - **Checked in a real browser** on a scratch database (the recorded scenario plus demo rows): one-click status changes with undo and live counts, the HTMX error notice, the watchlist paste box against the live Greenhouse API (Discord, 46 jobs) with add and pause, the health page, phone width and light mode. No console or CSP errors.
+  - **Docker on OrbStack (your OK):** the image is 585 MB (pandas for JobSpy). With SQLite, `migrate` ran and exited 0, the worker scheduled the watchlist and the 09:00/18:00 digest and silently baselined 46 Discord postings, and the dashboard was healthy on 127.0.0.1:8000, all as uid 10001. With the `postgres` profile, migrations ran on Postgres and one worker cycle stored 46 postings. Scratch config and volumes were removed afterwards.
+  - **Found and fixed:** a CSRF test that built a "wrong" token by changing its last character to `A`, which isn't wrong 1 time in 64; ruff 0.17 also formats Python blocks in Markdown (README).
+  - **Ruff hook** in `.claude/settings.json`: after Edit/Write on a `.py` file in the repo, `ruff check --fix` and `ruff format` run on it (verified to fire).
+  - **Not done (small):** `HEAD /` answers 405 (FastAPI GET routes don't take HEAD); the `runs` table has no retention (about 1,400 rows a day with the example watchlist).
+

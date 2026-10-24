@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}{{ view }} · jobpulse{% endblock %}
+{% block content %}
+<form class="filters" method="get" action="/">
+  <input type="hidden" name="view" value="{{ view|lower }}">
+  <input type="search" name="q" value="{{ query.text }}" placeholder="Search title, company, description" aria-label="Search">
+  <input type="text" name="company" value="{{ query.company }}" placeholder="Company" aria-label="Company">
+  <select name="source" aria-label="Source">
+    <option value="">Any source</option>
+    {% for source in sources %}
+    <option value="{{ source }}"{% if query.source == source %} selected{% endif %}>{{ source }}</option>
+    {% endfor %}
+  </select>
+  <select name="remote" aria-label="Remote">
+    <option value="">Remote or not</option>
+    <option value="yes"{% if query.remote is sameas true %} selected{% endif %}>Remote</option>
+    <option value="no"{% if query.remote is sameas false %} selected{% endif %}>Not remote</option>
+  </select>
+  <input type="number" name="min_score" value="{{ query.min_score }}" min="0" max="2" step="0.05" placeholder="Min score" aria-label="Minimum score">
+  <select name="sort" aria-label="Sort">
+    <option value="score"{% if query.sort == "score" %} selected{% endif %}>Best score</option>
+    <option value="fresh"{% if query.sort == "fresh" %} selected{% endif %}>Newest</option>
+  </select>
+  <label class="check"><input type="checkbox" name="open" value="1"{% if query.open_only %} checked{% endif %}> Open only</label>
+  <button type="submit">Filter</button>
+  <a class="reset" href="/?view={{ view|lower }}">Clear</a>
+</form>
+
+<p class="summary">{{ page.total }} posting{{ "" if page.total == 1 else "s" }}{% if page.total > page.page_size %}, page {{ page.page }}{% endif %}</p>
+
+<section class="postings">
+{% for row in page.rows %}
+{% include "_posting.html" %}
+{% else %}
+<p class="empty">{% if view == "New" %}Nothing new to look at. Matches that aren't pushed right away land here and in the digest.{% else %}No {{ view|lower }} postings{% if query.text or query.company or query.source %} match these filters{% endif %}.{% endif %}</p>
+{% endfor %}
+</section>
+
+{% if page.has_previous or page.has_next %}
+<nav class="pager" aria-label="Pages">
+  {% if page.has_previous %}<a href="{{ link(query, page=page.page - 1) }}" rel="prev">← Previous page</a>{% endif %}
+  {% if page.has_next %}<a href="{{ link(query, page=page.page + 1) }}" rel="next">Next page →</a>{% endif %}
+</nav>
+{% endif %}
+{% endblock %}

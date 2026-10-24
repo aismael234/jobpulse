@@ -136,6 +136,18 @@ def find_ats_refs_in_html(page: str) -> list[AtsRef]:
     return refs
 
 
+def board_url(ats: str, token: str, region: str = "us") -> str | None:
+    """The public job board a watchlist company's token points at (``None`` for Workday)."""
+    eu = region == "eu"
+    if ats == "greenhouse":
+        return f"https://job-boards.{'eu.' if eu else ''}greenhouse.io/{token}"
+    if ats == "lever":
+        return f"https://jobs.{'eu.' if eu else ''}lever.co/{token}"
+    if ats == "ashby":
+        return f"https://{_ASHBY_HOST}/{token}"
+    return None
+
+
 def gh_jid(url: str) -> str | None:
     """The numeric ``gh_jid`` query parameter, if any."""
     parts = _split(url)

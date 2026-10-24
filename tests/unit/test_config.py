@@ -11,6 +11,7 @@ from jobpulse.config import (
     ConfigError,
     company_blocklist,
     config_warnings,
+    dashboard_credentials,
     filter_rules,
     load_config,
     load_settings,
@@ -465,3 +466,43 @@ def test_the_blocklist_compiles_into_the_filter_rules(tmp_path: Path) -> None:
         companies=["Jobot", "Revature"], boards=["greenhouse/spacex"]
     )
     assert filter_rules(config).blocklist == blocklist
+
+
+# --- dashboard basic auth (Milestone 3) ---------------------------------------------------
+
+
+def test_dashboard_auth_is_off_without_credentials(tmp_path: Path) -> None:
+    env_file = write_env(tmp_path)
+    assert dashboard_credentials(load_settings(env_file), env_file=env_file) is None
+
+
+def test_dashboard_auth_needs_both_values(tmp_path: Path) -> None:
+    env_file = write_env(tmp_path, "DASHBOARD_USER=me\nDASHBOARD_PASSWORD=correct-horse\n")
+    assert dashboard_credentials(load_settings(env_file), env_file=env_file) == (
+        "me",
+        "correct-horse",
+    )
+
+
+@pytest.mark.parametrize(
+    ("body", "missing"),
+    [
+        ("DASHBOARD_USER=me\n", "DASHBOARD_PASSWORD"),
+        ("DASHBOARD_PASSWORD=pw-123\n", "DASHBOARD_USER"),
+    ],
+)
+def test_half_configured_dashboard_auth_is_an_error(
+    tmp_path: Path, body: str, missing: str
+) -> None:
+    env_file = write_env(tmp_path, body)
+    with pytest.raises(ConfigError) as excinfo:
+        dashboard_credentials(load_settings(env_file), env_file=env_file)
+    message = str(excinfo.value)
+    assert missing in message
+    assert str(env_file) in message
+    assert "pw-123" not in message
+
+
+def test_dashboard_password_is_redacted_from_logs(tmp_path: Path) -> None:
+    settings = load_settings(write_env(tmp_path, "DASHBOARD_PASSWORD=correct-horse\n"))
+    assert "correct-horse" in settings.secret_values()

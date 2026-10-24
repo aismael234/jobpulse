@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}Watchlist · jobpulse{% endblock %}
+{% block content %}
+<h1>Watchlist</h1>
+
+<section class="paste">
+  <h2>Add a board</h2>
+  <form class="detect" method="post" action="/watchlist/detect" hx-post="/watchlist/detect" hx-target="#detect-result" hx-swap="innerHTML">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="url" name="url" required placeholder="https://jobs.lever.co/… or any careers page" aria-label="Careers page or job board URL">
+    <button type="submit">Detect</button>
+  </form>
+  <p class="hint">Greenhouse, Lever and Ashby boards are recognized from the URL. For any other page, jobpulse reads it once to find a board, then checks the board with one API call before you add it.</p>
+  <div id="detect-result">
+    {% if detection %}{% include "_detect.html" %}{% endif %}
+    {% if added %}<p class="notice success">Added {{ added }}. Its first poll stores the jobs it has now without notifying you.</p>{% endif %}
+  </div>
+</section>
+
+<div class="table-wrap">
+<table class="companies">
+  <thead>
+    <tr><th>Company</th><th>Board</th><th>Priority</th><th>Status</th><th>Added by</th><th>Baseline</th><th>Open</th></tr>
+  </thead>
+  <tbody id="companies">
+    {% for entry in companies %}
+    {% with company = entry.company, blocked = entry.blocked %}{% include "_company.html" %}{% endwith %}
+    {% else %}
+    <tr><td colspan="7" class="empty">No companies yet. Add some to <code>watchlist:</code> in config.yaml, paste a URL above, or let discovery find boards.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endblock %}

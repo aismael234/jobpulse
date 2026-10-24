@@ -1,0 +1,31 @@
+{% if detection.addable %}
+<div class="detected">
+  <p>
+    <strong>{{ detection.ats_name }}</strong> board <code>{{ detection.ref.token }}</code>{% if detection.ref.region == "eu" %} (EU){% endif %}{% if detection.validation.name %} for {{ detection.validation.name }}{% endif %}:
+    {{ detection.validation.job_count }} open job{{ "" if detection.validation.job_count == 1 else "s" }}.
+  </p>
+  {% if detection.warning %}<p class="notice info">{{ detection.warning }}</p>{% endif %}
+  <form class="add" method="post" action="/watchlist/add" hx-post="/watchlist/add" hx-target="#detect-result" hx-swap="innerHTML">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="ats" value="{{ detection.ref.ats }}">
+    <input type="hidden" name="token" value="{{ detection.ref.token }}">
+    <input type="hidden" name="region" value="{{ detection.ref.region }}">
+    <input type="hidden" name="url" value="{{ detection.url }}">
+    <label>Name <input type="text" name="name" value="{{ detection.name }}" required maxlength="200"></label>
+    <label>Priority <input type="number" name="priority" value="0" min="0" max="1000"></label>
+    <button type="submit">Add to watchlist</button>
+  </form>
+  <p class="hint">Priority feeds the score (0 to {{ priority_cap }}; anything higher counts as {{ priority_cap }}), so boards you care about reach the instant-push threshold more easily.</p>
+</div>
+{% else %}
+<p class="notice {{ detection.tone }}">{{ detection.message }}</p>
+{% endif %}
+{% if companies is defined and companies %}
+<template>
+  <tbody id="companies" hx-swap-oob="true">
+    {% for entry in companies %}
+    {% with company = entry.company, blocked = entry.blocked %}{% include "_company.html" %}{% endwith %}
+    {% endfor %}
+  </tbody>
+</template>
+{% endif %}

@@ -66,8 +66,9 @@ def test_config_check_prints_placeholder_warnings(tmp_path: Path) -> None:
     assert "<SET ME>" in result.output
 
 
-@pytest.mark.parametrize("command", ["web", "digest"])
-def test_later_milestone_commands_exit_2(command: str) -> None:
-    result = runner.invoke(app, [command])
-    assert result.exit_code == 2
-    assert "M3" in result.output
+@pytest.mark.parametrize(("command", "option"), [("web", "--host"), ("digest", "--dry-run")])
+def test_m3_commands_replace_their_placeholders(command: str, option: str) -> None:
+    result = runner.invoke(app, [command, "--help"])
+    assert result.exit_code == 0, result.output
+    assert option in result.output
+    assert "arrives in" not in result.output

@@ -4,7 +4,7 @@ import asyncio
 import logging
 import signal
 from collections.abc import Awaitable, Callable, Collection
-from datetime import timedelta
+from datetime import time, timedelta
 
 import httpx
 from sqlalchemy import inspect
@@ -13,13 +13,22 @@ from sqlalchemy.orm import Session, sessionmaker
 from jobpulse.config import AppConfig, Settings, location_aliases
 from jobpulse.db import migrate
 from jobpulse.db.session import create_engine_for, display_url, make_session_factory
+from jobpulse.digest import Digest, DigestResult
 from jobpulse.discovery import Discoverer
 from jobpulse.httpclient import HttpClient, RetryPolicy, build_user_agent
 from jobpulse.notify.base import FanOutNotifier, Notification, Notifier
 from jobpulse.notify.discord import DiscordNotifier
 from jobpulse.notify.ntfy import NtfyNotifier
 from jobpulse.poller import CycleReport, Poller
-from jobpulse.scheduler import Cadence, JobFunc, Worker, cadences_from_config
+from jobpulse.scheduler import (
+    WATCHDOG_FACTOR,
+    Cadence,
+    DailyTimes,
+    JobFunc,
+    Schedule,
+    Worker,
+    cadences_from_config,
+)
 from jobpulse.sources.ashby import AshbyAdapter
 from jobpulse.sources.ats_detect import AtsDetector
 from jobpulse.sources.base import SourceAdapter
@@ -38,6 +47,11 @@ KNOWN_SOURCES: tuple[str, ...] = WATCHLIST_SOURCES + FEED_SOURCES + BOARD_SOURCE
 
 class DatabaseNotReady(Exception):
     pass
+
+
+class WorkerStalled(Exception):
+    """The watchdog found a source that stopped finishing runs; exit so a supervisor
+    (Docker's restart policy, systemd, launchd) starts the worker again."""
 
 
 def open_database(url: str) -> sessionmaker[Session]:
@@ -234,23 +248,33 @@ def render_report(report: CycleReport) -> list[str]:
 
 
 async def run_worker(*, config: AppConfig, settings: Settings, database_url: str) -> None:
-    """Poll each source on its own jittered schedule until SIGINT or SIGTERM."""
+    """Poll each source on its own jittered schedule and send the digest at its times, until
+    SIGINT or SIGTERM. Raises ``WorkerStalled`` when a source stops finishing runs."""
     sessions = open_database(database_url)
     async with build_http(config) as http:
+        notifier = build_notifier(http, config, settings)
         poller = Poller(
             config=config,
             sessions=sessions,
             adapters=build_adapters(http, config),
-            notifier=build_notifier(http, config, settings),
+            notifier=notifier,
             discoverer=build_discoverer(http, config),
         )
+        digest = Digest(config=config, sessions=sessions, notifier=notifier)
 
         async def run(job: str, sources: tuple[str, ...]) -> None:
             report = await poller.run_cycle(sources=sources)
             for line in render_report(report):
                 log.info("%s: %s", job, line)
 
-        jobs = scheduled_jobs(config, run)
+        async def run_digest() -> None:
+            for line in render_digest(await digest.run(), dry_run=False):
+                log.info("digest: %s", line)
+
+        jobs: dict[str, tuple[Schedule, JobFunc]] = {
+            **scheduled_jobs(config, run),
+            **digest_job(config, run_digest),
+        }
         worker = Worker(jobs)
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
@@ -258,18 +282,24 @@ async def run_worker(*, config: AppConfig, settings: Settings, database_url: str
             loop.add_signal_handler(signum, stop.set)
         worker.start()
         log.info(
-            "worker started: %s",
-            "; ".join(
-                f"{name} every {_interval(cadence.interval_seconds)} ± "
-                f"{cadence.jitter_seconds:.0f} s"
-                for name, (cadence, _) in jobs.items()
-            ),
+            "worker started: %s", "; ".join(_describe(name, s) for name, (s, _) in jobs.items())
         )
+        watchdog = asyncio.create_task(worker.watch())
+        stopped = asyncio.create_task(stop.wait())
         try:
-            await stop.wait()
+            await asyncio.wait({watchdog, stopped}, return_when=asyncio.FIRST_COMPLETED)
         finally:
             worker.shutdown()
+            for task in (watchdog, stopped):
+                task.cancel()
             log.info("worker stopped")
+        if watchdog.done() and not watchdog.cancelled():
+            limit = worker.watchdog_limit or 0
+            raise WorkerStalled(
+                f"no run of {', '.join(watchdog.result())} finished in {_interval(limit)} "
+                f"({WATCHDOG_FACTOR:.0f}x the longest interval); exiting so the worker is "
+                "restarted"
+            )
 
 
 def scheduled_jobs(
@@ -293,12 +323,60 @@ def scheduled_jobs(
     return {name: (cadences[name], job(name, sources)) for name, sources in groups}
 
 
+def digest_job(
+    config: AppConfig, run: Callable[[], Awaitable[None]]
+) -> dict[str, tuple[DailyTimes, JobFunc]]:
+    """The digest at ``schedules.digest_times`` in ``timezone`` (none when the list is empty)."""
+    times = sorted({time.fromisoformat(value) for value in config.schedules.digest_times})
+    if not times:
+        return {}
+
+    async def job() -> None:
+        await run()
+
+    return {"digest": (DailyTimes(tuple(times), config.timezone), job)}
+
+
+async def send_digest(
+    *, config: AppConfig, settings: Settings, database_url: str, dry_run: bool
+) -> DigestResult:
+    """One digest now (``jobpulse digest``)."""
+    sessions = open_database(database_url)
+    async with build_http(config) as http:
+        notifier = None if dry_run else build_notifier(http, config, settings)
+        return await Digest(config=config, sessions=sessions, notifier=notifier).run(
+            dry_run=dry_run
+        )
+
+
+def render_digest(result: DigestResult, *, dry_run: bool) -> list[str]:
+    if result.notification is None:
+        return ["digest: nothing to send"]
+    if dry_run:
+        message = result.notification
+        return [
+            "dry run: nothing is sent and nothing is marked",
+            f"would send: {message.title}",
+            *(f"  {line}" for line in message.body.splitlines()),
+        ]
+    if result.sent:
+        return [f"digest sent: {_count(result.count, 'posting')}"]
+    return [f"digest not sent ({_count(result.count, 'posting')} wait): {result.error}"]
+
+
 def _count(number: int, singular: str, plural: str | None = None) -> str:
     return f"{number} {singular if number == 1 else plural or singular + 's'}"
 
 
 def _interval(seconds: float) -> str:
     return f"{seconds:.0f} s" if seconds < 60 else f"{seconds / 60:.0f} min"
+
+
+def _describe(name: str, schedule: Schedule) -> str:
+    if isinstance(schedule, DailyTimes):
+        times = ", ".join(at.strftime("%H:%M") for at in schedule.times)
+        return f"{name} at {times} {schedule.timezone}"
+    return f"{name} every {_interval(schedule.interval_seconds)} ± {schedule.jitter_seconds:.0f} s"
 
 
 async def send_test_notification(*, config: AppConfig, settings: Settings) -> list[str]:

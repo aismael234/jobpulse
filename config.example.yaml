@@ -25,7 +25,7 @@ schedules:
   watchlist: {every_minutes: 30, jitter_seconds: 120}
   simplify: {every_minutes: 30, jitter_seconds: 120}     # the feed changes about every 30 min
   job_boards: {every_minutes: 75, jitter_seconds: 900}   # 60–90 min; searches ask for the last 3 h
-  digest_times: ["09:00", "18:00"]                       # in `timezone`, Milestone 3
+  digest_times: ["09:00", "18:00"]                       # in `timezone`; [] turns the digest off
 
 detection:
   freshness_hours: 48           # notify only for postings younger than this
@@ -84,7 +84,8 @@ notify:
     priority: 4
     tags: [briefcase]
   max_instant_per_cycle: 10     # the rest go to the digest with one "N more" push
-  dashboard_url: null           # e.g. your Tailscale URL, linked from digests
+  dashboard_url: null           # how your phone reaches the dashboard (e.g. your Tailscale
+                                # https://<machine>.<tailnet>.ts.net/); digests link to it
 
 # EXAMPLES: replace with the companies you care about. Tokens verified on 2026-10-23.
 # Greenhouse: job-boards.greenhouse.io/<token> · Lever: jobs.lever.co/<token>
@@ -150,6 +151,7 @@ health:
   busy_window_days: 7
   zero_hours: 24                # only empty successful runs for this long: suspicious
 
+# `jobpulse web`. Basic auth turns on when DASHBOARD_USER and DASHBOARD_PASSWORD are set in .env.
 dashboard:
-  host: 127.0.0.1               # keep it local; reach it remotely through Tailscale
+  host: 127.0.0.1               # keep it local; reach it from your phone through Tailscale
   port: 8000

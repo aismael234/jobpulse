@@ -1,12 +1,14 @@
 """jobpulse command-line interface (Typer)."""
 
 import asyncio
+import ipaddress
 import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, NoReturn
 
 import typer
+import uvicorn
 
 from jobpulse import __version__
 from jobpulse.config import (
@@ -16,6 +18,7 @@ from jobpulse.config import (
     Settings,
     company_blocklist,
     config_warnings,
+    dashboard_credentials,
     load_config,
     load_settings,
     require_secrets,
@@ -30,12 +33,16 @@ from jobpulse.logging_setup import configure_logging
 from jobpulse.runtime import (
     KNOWN_SOURCES,
     DatabaseNotReady,
+    WorkerStalled,
     open_database,
     poll_once,
+    render_digest,
     render_report,
     run_worker,
+    send_digest,
     send_test_notification,
 )
+from jobpulse.web.app import create_app
 
 log = logging.getLogger("jobpulse")
 
@@ -66,10 +73,6 @@ class CliState:
 def _fail(error: object) -> NoReturn:
     typer.echo(f"jobpulse: {error}", err=True)
     raise typer.Exit(code=2)
-
-
-def _not_built_yet(milestone: str) -> NoReturn:
-    _fail(f"this command arrives in {milestone}; see PROGRESS.md")
 
 
 def _state(ctx: typer.Context) -> CliState:
@@ -261,6 +264,9 @@ def worker(ctx: typer.Context) -> None:
         )
     except DatabaseNotReady as exc:
         _fail(exc)
+    except WorkerStalled as exc:
+        log.error("%s", exc)
+        raise typer.Exit(code=1) from None
 
 
 @companies_app.command("list")
@@ -329,12 +335,99 @@ def notify_test(ctx: typer.Context) -> None:
 
 
 @app.command()
-def web() -> None:
-    """Serve the dashboard on 127.0.0.1."""
-    _not_built_yet("M3")
+def web(
+    ctx: typer.Context,
+    host: Annotated[
+        str | None,
+        typer.Option("--host", help="Address to listen on (default: dashboard.host, 127.0.0.1)."),
+    ] = None,
+    port: Annotated[
+        int | None,
+        typer.Option("--port", help="Port (default: dashboard.port, 8000).", min=1, max=65535),
+    ] = None,
+) -> None:
+    """Serve the dashboard (http://127.0.0.1:8000 by default)."""
+    state = _state(ctx)
+    config = _load_config(state)
+    try:
+        credentials = dashboard_credentials(state.settings, env_file=state.env_file)
+    except ConfigError as exc:
+        _fail(exc)
+    _start_logging(state, config)
+    try:
+        sessions = open_database(_database_url(state, config))
+    except DatabaseNotReady as exc:
+        _fail(exc)
+    bind_host = host or config.dashboard.host
+    bind_port = port or config.dashboard.port
+    if credentials is None and not _is_loopback(bind_host):
+        log.warning(
+            "the dashboard listens on %s with no password: anyone who can reach port %d can "
+            "use it. Set DASHBOARD_USER and DASHBOARD_PASSWORD, or publish the port on "
+            "127.0.0.1 only (as docker-compose.yml does)",
+            bind_host,
+            bind_port,
+        )
+    application = create_app(
+        config=config,
+        sessions=sessions,
+        credentials=credentials,
+        secrets=state.settings.secret_values(),
+    )
+    log.info(
+        "dashboard on http://%s:%d/ (basic auth %s)",
+        bind_host,
+        bind_port,
+        "on" if credentials else "off",
+    )
+    access_log = logging.getLogger("uvicorn.access")
+    if not any(isinstance(item, _SkipProbes) for item in access_log.filters):
+        access_log.addFilter(_SkipProbes())
+    uvicorn.run(application, host=bind_host, port=bind_port, log_config=None, server_header=False)
+
+
+class _SkipProbes(logging.Filter):
+    """Docker's health check calls /healthz every 30 s; those lines are only noise."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return " /healthz " not in record.getMessage()
+
+
+def _is_loopback(host: str) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 @app.command()
-def digest() -> None:
-    """Send the digest of matches that didn't warrant an instant push."""
-    _not_built_yet("M3")
+def digest(
+    ctx: typer.Context,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Print the digest; send and mark nothing.")
+    ] = False,
+) -> None:
+    """Send the digest now: the matches that didn't get a push of their own. The worker sends
+    it at schedules.digest_times."""
+    state = _state(ctx)
+    config = _load_config(state)
+    if not dry_run:
+        _require_secrets(state, config)
+    _start_logging(state, config)
+    try:
+        result = asyncio.run(
+            send_digest(
+                config=config,
+                settings=state.settings,
+                database_url=_database_url(state, config),
+                dry_run=dry_run,
+            )
+        )
+    except DatabaseNotReady as exc:
+        _fail(exc)
+    for line in render_digest(result, dry_run=dry_run):
+        typer.echo(line)
+    if result.notification is not None and not dry_run and not result.sent:
+        raise typer.Exit(code=1)

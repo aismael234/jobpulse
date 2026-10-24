@@ -59,6 +59,8 @@ class CompanyOverview:
     source_of_discovery: str
     baseline_done_at: datetime | None
     open_postings: int
+    id: int
+    discovered_from: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,6 +165,8 @@ def list_companies(session: Session) -> list[CompanyOverview]:
             source_of_discovery=c.source_of_discovery,
             baseline_done_at=c.baseline_done_at,
             open_postings=open_counts.get(c.id, 0),
+            id=c.id,
+            discovered_from=c.discovered_from,
         )
         for c in companies
     ]
@@ -366,6 +370,47 @@ def count_polled_auto_companies(session: Session, blocklist: Blocklist) -> int:
     )
 
 
+def add_company(
+    session: Session,
+    *,
+    ats: str,
+    token: str,
+    region: str,
+    name: str,
+    source: str,
+    priority: int,
+    discovered_from: str | None,
+    now: datetime,
+) -> bool:
+    """Add a board from the dashboard or discovery (baseline pending). False if it existed,
+    under any capitalization of its token."""
+    existing = session.scalars(
+        select(Company.id).where(
+            Company.ats_type == ats, func.lower(Company.token) == token.lower()
+        )
+    ).first()
+    if existing is not None:
+        return False
+    statement = (
+        _dialect_insert(session)(Company)
+        .values(
+            name=name,
+            ats_type=ats,
+            token=token,
+            region=region,
+            priority=priority,
+            active=True,
+            source_of_discovery=source,
+            discovered_from=discovered_from,
+            created_at=now,
+            updated_at=now,
+        )
+        .on_conflict_do_nothing(index_elements=["ats_type", "token"])
+        .returning(Company.id)
+    )
+    return session.execute(statement).scalar_one_or_none() is not None
+
+
 def add_discovered_company(
     session: Session,
     *,
@@ -377,24 +422,17 @@ def add_discovered_company(
     now: datetime,
 ) -> bool:
     """Add a board found by discovery (priority 0, baseline pending). False if it existed."""
-    statement = (
-        _dialect_insert(session)(Company)
-        .values(
-            name=name,
-            ats_type=ats,
-            token=token,
-            region=region,
-            priority=0,
-            active=True,
-            source_of_discovery="auto",
-            discovered_from=discovered_from,
-            created_at=now,
-            updated_at=now,
-        )
-        .on_conflict_do_nothing(index_elements=["ats_type", "token"])
-        .returning(Company.id)
+    return add_company(
+        session,
+        ats=ats,
+        token=token,
+        region=region,
+        name=name,
+        source="auto",
+        priority=0,
+        discovered_from=discovered_from,
+        now=now,
     )
-    return session.execute(statement).scalar_one_or_none() is not None
 
 
 # --- presence and closures --------------------------------------------------------------
@@ -847,6 +885,85 @@ def hold_back(session: Session, row_id: int, *, reason: str) -> None:
 
 def mark_notified(session: Session, row_id: int, *, now: datetime) -> None:
     session.execute(update(PostingRow).where(PostingRow.id == row_id).values(notified_at=now))
+
+
+# --- digest and dashboard ------------------------------------------------------------------
+
+
+def digest_candidates(session: Session, *, push_window_start: datetime) -> list[PostingRow]:
+    """Open, untriaged matches that no push or digest has covered, best first: digest-tier
+    rows, and instant rows first seen before ``push_window_start`` (their push is no longer
+    retried)."""
+    return list(
+        session.scalars(
+            select(PostingRow)
+            .where(
+                PostingRow.merged_into_id.is_(None),
+                PostingRow.closed_at.is_(None),
+                PostingRow.status == "New",
+                PostingRow.notified_at.is_(None),
+                PostingRow.digest_sent_at.is_(None),
+                or_(
+                    PostingRow.tier == "digest",
+                    (PostingRow.tier == "instant") & (PostingRow.first_seen_at < push_window_start),
+                ),
+            )
+            .order_by(
+                PostingRow.score.desc().nulls_last(),
+                PostingRow.first_seen_at.desc(),
+                PostingRow.id,
+            )
+        )
+    )
+
+
+def claim_for_digest(session: Session, row_ids: Sequence[int], *, now: datetime) -> None:
+    """Stamp ``digest_sent_at`` before the digest goes out, so no other digest takes them."""
+    for chunk in _chunks(list(row_ids)):
+        session.execute(
+            update(PostingRow)
+            .where(PostingRow.id.in_(chunk), PostingRow.digest_sent_at.is_(None))
+            .values(digest_sent_at=now)
+        )
+
+
+def release_digest_claim(session: Session, *, claimed_at: datetime) -> int:
+    """Undo a digest whose send failed: every row stamped with exactly ``claimed_at``,
+    including rows that inherited the stamp while the send was in flight."""
+    result = session.execute(
+        update(PostingRow)
+        .where(PostingRow.digest_sent_at == claimed_at)
+        .values(digest_sent_at=None)
+    )
+    return cast(CursorResult[Any], result).rowcount
+
+
+def set_status(session: Session, row_id: int, status: str) -> str | None:
+    """Change a posting's status (New, Saved, Applied, Dismissed) and return the one it had;
+    ``None`` if there's no such posting."""
+    row = session.get(PostingRow, row_id)
+    if row is None:
+        return None
+    previous = row.status
+    if previous != status:
+        row.status = status
+        session.flush()
+    return previous
+
+
+def update_company(
+    session: Session, company_id: int, *, priority: int | None = None, active: bool | None = None
+) -> Company | None:
+    """Change a company's priority or pause it; ``None`` if there's no such company."""
+    company = session.get(Company, company_id)
+    if company is None:
+        return None
+    if priority is not None:
+        company.priority = priority
+    if active is not None:
+        company.active = active
+    session.flush()
+    return company
 
 
 # --- runs ---------------------------------------------------------------------------------

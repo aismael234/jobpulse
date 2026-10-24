@@ -1,0 +1,38 @@
+{% set labels = {"New": "Back to New", "Saved": "Save", "Applied": "Applied", "Dismissed": "Dismiss"} %}
+<article class="posting{% if row.closed_at %} closed{% endif %}" id="posting-{{ row.id }}">
+  <div class="score {{ row.tier }}" title="{{ row.score_breakdown|breakdown or row.tier_reason }}">{{ row.score|score }}</div>
+  <div class="body">
+    <h2>
+      {% set href = (row.apply_url or row.url)|http_url %}
+      {% if href %}<a class="title" href="{{ href }}" target="_blank" rel="noopener noreferrer">{{ row.title }}</a>{% else %}<span class="title">{{ row.title }}</span>{% endif %}
+    </h2>
+    <p class="meta">
+      <span class="company">{{ row.company_name }}</span>
+      {% set place = row.locations|where %}
+      {% if place %}<span class="sep" aria-hidden="true">·</span><span title="{{ row.locations|join('; ') }}">{{ place }}</span>{% endif %}
+      <span class="sep" aria-hidden="true">·</span><span title="{{ (row.posted_at or row.first_seen_at)|local }}">{{ row|posted }}</span>
+      {% if row.closed_at %}<span class="badge closed" title="{{ row.closed_at|local }}">closed {{ row.closed_at|ago }}</span>{% endif %}
+    </p>
+    <p class="details">
+      <span class="badge source">{{ row.source }}</span>
+      {% for seen in row.also_seen_on or [] %}
+      {% set seen_href = seen.url|http_url %}
+      {% if seen_href %}<a class="badge also" href="{{ seen_href }}" target="_blank" rel="noopener noreferrer">also on {{ seen.source }}</a>{% else %}<span class="badge also">also on {{ seen.source }}</span>{% endif %}
+      {% endfor %}
+      {% set salary = row.compensation|pay %}
+      {% if salary %}<span class="pay">{{ salary }}</span>{% endif %}
+      {% if row.department %}<span>{{ row.department }}</span>{% endif %}
+      {% if row.applicant_label %}<span>{{ row.applicant_label }}</span>{% endif %}
+      {% if row.notified_at %}<span class="note" title="{{ row.notified_at|local }}">pushed {{ row.notified_at|ago }}</span>{% elif row.digest_sent_at %}<span class="note" title="{{ row.digest_sent_at|local }}">in a digest {{ row.digest_sent_at|ago }}</span>{% endif %}
+    </p>
+  </div>
+  <form class="actions" method="post" action="/postings/{{ row.id }}/status" hx-post="/postings/{{ row.id }}/status" hx-target="#posting-{{ row.id }}" hx-swap="outerHTML">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="view" value="{{ view }}">
+    <input type="hidden" name="return_to" value="{{ return_to }}">
+    {% for status in statuses if status != row.status %}
+    <button type="submit" name="status" value="{{ status }}" class="status-{{ status|lower }}">{{ labels[status] }}</button>
+    {% endfor %}
+  </form>
+</article>
+{% include "_counts.html" %}

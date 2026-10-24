@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Source health · jobpulse{% endblock %}
+{% block content %}
+<h1>Source health</h1>
+<p class="hint">One alert goes out when a target fails {{ failures_needed }} runs in a row or a busy one returns nothing for {{ quiet_hours }} h, and one more when it recovers. A failed or empty run never closes a posting.</p>
+
+{% if incidents %}
+<section class="incidents">
+  <h2>Open incidents</h2>
+  <ul>
+    {% for incident in incidents %}
+    <li><strong>{{ incident.title }}</strong> <span class="muted">since {{ incident.opened_at|ago }}{% if incident.alerted_at %}, alert sent {{ incident.alerted_at|ago }}{% else %}, alert not sent yet{% endif %}</span></li>
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}
+
+<div class="table-wrap">
+<table class="health">
+  <thead>
+    <tr><th>Target</th><th>Last run</th><th>Last success</th><th>Failures</th><th>Last 24 h</th><th>Last error</th></tr>
+  </thead>
+  <tbody>
+    {% for item in targets %}
+    {% set ref = item.ref %}
+    <tr id="target-{{ ref.source }}-{{ ref.target }}" class="{% if item.incidents or item.failures_in_a_row %}problem{% elif not ref.polled %}muted{% endif %}">
+      <td>
+        <span class="badge source">{{ ref.source }}</span> {{ ref.label }}{% if ref.label != ref.target %} <span class="muted">{{ ref.target }}</span>{% endif %}
+        {% if not ref.polled %}<span class="badge">not polled</span>{% endif %}
+        {% for title in item.incidents %}<div class="incident">{{ title }}</div>{% endfor %}
+      </td>
+      <td>{% if item.last_run_at %}<span title="{{ item.last_run_at|local }}">{{ item.last_run_at|ago }}</span>{% if not item.last_run_ok %} <span class="badge bad">failed</span>{% endif %}{% else %}never run{% endif %}</td>
+      <td>{% if item.last_success_at %}<span title="{{ item.last_success_at|local }}">{{ item.last_success_at|ago }}</span>{% else %}never{% endif %}</td>
+      <td>{% if item.failures_in_a_row %}{{ item.failures_in_a_row }} failed in a row{% endif %}</td>
+      <td>{{ item.runs_24h }} run{{ "" if item.runs_24h == 1 else "s" }} · {{ item.fetched_24h }} fetched · {{ item.new_24h }} new</td>
+      <td class="error">{% if item.last_error %}<span title="{{ item.last_error }} ({{ item.last_error_at|local }})">{{ item.last_error_kind }}: {{ item.last_error|truncate(160) }}</span>{% endif %}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="6" class="empty">No runs yet. Start the worker, or run <code>jobpulse poll --once</code>.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endblock %}

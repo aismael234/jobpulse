@@ -11,8 +11,10 @@ Personal job-posting watcher. Read PROGRESS.md first: milestone checklists, deci
 - `scripts/check.sh` — all of the above in one go
 - `uv run jobpulse poll --once --dry-run` — one poll cycle over every source (`--source` narrows it); nothing sent, nothing saved
 - `uv run jobpulse --config tests/fixtures/scenarios/config.yaml poll --once --dry-run --fixtures tests/fixtures/scenarios/first_poll` — the same over recorded responses, JobSpy rows included (set `DATABASE_URL` to a scratch DB and run `db upgrade` first; `second_poll` after a live `first_poll` shows a merge)
-- `uv run jobpulse worker` — the scheduler (needs `NTFY_TOPIC` when ntfy is enabled)
+- `uv run jobpulse worker` — the scheduler and the digest (needs `NTFY_TOPIC` when ntfy is enabled)
+- `uv run jobpulse web [--host] [--port]` — the dashboard on 127.0.0.1:8000; `uv run jobpulse digest --dry-run` — the next digest, nothing sent or marked
 - `uv run jobpulse companies list` / `companies sync`, `uv run jobpulse notify test`
+- `docker compose up -d` (`--profile postgres` for Postgres) — needs the Docker daemon: `orbctl start` (OrbStack) first. Test with `-p <name>` and an override file mounting a scratch config, so `./config.yaml` and its volumes stay untouched
 - `uv run alembic upgrade head` or `uv run jobpulse db upgrade` — migrate the database (the CLI refuses to run on one that is behind)
 
 ## Conventions
@@ -49,6 +51,13 @@ Personal job-posting watcher. Read PROGRESS.md first: milestone checklists, deci
 - Discovery's miss cache is in memory: each `poll --once` starts fresh, the worker keeps it. Integration tests build the discoverer from config; after changing `discovery` settings, call `env.rebuild_discoverer()`.
 - Blocking an active watchlist entry is a config error, so tests that block a watched company use a job-board or feed company, or `env.add_company()` for a discovered one.
 - time-machine 3 doesn't patch `monotonic`, so asyncio runs in real time. Anything that sleeps takes an injected `sleep`.
+- FastAPI 0.150 keeps an included router whole (`_IncludedRouter` in `app.routes`), so look for routes on `web.routes.pages` / `web.routes.actions`. Every POST route goes on `actions`, whose dependency checks the CSRF token.
+- Starlette 1.9's TestClient prefers the new `httpx2` package and warns when it falls back to httpx; pytest filters that one warning. If Starlette drops the fallback, add `httpx2` to the dev group.
+- Templates use `StrictUndefined` and a `finalize` that masks secrets and renders `None` as "". Render through `routes.render`, which adds `now`, `short_labels`, `zone` and `csrf_token`; the filters read them from the context.
+- Autoescape turns `'` into `&#39;`: tests compare messages after `html.unescape`.
+- HTMX out-of-band swaps of table rows need a `<template>` wrapper (see `_detect.html`).
+- Hrefs to source data go through the `http_url` filter: feeds are third-party, and a `javascript:` URL must never become a link.
+- The digest claims rows (`digest_sent_at`) before sending and releases every row stamped with that exact time if the send fails, including rows that inherited the stamp mid-send through the reverse link.
 
 ## Verified API facts (2026-10-23)
 

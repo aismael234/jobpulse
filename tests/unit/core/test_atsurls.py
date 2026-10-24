@@ -2,7 +2,13 @@
 
 import pytest
 
-from jobpulse.core.atsurls import AtsRef, detect_ats_url, find_ats_refs_in_html, gh_jid
+from jobpulse.core.atsurls import (
+    AtsRef,
+    board_url,
+    detect_ats_url,
+    find_ats_refs_in_html,
+    gh_jid,
+)
 
 LEVER_ID = "5c6e2a0e-1f2b-4c3d-9e8f-0a1b2c3d4e5f"
 ASHBY_ID = "d3bc1ced-3ce4-4086-a050-555055dbb1ff"
@@ -105,3 +111,28 @@ def test_gh_jid() -> None:
     assert gh_jid("https://stripe.com/jobs/search?gh_jid=8172487") == "8172487"
     assert gh_jid("https://acme.example/careers?gh_jid=abc") is None
     assert gh_jid("https://acme.example/careers") is None
+
+
+@pytest.mark.parametrize(
+    ("ats", "token", "region", "expected"),
+    [
+        ("greenhouse", "stripe", "us", "https://job-boards.greenhouse.io/stripe"),
+        ("greenhouse", "proton", "eu", "https://job-boards.eu.greenhouse.io/proton"),
+        ("lever", "spotify", "us", "https://jobs.lever.co/spotify"),
+        ("lever", "olx", "eu", "https://jobs.eu.lever.co/olx"),
+        ("ashby", "Linear", "us", "https://jobs.ashbyhq.com/Linear"),
+        ("workday", "acme", "us", None),
+    ],
+)
+def test_board_url_points_at_the_public_board(
+    ats: str, token: str, region: str, expected: str | None
+) -> None:
+    assert board_url(ats, token, region) == expected
+    if expected is not None:  # and the link reads back as the same board
+        ref = detect_ats_url(expected)
+        assert ref is not None
+        assert (ref.ats, ref.token, ref.region) == (
+            ats,
+            token.lower() if ats != "ashby" else token,
+            region,
+        )

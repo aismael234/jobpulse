@@ -1,5 +1,6 @@
 """Builders shared by the tests."""
 
+import itertools
 import json
 import re
 from collections.abc import Mapping, Sequence
@@ -12,12 +13,14 @@ from jobspy.model import JobPost
 
 from jobpulse.core.filters import WeightedRegex
 from jobpulse.core.models import Posting
+from jobpulse.db.tables import PostingRow
 
 FIXTURES = Path(__file__).parent / "fixtures"
 NOW = datetime(2026, 10, 23, 14, 0, tzinfo=UTC)
 JOBSPY_COLUMNS = list(JobPost.model_fields)
 LINKEDIN_ID = "4101234567"
 INDEED_KEY = "1a2b3c4d5e6f7a8b"
+_ROW_IDS = itertools.count(5_000_001)
 
 
 def load_fixture(name: str) -> Any:
@@ -52,6 +55,32 @@ def make_posting(**overrides: Any) -> Posting:
     if values["posted_at"] is None and "posted_at_precision" not in overrides:
         values["posted_at_precision"] = "none"
     return Posting(**values)
+
+
+def posting_row(**overrides: Any) -> PostingRow:
+    """A stored posting, by default an untriaged digest-tier Acme match seen an hour ago."""
+    external_id = str(overrides.pop("external_id", None) or next(_ROW_IDS))
+    values: dict[str, Any] = {
+        "source": "greenhouse",
+        "external_id": external_id,
+        "company_name": "Acme",
+        "title": "Backend Engineer",
+        "locations": ["San Francisco, CA"],
+        "is_remote": False,
+        "canonical_url": f"greenhouse:acme:{external_id}",
+        "fingerprint": f"fingerprint-{external_id}",
+        "url": f"https://job-boards.greenhouse.io/acme/jobs/{external_id}",
+        "posted_at": NOW - timedelta(hours=2),
+        "posted_at_precision": "exact",
+        "first_seen_at": NOW - timedelta(hours=1),
+        "last_seen_at": NOW,
+        "tier": "digest",
+        "tier_reason": "score 0.45 < 0.55",
+        "score": 0.45,
+        "status": "New",
+    }
+    values.update(overrides)
+    return PostingRow(**values)
 
 
 def jobspy_row(site: str = "linkedin", **overrides: Any) -> dict[str, Any]:

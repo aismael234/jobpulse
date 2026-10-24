@@ -556,6 +556,29 @@ def require_secrets(config: AppConfig, settings: Settings, *, env_file: Path) ->
         )
 
 
+def dashboard_credentials(settings: Settings, *, env_file: Path) -> tuple[str, str] | None:
+    """(user, password) for the dashboard's basic auth when both are set, ``None`` when
+    neither is. Setting only one is an error, so auth is never silently off."""
+    user = settings.dashboard_user or ""
+    password = settings.dashboard_password.get_secret_value() if settings.dashboard_password else ""
+    if user and password:
+        return user, password
+    if not user and not password:
+        return None
+    missing = "DASHBOARD_PASSWORD" if user else "DASHBOARD_USER"
+    raise ConfigError(
+        env_file,
+        [
+            FieldError(
+                missing,
+                "not set; set both DASHBOARD_USER and DASHBOARD_PASSWORD to turn on the "
+                "dashboard's basic auth, or neither to run it without (on 127.0.0.1 only)",
+            )
+        ],
+        heading="missing or invalid secrets (set them in {path} or the environment)",
+    )
+
+
 def config_warnings(config: AppConfig) -> list[str]:
     """Things that are valid but almost certainly not what you want yet."""
     warnings: list[str] = []

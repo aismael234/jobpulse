@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="htmx-config" content='{"includeIndicatorStyles": false, "allowEval": false, "responseHandling": [{"code": "204", "swap": false}, {"code": "[23]..", "swap": true}, {"code": "4..", "swap": true, "error": true}, {"code": "...", "swap": false, "error": true}]}'>
+  <title>{% block title %}jobpulse{% endblock %}</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/htmx.min.js" defer></script>
+</head>
+<body hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'>
+  <header class="top">
+    <a class="brand" href="/">jobpulse</a>
+    <nav aria-label="Views">
+      {% for status in statuses %}
+      <a href="/?view={{ status|lower }}" data-view="{{ status }}"{% if view == status %} aria-current="page"{% endif %}>{{ status }} <span class="count" id="count-{{ status }}">{{ counts[status] }}</span></a>
+      {% endfor %}
+      <a href="/health" data-view="health"{% if view == "health" %} aria-current="page"{% endif %}>Health{% if incident_count %} <span class="count alert">{{ incident_count }}</span>{% endif %}</a>
+      <a href="/watchlist" data-view="watchlist"{% if view == "watchlist" %} aria-current="page"{% endif %}>Watchlist</a>
+    </nav>
+  </header>
+  <div id="notice" aria-live="polite"></div>
+  <main>
+{% block content %}{% endblock %}
+  </main>
+</body>
+</html>

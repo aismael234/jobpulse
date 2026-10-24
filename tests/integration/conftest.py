@@ -5,7 +5,8 @@ import copy
 import html
 import random
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
@@ -14,6 +15,7 @@ import httpx
 import pytest
 import respx
 import time_machine
+from fastapi.testclient import TestClient
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -22,6 +24,7 @@ from jobpulse.core.dedupe import canonicalize_url
 from jobpulse.core.locations import normalize_locations
 from jobpulse.core.models import FetchResult, Posting, Target
 from jobpulse.core.timeparse import utcnow
+from jobpulse.db import repo
 from jobpulse.db.session import create_engine_for, make_session_factory
 from jobpulse.db.tables import (
     Base,
@@ -38,7 +41,9 @@ from jobpulse.notify.base import Notification, NotifierError
 from jobpulse.poller import CycleReport, Poller
 from jobpulse.runtime import build_adapters, build_discoverer
 from jobpulse.sources.jobspy_boards import JobSpyAdapter
-from tests.factories import NOW, FakeMonotonic, FakeSleep
+from jobpulse.web.app import create_app
+from jobpulse.web.security import CSRF_COOKIE
+from tests.factories import NOW, FakeMonotonic, FakeSleep, posting_row
 
 GH_LIST = "https://boards-api.greenhouse.io/v1/boards/acme/jobs"
 GH_DETAIL = re.compile(
@@ -475,3 +480,103 @@ def gh(respx_mock: respx.MockRouter) -> GreenhouseMock:
 
     respx_mock.get(url__regex=GH_DETAIL.pattern).mock(side_effect=detail)
     return mock
+
+
+# --- the dashboard (Milestone 3) ----------------------------------------------------------
+
+POSTING_ID = re.compile(r'id="posting-(\d+)"')
+
+
+def posting_ids(page: str) -> list[int]:
+    """The postings a dashboard page shows, in order."""
+    return [int(found) for found in POSTING_ID.findall(page)]
+
+
+@dataclass
+class Web:
+    """A TestClient on the dashboard over the test database."""
+
+    client: TestClient
+    sessions: sessionmaker[Session]
+    config: AppConfig
+
+    def add(self, **fields: Any) -> int:
+        with self.sessions() as session:
+            row = posting_row(**fields)
+            session.add(row)
+            session.commit()
+            return row.id
+
+    def row(self, posting_id: int) -> PostingRow:
+        with self.sessions() as session:
+            row = session.get(PostingRow, posting_id)
+            assert row is not None
+            return row
+
+    def page(self, path: str = "/", **params: Any) -> str:
+        response = self.client.get(path, params=params)
+        assert response.status_code == 200, response.text
+        return response.text
+
+    def ids(self, **params: Any) -> list[int]:
+        return posting_ids(self.page("/", **params))
+
+    @property
+    def token(self) -> str:
+        if CSRF_COOKIE not in self.client.cookies:
+            self.client.get("/healthz")
+        return self.client.cookies[CSRF_COOKIE]
+
+    def post(
+        self, path: str, data: dict[str, Any] | None = None, *, htmx: bool = True
+    ) -> httpx.Response:
+        headers = {"X-CSRF-Token": self.token}
+        if htmx:
+            headers["HX-Request"] = "true"
+        return self.client.post(path, data=data or {}, headers=headers, follow_redirects=False)
+
+    def companies(self) -> list[Company]:
+        with self.sessions() as session:
+            return list(session.scalars(select(Company).order_by(Company.id)))
+
+    def sync_watchlist(self) -> None:
+        with self.sessions() as session:
+            repo.sync_watchlist(session, self.config.watchlist, now=NOW)
+            session.commit()
+
+
+def dashboard_http_client() -> HttpClient:
+    """The client the dashboard detects boards with: retries never really sleep."""
+    return HttpClient(user_agent="jobpulse-test/0.1", sleep=FakeSleep(), rng=random.Random(0))
+
+
+@pytest.fixture
+def make_web(
+    database: sessionmaker[Session], time_machine: time_machine.TimeMachineFixture
+) -> Iterator[Callable[..., Web]]:
+    time_machine.move_to(NOW, tick=False)
+    with ExitStack() as stack:
+
+        def build(
+            *,
+            config: AppConfig | None = None,
+            credentials: tuple[str, str] | None = None,
+            secrets: Sequence[str] = (),
+        ) -> Web:
+            config = config or make_config()
+            app = create_app(
+                config=config,
+                sessions=database,
+                credentials=credentials,
+                secrets=secrets,
+                http_factory=dashboard_http_client,
+            )
+            client = stack.enter_context(TestClient(app))
+            return Web(client, database, config)
+
+        yield build
+
+
+@pytest.fixture
+def web(make_web: Callable[..., Web]) -> Web:
+    return make_web()

@@ -11,6 +11,7 @@ from jobpulse.core.timeparse import ensure_utc
 from jobpulse.notify.base import Notification
 
 SEPARATOR = " · "
+DIGEST_BODY_BYTES = 3800  # under ntfy's 4,096-byte body limit and Discord's 4,096 characters
 _BREAKDOWN_LABELS = {
     "title": "title",
     "freshness": "fresh",
@@ -75,7 +76,8 @@ def title_line(
     return SEPARATOR.join(parts)
 
 
-def _breakdown_text(breakdown: Mapping[str, float | None] | None) -> str:
+def breakdown_text(breakdown: Mapping[str, float | None] | None) -> str:
+    """ "title +0.30, fresh +0.24, level -0.50": the score's parts, biggest first."""
     if not breakdown:
         return ""
     parts = [
@@ -98,7 +100,7 @@ def instant_notification(
     where = "; ".join(content.locations) or "location not given"
     lines = [content.title, f"{content.company}{SEPARATOR}{where}" if content.company else where]
     if content.score is not None:
-        detail = _breakdown_text(content.breakdown)
+        detail = breakdown_text(content.breakdown)
         lines.append(
             f"{content.source}{SEPARATOR}score {content.score:.2f}"
             + (f" ({detail})" if detail else "")
@@ -110,6 +112,46 @@ def instant_notification(
         priority=priority,
         tags=tuple(dict.fromkeys((*tags, content.source))),
     )
+
+
+def digest_notification(
+    items: Sequence[PushContent],
+    *,
+    now: datetime,
+    dashboard_url: str | None,
+    short_labels: Mapping[str, str] = DEFAULT_SHORT_LABELS,
+    max_body_bytes: int = DIGEST_BODY_BYTES,
+) -> Notification:
+    """One message for the digest: numbered title lines with links, best first, cut to fit
+    ``max_body_bytes`` with a "+N more" line, and a link to the dashboard."""
+    count = len(items)
+    footer = [f"All of them on the dashboard: {dashboard_url}"] if dashboard_url else []
+    entries: list[str] = []
+    for number, item in enumerate(items, start=1):
+        entry = f"{number}. {title_line(item, now=now, short_labels=short_labels)}"
+        if item.score is not None:
+            entry += f" (score {item.score:.2f})"
+        if item.click_url:
+            entry += f"\n   {item.click_url}"
+        rest = count - number
+        tail = [f"+{rest} more"] if rest else []
+        if _utf8_size([*entries, entry, *tail, *footer]) > max_body_bytes:
+            break
+        entries.append(entry)
+    if len(entries) < count:
+        entries.append(f"+{count - len(entries)} more")
+    matches = "match" if count == 1 else "matches"
+    return Notification(
+        title=f"jobpulse digest{SEPARATOR}{count} new {matches}",
+        body="\n".join([*entries, *footer]),
+        click_url=dashboard_url,
+        priority=3,
+        tags=("newspaper",),
+    )
+
+
+def _utf8_size(lines: Sequence[str]) -> int:
+    return len("\n".join(lines).encode("utf-8"))
 
 
 def overflow_notification(count: int, *, dashboard_url: str | None = None) -> Notification:

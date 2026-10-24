@@ -1,0 +1,83 @@
+# jobpulse with Docker Compose. Create config.yaml (from config.example.yaml) and .env first.
+#
+#   docker compose up -d                      # SQLite, in the jobpulse-data volume
+#   docker compose --profile postgres up -d   # with Postgres: set POSTGRES_PASSWORD and
+#                                             # DATABASE_URL in .env (see .env.example)
+#   docker compose logs -f worker             # the scheduler's log
+#
+# `migrate` applies migrations and exits; the worker and the dashboard start after it.
+# The dashboard is published on 127.0.0.1:8000 only; reach it remotely through Tailscale.
+
+x-jobpulse: &jobpulse
+  build: .
+  image: jobpulse:local
+  env_file:
+    - path: .env
+      required: false
+  volumes:
+    - jobpulse-data:/app/data
+    - type: bind
+      source: ./config.yaml
+      target: /app/config.yaml
+      read_only: true
+      bind:
+        create_host_path: false
+
+services:
+  migrate:
+    <<: *jobpulse
+    command: ["jobpulse", "db", "upgrade"]
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+        required: false
+
+  worker:
+    <<: *jobpulse
+    command: ["jobpulse", "worker"]
+    # The watchdog exits non-zero when a source stops finishing runs; this starts it again.
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  web:
+    <<: *jobpulse
+    command: ["jobpulse", "web", "--host", "0.0.0.0", "--port", "8000"]
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  postgres:
+    image: postgres:17-alpine
+    profiles: ["postgres"]
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: jobpulse
+      POSTGRES_DB: jobpulse
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jobpulse -d jobpulse"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  jobpulse-data:
+  postgres-data:
