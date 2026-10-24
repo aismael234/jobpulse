@@ -156,6 +156,7 @@ Every new company's first poll is a silent baseline. To never hear about a compa
 | `discovery` | Automatic board discovery and its limits. |
 | `blocklist` | Companies and boards to stay away from. |
 | `health` | When a source counts as failing or silent. |
+| `retention` | How long the run history behind the Health page is kept (30 days). |
 | `dashboard` | Address and port of `jobpulse web`. |
 
 Level, location and stack values in the example are placeholders; set your own. `jobpulse config check` validates the file and names the exact field of any mistake.

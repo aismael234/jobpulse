@@ -506,3 +506,33 @@ def test_half_configured_dashboard_auth_is_an_error(
 def test_dashboard_password_is_redacted_from_logs(tmp_path: Path) -> None:
     settings = load_settings(write_env(tmp_path, "DASHBOARD_PASSWORD=correct-horse\n"))
     assert "correct-horse" in settings.secret_values()
+
+
+# --- run history retention ------------------------------------------------------------------
+
+
+def test_run_history_is_kept_for_30_days_by_default(tmp_path: Path) -> None:
+    assert load_config(write_config(tmp_path)).retention.runs_days == 30
+    assert load_config(EXAMPLE_CONFIG).retention.runs_days == 30
+
+
+def test_run_history_can_be_kept_forever(tmp_path: Path) -> None:
+    config = load_config(write_config(tmp_path, "retention: {runs_days: null}\n"))
+    assert config.retention.runs_days is None
+
+
+@pytest.mark.parametrize("days", ["0", "-3", "1.5"])
+def test_run_history_needs_whole_positive_days(tmp_path: Path, days: str) -> None:
+    path = write_config(tmp_path, f"retention: {{runs_days: {days}}}\n")
+    assert "retention.runs_days" in config_error(path)
+
+
+def test_run_history_must_cover_the_busy_window(tmp_path: Path) -> None:
+    message = config_error(write_config(tmp_path, "retention: {runs_days: 3}\n"))
+    assert "retention.runs_days" in message
+    assert "health.busy_window_days" in message
+    # without health checks nothing reads that far back
+    config = load_config(
+        write_config(tmp_path, "retention: {runs_days: 3}\nhealth: {enabled: false}\n")
+    )
+    assert config.retention.runs_days == 3

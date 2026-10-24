@@ -242,6 +242,11 @@ def render_report(report: CycleReport) -> list[str]:
             f"discovery: {boards} not added: discovery.max_auto_companies reached "
             "(raise it, or block companies you don't want)"
         )
+    if report.pruned_runs:
+        lines.append(
+            f"housekeeping: deleted {_count(report.pruned_runs, 'run')} older than "
+            f"{_count(report.retention_days or 0, 'day')} (retention.runs_days)"
+        )
     if report.dry_run:
         lines.append("dry run: rolled back")
     return lines

@@ -57,6 +57,7 @@ Personal job-posting watcher. Read PROGRESS.md first: milestone checklists, deci
 - Autoescape turns `'` into `&#39;`: tests compare messages after `html.unescape`.
 - HTMX out-of-band swaps of table rows need a `<template>` wrapper (see `_detect.html`).
 - Hrefs to source data go through the `http_url` filter: feeds are third-party, and a `javascript:` URL must never become a link.
+- Run history is pruned at most once a day per `Poller` (an in-memory timestamp), never in a dry run. Each `env.poll()` builds a new `Poller`; to test the once-a-day rule, keep one `env.poller()`.
 - The digest claims rows (`digest_sent_at`) before sending and releases every row stamped with that exact time if the send fails, including rows that inherited the stamp mid-send through the reverse link.
 
 ## Verified API facts (2026-10-23)

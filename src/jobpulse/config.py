@@ -345,6 +345,10 @@ class HealthConfig(_Model):
     zero_hours: float = Field(default=24, gt=0)
 
 
+class RetentionConfig(_Model):
+    runs_days: int | None = Field(default=30, ge=1)  # None keeps every run
+
+
 class DashboardConfig(_Model):
     host: str = "127.0.0.1"
     port: int = Field(default=8000, ge=1, le=65535)
@@ -367,6 +371,7 @@ class AppConfig(_Model):
     discovery: DiscoveryConfig = DiscoveryConfig()
     blocklist: BlocklistConfig = BlocklistConfig()
     health: HealthConfig = HealthConfig()
+    retention: RetentionConfig = RetentionConfig()
     dashboard: DashboardConfig = DashboardConfig()
 
     @field_validator("contact_email")
@@ -421,6 +426,16 @@ class AppConfig(_Model):
             raise ValueError(
                 f"{field} blocks watchlist[{index}] ({entry.name}), which is active; remove one "
                 "of them, or set active: false on the watchlist entry"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _run_history_covers_the_busy_window(self) -> Self:
+        days, window = self.retention.runs_days, self.health.busy_window_days
+        if self.health.enabled and days is not None and days < window:
+            raise ValueError(
+                f"retention.runs_days ({days}) must be at least health.busy_window_days "
+                f"({window:g}): the busy-source health rule reads that much run history"
             )
         return self
 

@@ -39,6 +39,8 @@ Source of truth for what is built, what was decided, and what is left. The appro
 - **FastAPI 0.150.0, pinned:** the newest release before `exclude-newer` (FastAPI shipped 40+ releases since September). Starlette 1.9's TestClient prefers the new `httpx2` package; its fallback warning is filtered rather than adding a five-month-old dependency.
 - **htmx 2.0.11 vendored** from the npm tarball, its sha512 checked against the registry; a test pins the file's sha256.
 - **Health page "24 h fetched"** sums `fetched_count` over the window, as the spec asks, next to the number of runs.
+- **Run history retention (your request, 2026-10-24):** `retention.runs_days` (30; `null` keeps everything) must cover `health.busy_window_days` while health checks are on. The poller deletes older runs at most once a day per process and never in a dry run. A target that has failed for longer than the window shows "never" as its last success.
+- **HEAD (your request, 2026-10-24):** the dashboard's GET pages answer HEAD too (uvicorn sends no body); static files already did.
 
 ## Deviations from the spec layout
 
@@ -176,5 +178,9 @@ LinkedIn applicant enrichment, the Workday adapter and the LLM scoring layer are
   - **Docker on OrbStack (your OK):** the image is 585 MB (pandas for JobSpy). With SQLite, `migrate` ran and exited 0, the worker scheduled the watchlist and the 09:00/18:00 digest and silently baselined 46 Discord postings, and the dashboard was healthy on 127.0.0.1:8000, all as uid 10001. With the `postgres` profile, migrations ran on Postgres and one worker cycle stored 46 postings. Scratch config and volumes were removed afterwards.
   - **Found and fixed:** a CSRF test that built a "wrong" token by changing its last character to `A`, which isn't wrong 1 time in 64; ruff 0.17 also formats Python blocks in Markdown (README).
   - **Ruff hook** in `.claude/settings.json`: after Edit/Write on a `.py` file in the repo, `ruff check --fix` and `ruff format` run on it (verified to fire).
-  - **Not done (small):** `HEAD /` answers 405 (FastAPI GET routes don't take HEAD); the `runs` table has no retention (about 1,400 rows a day with the example watchlist).
+  - **Not done (small):** `HEAD /` answers 405 (FastAPI GET routes don't take HEAD); the `runs` table has no retention (about 1,400 rows a day with the example watchlist). Both done the same day, below.
+- **2026-10-24** — HEAD and run retention (your request, after M3).
+  - **Test-first:** 17 new tests failed on missing behavior (no `retention` section, no prune, 405 on HEAD); the static-file HEAD case already passed. Now 776 tests pass (11 live skipped).
+  - GET pages are declared through `routes.page`, which registers GET and HEAD. HEAD still needs basic auth when it's on; `/healthz` stays exempt.
+  - `retention.runs_days` (30) prunes `runs` once a day in the poller and reports it as a `housekeeping:` line in the cycle log.
 

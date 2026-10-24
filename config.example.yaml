@@ -151,6 +151,11 @@ health:
   busy_window_days: 7
   zero_hours: 24                # only empty successful runs for this long: suspicious
 
+# How long the run history (one row per fetch of a board, feed or search) is kept for the Health
+# page and the health rules. Pruned once a day; must cover health.busy_window_days.
+retention:
+  runs_days: 30                 # null keeps every run
+
 # `jobpulse web`. Basic auth turns on when DASHBOARD_USER and DASHBOARD_PASSWORD are set in .env.
 dashboard:
   host: 127.0.0.1               # keep it local; reach it from your phone through Tailscale

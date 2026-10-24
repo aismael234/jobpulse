@@ -254,3 +254,28 @@ def test_unknown_paths_get_a_plain_404(web: Web) -> None:
     assert response.status_code == 404
     assert response.headers["content-type"].startswith("text/plain")
     assert response.headers["x-frame-options"] == "DENY"
+
+
+@pytest.mark.parametrize(
+    ("path", "content_type"),
+    [
+        ("/", "text/html"),
+        ("/?view=saved", "text/html"),
+        ("/health", "text/html"),
+        ("/watchlist", "text/html"),
+        ("/healthz", "text/plain"),
+        ("/static/htmx.min.js", "text/javascript"),
+    ],
+)
+def test_pages_answer_head_like_get(web: Web, path: str, content_type: str) -> None:
+    response = web.client.head(path)
+    assert response.status_code == 200, path
+    assert response.headers["content-type"].startswith(content_type)
+    assert response.headers["x-content-type-options"] == "nosniff"
+
+
+def test_head_requests_need_the_password_too(make_web: Callable[..., Web]) -> None:
+    client = make_web(credentials=(USER, PASSWORD)).client
+    assert client.head("/").status_code == 401
+    assert client.head("/", headers=basic(USER, PASSWORD)).status_code == 200
+    assert client.head("/healthz").status_code == 200

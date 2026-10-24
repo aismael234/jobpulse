@@ -1,10 +1,12 @@
+from datetime import timedelta
+
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from jobpulse.config import SIMPLIFY_NEW_GRAD_URL, SearchEntry, SimplifyConfig
 from jobpulse.db import repo
 from jobpulse.db.session import session_scope
-from jobpulse.db.tables import Company, Search, SourceState
+from jobpulse.db.tables import Company, Run, Search, SourceState
 from tests.factories import NOW
 from tests.integration.conftest import make_config
 
@@ -173,3 +175,18 @@ def test_known_companies_cover_every_company_in_lowercase(database: sessionmaker
             ("lever", "beta"),
             ("ashby", "sierra"),
         }
+
+
+# --- run history retention ------------------------------------------------------------------
+
+
+def test_delete_runs_before_removes_only_older_runs(database: sessionmaker[Session]) -> None:
+    cutoff = NOW - timedelta(days=30)
+    with session_scope(database) as session:
+        for started in (cutoff - timedelta(days=2), cutoff - timedelta(seconds=1), cutoff, NOW):
+            session.add(Run(source="greenhouse", target="acme", started_at=started, ok=True))
+    with session_scope(database) as session:
+        assert repo.delete_runs_before(session, cutoff) == 2
+    with session_scope(database) as session:
+        kept = sorted(session.scalars(select(Run.started_at)))
+    assert kept == [cutoff, NOW]

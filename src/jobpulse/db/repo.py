@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Any, cast
 from urllib.parse import urlsplit
 
-from sqlalchemy import case, func, or_, select, update
+from sqlalchemy import case, delete, func, or_, select, update
 from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
@@ -996,6 +996,12 @@ def finish_run(
         .where(Run.id == run_id)
         .values(finished_at=finished_at, new_count=new_count, stats=stats)
     )
+
+
+def delete_runs_before(session: Session, cutoff: datetime) -> int:
+    """Delete runs that started before ``cutoff`` (``retention.runs_days``); returns how many."""
+    result = session.execute(delete(Run).where(Run.started_at < cutoff))
+    return cast(CursorResult[Any], result).rowcount
 
 
 # --- health -------------------------------------------------------------------------------

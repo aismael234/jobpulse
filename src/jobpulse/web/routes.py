@@ -6,13 +6,14 @@ the HTML fragment that replaces the one you clicked in).
 
 import math
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse, Response
+from fastapi.types import DecoratedCallable
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -29,6 +30,13 @@ from jobpulse.web.views import link
 
 pages = APIRouter()
 actions = APIRouter(dependencies=[Depends(verify_csrf)])
+
+
+def page(path: str, **options: Any) -> Callable[[DecoratedCallable], DecoratedCallable]:
+    """A GET route that answers HEAD too (uptime checks and link previewers send HEAD;
+    FastAPI routes, unlike plain Starlette ones, don't add it). The server drops the body."""
+    return pages.api_route(path, methods=["GET", "HEAD"], **options)
+
 
 VIEWS = {status.lower(): status for status in STATUSES}
 ADDABLE_ATS = ("greenhouse", "lever", "ashby")
@@ -122,7 +130,7 @@ def render(
 # --- postings --------------------------------------------------------------------------------
 
 
-@pages.get("/", response_class=HTMLResponse)
+@page("/", response_class=HTMLResponse)
 def postings_page(request: Request) -> HTMLResponse:
     state = _state(request)
     query = parse_query(request.query_params)
@@ -184,7 +192,7 @@ def change_status(
 # --- source health ---------------------------------------------------------------------------
 
 
-@pages.get("/health", response_class=HTMLResponse)
+@page("/health", response_class=HTMLResponse)
 def health_page(request: Request) -> HTMLResponse:
     state = _state(request)
     with state.sessions() as session:
@@ -203,7 +211,7 @@ def health_page(request: Request) -> HTMLResponse:
         )
 
 
-@pages.get("/healthz", response_class=PlainTextResponse)
+@page("/healthz", response_class=PlainTextResponse)
 def healthz(request: Request) -> str:
     """Liveness for Docker: the app answers and the database does too. No auth, no data."""
     with _state(request).sessions() as session:
@@ -265,7 +273,7 @@ def _watchlist_page(
         )
 
 
-@pages.get("/watchlist", response_class=HTMLResponse)
+@page("/watchlist", response_class=HTMLResponse)
 def watchlist_page(request: Request) -> HTMLResponse:
     return _watchlist_page(request)
 

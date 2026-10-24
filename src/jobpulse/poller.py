@@ -104,6 +104,8 @@ class CycleReport:
     discovery_skipped: list[str] = field(default_factory=list)  # valid, but over a limit
     discovery_capped: int = 0
     health: list[str] = field(default_factory=list)  # health messages sent (or due)
+    pruned_runs: int = 0  # runs older than retention_days deleted this cycle
+    retention_days: int | None = None
 
 
 @dataclass
@@ -166,6 +168,7 @@ class Poller:
         self._short_labels = short_labels(config)
         self._freshness = timedelta(hours=config.detection.freshness_hours)
         self._fingerprint_window = timedelta(days=config.detection.fingerprint_window_days)
+        self._next_prune: datetime | None = None  # run history is pruned at most once a day
 
     async def run_cycle(
         self,
@@ -213,6 +216,7 @@ class Poller:
             await self._notify(unit, report)
             await self._check_health(unit, report)
             await self._discover(unit, report, sightings)
+            self._prune_runs(unit, report)
             return report
         finally:
             unit.close()
@@ -658,6 +662,20 @@ class Poller:
                 found.candidate.ref.ats, found.candidate.ref.token, found.validation.error,
             )  # fmt: skip
         unit.checkpoint()
+
+    def _prune_runs(self, unit: _UnitOfWork, report: CycleReport) -> None:
+        """Delete runs older than ``retention.runs_days``, at most once a day, never in a
+        dry run. The retention window always covers what the health rules read."""
+        days = self._config.retention.runs_days
+        now = self._clock()
+        if report.dry_run or days is None:
+            return
+        if self._next_prune is not None and now < self._next_prune:
+            return
+        report.pruned_runs = repo.delete_runs_before(unit.session, now - timedelta(days=days))
+        report.retention_days = days
+        unit.checkpoint()
+        self._next_prune = now + timedelta(days=1)
 
     # --- helpers ------------------------------------------------------------------------
 
