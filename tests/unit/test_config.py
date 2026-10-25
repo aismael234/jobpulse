@@ -303,6 +303,34 @@ def test_linkedin_is_remote_produces_a_warning(tmp_path: Path) -> None:
     [warning] = [w for w in config_warnings(config) if "is_remote" in w]
     assert "searches[0]" in warning
     assert "LinkedIn" in warning
+    assert "search_term" in warning
+
+
+def test_a_linkedin_search_for_remote_produces_a_warning(tmp_path: Path) -> None:
+    """LinkedIn reads a location of "Remote" as anywhere in the world."""
+    config = load_config(
+        write_config(
+            tmp_path,
+            """
+            searches:
+              - {name: ml-us, site: linkedin, search_term: ml engineer, location: United States}
+              - {name: ml-remote, site: linkedin, search_term: ml engineer, location: remote}
+              - {name: ml-in, site: indeed, search_term: ml engineer, location: Remote}
+            """,
+        )
+    )
+    [warning] = [w for w in config_warnings(config) if "worldwide" in w]
+    assert warning.startswith("searches[1] (ml-remote)")
+    assert "United States" in warning
+    assert "filters.locations.countries" in warning
+
+
+def test_unknown_country_names_field_and_value(tmp_path: Path) -> None:
+    path = write_config(tmp_path, "filters:\n  locations:\n    countries: [US, Narnia]\n")
+    message = config_error(path)
+    assert "filters.locations.countries[1]" in message
+    assert "'Narnia'" in message
+    assert "ISO 3166" in message
 
 
 # --- secrets from .env --------------------------------------------------------------

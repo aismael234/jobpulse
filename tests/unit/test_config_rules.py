@@ -44,6 +44,22 @@ def test_location_rules_compile() -> None:
     assert rules.unknown_passes is False
 
 
+def test_countries_compile_to_iso_codes() -> None:
+    config = AppConfig.model_validate(
+        {
+            "contact_email": "dev@example.com",
+            "filters": {"locations": {"countries": ["us", "United States", "Canada", "UK"]}},
+        }
+    )
+    assert config.filters.locations.countries == ["US", "CA", "GB"]
+    assert filter_rules(config).locations.countries == frozenset({"US", "CA", "GB"})
+
+
+def test_no_countries_by_default() -> None:
+    config = AppConfig.model_validate({"contact_email": "dev@example.com"})
+    assert filter_rules(config).locations.countries == frozenset()
+
+
 def test_scoring_weights_come_from_config() -> None:
     config = AppConfig.model_validate(
         {"contact_email": "dev@example.com", "scoring": {"weights": {"title": 0.9}}}

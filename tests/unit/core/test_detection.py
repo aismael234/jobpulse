@@ -183,6 +183,14 @@ def test_prescreen_filters_on_location() -> None:
     assert decision.tier == "filtered"
 
 
+def test_prescreen_filters_on_country() -> None:
+    rules = dataclasses.replace(RULES, locations=LocationRules(countries=frozenset({"US"})))
+    decision = prescreen(make_posting(locations=("Tokyo, Japan",)), context(rules=rules))
+    assert decision is not None
+    assert (decision.tier, decision.reason) == ("filtered", "no location in US (Tokyo, Japan)")
+    assert prescreen(make_posting(locations=("Austin, TX",)), context(rules=rules)) is None
+
+
 def test_prescreen_marks_known_old_postings_stale() -> None:
     decision = prescreen(make_posting(posted_at=NOW - timedelta(days=5)), context())
     assert decision is not None

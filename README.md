@@ -172,7 +172,7 @@ Cost guards: at most `llm.max_calls_per_day` (25) calls in any 24 hours, failed 
 | `http` | Timeouts, retries with backoff, and concurrent requests per host. |
 | `schedules` | Each source group's interval and jitter. |
 | `detection` | `freshness_hours` (48), closure after missing polls (2), fingerprint window (30 days). |
-| `filters` | Title include/exclude regexes, level words, years of experience, stack keywords, location rules and aliases. |
+| `filters` | Title include/exclude regexes, level words, years of experience, stack keywords, location rules and aliases. `filters.locations.countries` (for example `[US]`) keeps only postings with a location in those countries; "Remote (Global)" counts everywhere, and "Remote (EMEA)" only in EMEA. |
 | `scoring` | Score weights (including `applicants` and `llm`), `priority_cap`, `applicant_cap`, `instant_threshold` (the center of the LLM's band). |
 | `notify` | `channels`, ntfy server, priority and tags. |
 | `watchlist` | Companies on Greenhouse, Lever, Ashby and Workday (with `keywords`). |

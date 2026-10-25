@@ -30,6 +30,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from jobpulse.core import filters as core_filters
 from jobpulse.core.assessment import Level
 from jobpulse.core.atsurls import normalize_workday_token
+from jobpulse.core.countries import country_code
 from jobpulse.core.dedupe import normalize_company
 from jobpulse.core.locations import DEFAULT_SHORT_LABELS, merge_aliases
 from jobpulse.core.scoring import Weights
@@ -52,6 +53,8 @@ BOARD_REF_PATTERN = re.compile(
     r"|workday/[A-Za-z0-9][A-Za-z0-9-]*\.wd\d{1,3}/[A-Za-z0-9][A-Za-z0-9._-]*",
     re.IGNORECASE,
 )
+# LinkedIn reads these search locations as anywhere in the world.
+WORLDWIDE_SEARCH_LOCATION = re.compile(r"remote|anywhere|worldwide", re.IGNORECASE)
 MAX_KEYWORDS = 20
 MAX_KEYWORD_CHARS = 100
 
@@ -150,10 +153,21 @@ def _check_company_name(value: str) -> str:
     return value
 
 
+def _to_country_code(value: str) -> str:
+    code = country_code(value)
+    if code is None:
+        raise ValueError(
+            f"{value!r} is not a country; use an ISO 3166 code such as US, CA or GB, or its "
+            "English name"
+        )
+    return code
+
+
 Regex = Annotated[str, AfterValidator(_check_regex)]
 Slug = Annotated[str, Field(min_length=1, max_length=200, pattern=SLUG_PATTERN)]
 BoardRef = Annotated[str, AfterValidator(_check_board_ref)]
 CompanyName = Annotated[str, AfterValidator(_check_company_name)]
+CountryCode = Annotated[str, AfterValidator(_to_country_code)]
 
 
 class _Model(BaseModel):
@@ -245,8 +259,14 @@ class DescriptionRules(_Model):
 class LocationRules(_Model):
     include: list[Regex] = []
     exclude: list[Regex] = []
+    countries: list[CountryCode] = []  # ISO codes; a posting needs a location in one of them
     aliases: dict[str, str] = {}
     unknown_location_passes: bool = True
+
+    @field_validator("countries")
+    @classmethod
+    def _drop_repeated_countries(cls, value: list[str]) -> list[str]:
+        return list(dict.fromkeys(value))
 
 
 class FiltersConfig(_Model):
@@ -748,10 +768,18 @@ def config_warnings(config: AppConfig) -> list[str]:
                 "until you replace it"
             )
     for index, search in enumerate(config.searches):
-        if search.site == "linkedin" and search.is_remote:
+        if search.site != "linkedin":
+            continue
+        if search.is_remote:
             warnings.append(
                 f"searches[{index}] ({search.name}) sets is_remote, which LinkedIn ignores; "
-                "put 'Remote' in its location or search_term instead"
+                "put 'remote' in its search_term instead"
+            )
+        if search.location and WORLDWIDE_SEARCH_LOCATION.fullmatch(search.location.strip()):
+            warnings.append(
+                f"searches[{index}] ({search.name}) has location {search.location!r}, which "
+                "LinkedIn searches worldwide; use a country such as 'United States', and "
+                "filters.locations.countries to keep only the postings there"
             )
     return warnings
 
@@ -818,6 +846,7 @@ def filter_rules(config: AppConfig) -> core_filters.FilterRules:
         locations=core_filters.LocationRules(
             include=_patterns(filters.locations.include),
             exclude=_patterns(filters.locations.exclude),
+            countries=frozenset(filters.locations.countries),
             unknown_passes=filters.locations.unknown_location_passes,
         ),
         blocklist=company_blocklist(config),

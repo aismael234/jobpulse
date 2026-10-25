@@ -58,6 +58,9 @@ filters:
       '\bpostgres(ql)?\b': 0.5
       '\bkubernetes\b': 0.5
   locations:
+    countries: []               # ISO codes or names, e.g. [US, CA]: keep postings with a location
+                                # there. Remote (Global) counts everywhere; a posting none of whose
+                                # locations has a known country follows unknown_location_passes
     include: []                 # regexes over normalized labels, e.g. '^Remote \(US\)$'; empty = anywhere
     exclude: []
     aliases:                    # your abbreviations, on top of the built-in table
@@ -107,8 +110,10 @@ watchlist:
 
 # Indeed and LinkedIn searches through JobSpy. Each asks for jobs posted in the last
 # hours_old (3) hours on every run, so a late or failed run leaves no gap. The first run of a
-# new (or changed) search is a silent baseline. LinkedIn ignores is_remote; put "Remote" in
-# the location instead. Keep LinkedIn searches few and results_wanted low.
+# new (or changed) search is a silent baseline. LinkedIn ignores is_remote and reads a
+# location of "Remote" as anywhere in the world: search a country ("United States") and let
+# filters.locations.countries keep the postings there. Keep LinkedIn searches few and
+# results_wanted low.
 searches: []
 #  - {name: backend-us-remote, site: indeed, search_term: "backend engineer", location: "United States", is_remote: true}
 #  - {name: backend-sf, site: linkedin, search_term: "backend engineer", location: "San Francisco, CA", results_wanted: 25}

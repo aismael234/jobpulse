@@ -65,6 +65,7 @@ Personal job-posting watcher. Read PROGRESS.md first: milestone checklists, deci
 - HTMX out-of-band swaps of table rows need a `<template>` wrapper (see `_detect.html`).
 - Hrefs to source data go through the `http_url` filter: feeds are third-party, and a `javascript:` URL must never become a link.
 - Run history is pruned at most once a day per `Poller` (an in-memory timestamp), never in a dry run. Each `env.poll()` builds a new `Poller`; to test the once-a-day rule, keep one `env.poller()`.
+- `filters.locations.countries` places labels with the tables in `core/countries.py` (pure, no gazetteer). A label whose country is unknown sides with the posting's other labels. To fix a misplaced label, add the name to a table and a case to `test_countries.py`; leave out a name shared by places in different countries.
 - There is no digest and no per-cycle push cap: every match (tier `instant`) is pushed, best first. `scoring.instant_threshold` only centers the LLM band. A push that failed is retried while the posting is fresh, open and still `New`.
 
 ## Verified API facts (2026-10-23, Workday and LinkedIn job pages 2026-10-24)
@@ -96,6 +97,7 @@ Confirmed by `JOBPULSE_LIVE=1 uv run pytest -m live` (15 passed) and read-only p
   - `wdN.myworkdaysite.com/recruiting/{tenant}/{site}` tenants answer on `{tenant}.wdN.myworkdayjobs.com` too.
   - Detail `GET {api}{externalPath}` keys on the last path segment (any location slug works) and returns `jobPostingInfo` with `jobDescription` (HTML), `startDate` (a date), `location`, `additionalLocations`, `remoteType`, `jobReqId`.
   - 928 of 2,939 open Simplify listings link to Workday, nearly all on `{tenant}.wdN.myworkdayjobs.com`.
+- **LinkedIn search location:** "Remote" is searched worldwide. On 2026-10-25, `ml-engineer-remote` brought postings from 13 countries; JobSpy 1.4.0 ignores `is_remote` for LinkedIn.
 - **LinkedIn guest job page** (`/jobs-guest/jobs/api/jobPosting/{id}`): 200 HTML without login, with jobpulse's own User-Agent. The applicant line is `<figcaption class="num-applicants__caption">` (or a `span`); the description is `div.show-more-less-html__markup`, followed by the criteria list. It sets session cookies, which jobpulse never keeps. No external apply URL on the page.
 
 ## When compacting

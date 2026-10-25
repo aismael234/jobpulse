@@ -155,6 +155,104 @@ def test_empty_location_rules_accept_anything() -> None:
     assert check_locations(["Anywhere, Earth"], LocationRules()).passed
 
 
+# --- countries ------------------------------------------------------------------------
+
+US_ONLY = LocationRules(countries=frozenset({"US"}))
+
+
+def test_countries_keep_postings_in_them() -> None:
+    assert check_locations(["San Francisco, CA"], US_ONLY).passed
+    assert check_locations(["London", "Remote (US)"], US_ONLY).passed
+    verdict = check_locations(["Bangalore, Karnataka, India"], US_ONLY)
+    assert not verdict.passed
+    assert verdict.reason == "no location in US (Bangalore, Karnataka, India)"
+
+
+def test_countries_and_remote_regions() -> None:
+    assert check_locations(["Remote (Global)"], US_ONLY).passed
+    assert check_locations(["Remote (North America)"], US_ONLY).passed
+    assert not check_locations(["Remote (EMEA)"], US_ONLY).passed
+    assert not check_locations(["Remote (Canada)"], US_ONLY).passed
+
+
+def test_unknown_countries_follow_unknown_location_passes() -> None:
+    assert check_locations(["Remote"], US_ONLY).passed
+    strict = LocationRules(countries=frozenset({"US"}), unknown_passes=False)
+    verdict = check_locations(["Remote", "Main Campus"], strict)
+    assert not verdict.passed
+    assert "unknown_location_passes" in verdict.reason
+
+
+def test_a_label_without_a_country_sides_with_the_others() -> None:
+    """Next to a foreign city, an unknown label is taken to be abroad too; next to a US
+    city, it counts as one of the posting's US locations."""
+    assert not check_locations(["Pune", "Pimpri-Chinchwad Area"], US_ONLY).passed
+    assert not check_locations(["London", "Remote"], US_ONLY).passed
+    remote_us = LocationRules(include=compiled(r"^Remote\b"), countries=frozenset({"US"}))
+    assert check_locations(["San Francisco, CA", "Remote"], remote_us).passed
+    assert not check_locations(["London", "Remote"], remote_us).passed
+    assert check_locations(["Singapore", "US > Arizona > Phoenix"], US_ONLY).passed
+
+
+def test_excludes_still_apply_inside_the_countries() -> None:
+    rules = LocationRules(exclude=compiled(r"San Francisco"), countries=frozenset({"US"}))
+    assert not check_locations(["San Francisco, CA"], rules).passed
+    assert check_locations(["San Francisco, CA", "Austin, TX"], rules).passed
+
+
+def test_several_countries() -> None:
+    rules = LocationRules(countries=frozenset({"US", "CA"}))
+    assert check_locations(["Toronto, Ontario, Canada"], rules).passed
+    verdict = check_locations(["London, UK"], rules)
+    assert verdict.reason == "no location in CA, US (London, UK)"
+
+
+# The places of the postings you dismissed on 2026-10-24 and 25 for being outside the US,
+# and of every posting you applied to.
+DISMISSED_ABROAD = [
+    ("Nigeria",),
+    ("Lousado, Braga, Portugal",),
+    ("Shanghai, Shanghai, China",),
+    ("London, England, UK",),
+    ("India",),
+    ("Seoul, South Korea",),
+    ("Ontario, Canada",),
+    ("Toronto, Ontario, Canada",),
+    ("Montreal, Quebec, Canada",),
+    ("Ho Chi Minh City, Vietnam",),
+    ("Pune", "Pimpri-Chinchwad Area"),
+    ("Beer Yaakov, Center District, Israel",),
+    ("Singapore, Singapore",),
+    ("Jakarta, Indonesia",),
+    ("Tokyo, Japan",),
+    ("Japan",),
+    ("Barcelona, Catalonia, Spain",),
+]
+APPLIED = [
+    ("Remote (Global)",),
+    ("San Jose, CA",),
+    ("San Leandro, CA",),
+    ("San Francisco Bay Area",),
+    ("San Francisco, CA",),
+    ("Cambridge, MA",),
+    ("USA",),
+    ("Huntsville, AL",),
+    ("Dallas, TX",),
+    ("Atlanta, GA",),
+    ("Research Triangle Park, NC",),
+]
+
+
+@pytest.mark.parametrize("labels", DISMISSED_ABROAD)
+def test_us_only_drops_the_dismissed_postings_abroad(labels: tuple[str, ...]) -> None:
+    assert not check_locations(labels, US_ONLY).passed
+
+
+@pytest.mark.parametrize("labels", APPLIED)
+def test_us_only_keeps_every_applied_posting(labels: tuple[str, ...]) -> None:
+    assert check_locations(labels, US_ONLY).passed
+
+
 # --- the company blocklist ---------------------------------------------------------------
 
 

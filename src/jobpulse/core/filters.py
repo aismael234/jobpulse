@@ -5,6 +5,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Literal
 
+from jobpulse.core.countries import ANYWHERE, label_countries
 from jobpulse.core.dedupe import normalize_company
 
 
@@ -18,6 +19,7 @@ class WeightedRegex:
 class LocationRules:
     include: tuple[re.Pattern[str], ...] = ()
     exclude: tuple[re.Pattern[str], ...] = ()
+    countries: frozenset[str] = frozenset()  # ISO 3166 alpha-2 codes; empty = anywhere
     unknown_passes: bool = True
 
 
@@ -174,13 +176,44 @@ def check_description(text: str | None, rules: FilterRules) -> DescriptionVerdic
     )
 
 
+def _country_candidates(labels: Sequence[str], rules: LocationRules) -> tuple[list[str], str]:
+    """The labels that may count under ``rules.countries``, and why none may when it's empty.
+
+    A label whose country is unknown sides with the posting's other labels: next to one in
+    your countries it counts too ("San Francisco, CA" and "Remote"), next to foreign ones
+    only it doesn't ("Pune" and "Pimpri-Chinchwad Area"). When no label's country is known,
+    ``unknown_passes`` decides, as for a posting with no location."""
+    places = [(label, label_countries(label)) for label in labels]
+    if all(where is None for _, where in places):
+        if rules.unknown_passes:
+            return list(labels), ""
+        return [], (
+            f"no location whose country is known in {', '.join(labels)} "
+            "(unknown_location_passes is off)"
+        )
+    allowed = {
+        label
+        for label, where in places
+        if where is not None and (where == ANYWHERE or where & rules.countries)
+    }
+    if not allowed:
+        return [], f"no location in {', '.join(sorted(rules.countries))} ({', '.join(labels)})"
+    return [label for label, where in places if where is None or label in allowed], ""
+
+
 def check_locations(labels: Sequence[str], rules: LocationRules) -> LocationVerdict:
-    """Passes when at least one location is included (or no includes) and not excluded."""
+    """Passes when at least one location is in ``countries`` (when set), included (or no
+    includes) and not excluded."""
     if not labels:
         if rules.unknown_passes:
             return LocationVerdict(True, "no location given")
         return LocationVerdict(False, "no location given (unknown_location_passes is off)")
-    for label in labels:
+    candidates = list(labels)
+    if rules.countries:
+        candidates, reason = _country_candidates(labels, rules)
+        if not candidates:
+            return LocationVerdict(False, reason)
+    for label in candidates:
         included = not rules.include or any(p.search(label) for p in rules.include)
         if included and not any(p.search(label) for p in rules.exclude):
             return LocationVerdict(True, f"location ok ({label})")
