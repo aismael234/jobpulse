@@ -56,7 +56,7 @@ def decision(score: float | None, tier: str = "") -> Decision:
     if score is None:
         return Decision(tier=tier or "filtered", reason="title matches no include rule")  # type: ignore[arg-type]
     return Decision(
-        tier=tier or ("instant" if score >= 0.55 else "digest"),  # type: ignore[arg-type]
+        tier=tier or "instant",  # type: ignore[arg-type]
         reason=f"score {score:.2f}",
         score=score,
         breakdown={"total": score},
@@ -123,7 +123,7 @@ def test_apply_moves_the_score() -> None:
     assert lifted.tier == "instant"
     assert lifted.score == pytest.approx(0.65)
     dropped = llm.apply(decision(0.60), Assessment("senior", 1.0, 1.0))
-    assert dropped.tier == "digest"
+    assert dropped.tier == "instant"  # a lower score, still pushed
     assert dropped.score == pytest.approx(0.45)
 
 

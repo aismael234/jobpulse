@@ -1,5 +1,6 @@
 """M4: the LLM layer through the whole cycle, over a fake provider. Only rule survivors in the
-band are asked about, an answer moves the score and the tier, answers are cached per posting,
+band are asked about, an answer moves the score (every match is still pushed), answers are
+cached per posting,
 the daily cap and failures leave postings to the rules, dry runs never call, and a bad key
 stops the asking."""
 
@@ -94,7 +95,7 @@ def assessments(env: Env) -> list[LlmAssessment]:
         return list(session.scalars(select(LlmAssessment).order_by(LlmAssessment.id)))
 
 
-async def test_only_the_band_is_asked_about_and_the_answer_moves_the_tier(
+async def test_only_the_band_is_asked_about_and_the_answer_moves_the_score(
     env: Env, gh: GreenhouseMock, llm: FakeLlm
 ) -> None:
     llm.answers["Platform Engineer"] = WEAK
@@ -105,7 +106,7 @@ async def test_only_the_band_is_asked_about_and_the_answer_moves_the_tier(
     assert request.resume == RESUME
     assert "Build Go services on Postgres." in request.posting
     band = env.posting("greenhouse", "4012345102")
-    assert band.tier == "digest"  # was instant on the rules alone
+    assert band.tier == "instant"  # a lower score, still a match
     assert band.score is not None
     assert band.score < 0.5
     assert band.score_breakdown is not None
@@ -113,7 +114,8 @@ async def test_only_the_band_is_asked_about_and_the_answer_moves_the_tier(
     assert band.tier_reason is not None
     assert "llm -0.09" in band.tier_reason
     assert [push.title.split(" · ")[1] for push in env.notifier.sent] == [
-        "Backend Engineer, Payments"
+        "Backend Engineer, Payments",
+        "Platform Engineer",
     ]
     [stored] = assessments(env)
     assert (stored.posting_id, stored.ok, stored.level, stored.model) == (
@@ -136,7 +138,9 @@ async def test_an_answer_is_cached_per_posting(env: Env, gh: GreenhouseMock, llm
 
     assert len(llm.requests) == 1  # the second decision used the stored answer
     assert report.llm_cached == 1
-    assert env.posting("greenhouse", "4012345102").tier == "digest"
+    row = env.posting("greenhouse", "4012345102")
+    assert row.score_breakdown is not None
+    assert row.score_breakdown["llm"] == pytest.approx(-0.09)
     assert len(assessments(env)) == 1
 
 
@@ -204,11 +208,13 @@ async def test_a_dry_run_never_calls_but_uses_cached_answers(
 
     llm.answers["Platform Engineer"] = WEAK
     await env.poll(sources=["greenhouse"])  # the live run asks
+    lowered = env.posting("greenhouse", "4012345102").score
     env.update_posting("greenhouse", "4012345102", tier="pending")
     cached = await env.poll(sources=["greenhouse"], dry_run=True)
     assert len(llm.requests) == 1
     assert cached.llm_cached == 1
-    assert cached.targets[0].digest  # the cached answer still moved it to the digest
+    [line] = cached.targets[0].instant  # the cached answer still moved the score
+    assert line.endswith(f"(score {lowered:.2f})")
 
 
 async def test_a_bad_key_stops_the_asking(env: Env, gh: GreenhouseMock, llm: FakeLlm) -> None:

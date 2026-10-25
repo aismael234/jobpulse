@@ -161,7 +161,6 @@ button[type="submit"]:not(.actions button) { background: var(--accent); border-c
   cursor: help;
 }
 .score.instant { background: var(--good-soft); color: var(--good); }
-.score.digest { background: var(--accent-soft); color: var(--accent); }
 .pay { color: var(--good); font-weight: 500; }
 .note { font-style: italic; }
 .badge {

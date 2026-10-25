@@ -1,6 +1,7 @@
 """Section 7, items 1–7, end to end: adapters over respx, a real SQLite database, the poller."""
 
 from datetime import timedelta
+from typing import Any
 
 import httpx
 import pytest
@@ -17,7 +18,6 @@ from tests.integration.conftest import (
     board_posting,
     gh_job,
     lever_posting,
-    make_config,
 )
 
 pytestmark = pytest.mark.respx(assert_all_called=False)
@@ -333,9 +333,9 @@ async def test_a_failed_push_is_retried_next_cycle_without_duplicates(
     assert [message.title for message in env.notifier.sent] == [TITLE_LINE]
 
 
-async def test_instant_pushes_are_capped_per_cycle(env: Env, gh: GreenhouseMock) -> None:
-    env.config = make_config(notify={"channels": [], "max_instant_per_cycle": 1})
+async def test_every_match_is_pushed_best_first_with_no_cap(env: Env, gh: GreenhouseMock) -> None:
     await baseline(env, gh, 101)
+    gh.descriptions[104] = "Python platform. 8+ years of experience required."
     gh.respond(
         gh_job(101, published=OLD),
         gh_job(102, published=FRESH),
@@ -344,24 +344,45 @@ async def test_instant_pushes_are_capped_per_cycle(env: Env, gh: GreenhouseMock)
     )
     report = await env.poll(sources=["greenhouse"])
 
-    assert report.held_back == 2
+    assert len(report.pushes) == 3
     titles = [message.title for message in env.notifier.sent]
-    assert len(titles) == 2
-    assert titles[1] == "jobpulse: 2 more matches this cycle"
-    tiers = sorted(env.posting("greenhouse", str(i)).tier for i in (102, 103, 104))
-    assert tiers == ["digest", "digest", "instant"]
+    assert len(titles) == 3
+    assert "Backend Engineer, Search" in titles[-1]  # the lowest score goes last
+    rows = [env.posting("greenhouse", str(i)) for i in (102, 103, 104)]
+    assert [row.tier for row in rows] == ["instant"] * 3
+    assert all(row.notified_at is not None for row in rows)
 
 
-async def test_too_senior_description_goes_to_the_digest(env: Env, gh: GreenhouseMock) -> None:
+async def test_a_too_senior_description_is_still_pushed_with_a_lower_score(
+    env: Env, gh: GreenhouseMock
+) -> None:
     await baseline(env, gh, 101)
     gh.descriptions[102] = "Python platform. 8+ years of experience required."
     gh.respond(gh_job(101, published=OLD), gh_job(102, published=FRESH))
     await env.poll(sources=["greenhouse"])
 
     row = env.posting("greenhouse", "102")
-    assert row.tier == "digest"
+    assert row.tier == "instant"
+    assert row.score is not None
+    assert row.score < env.config.scoring.instant_threshold
     assert row.score_breakdown is not None
     assert row.score_breakdown["level_mismatch"] == -0.5
+    assert [message.title for message in env.notifier.sent] == [TITLE_LINE]
+
+
+@pytest.mark.parametrize("change", [{"status": "Dismissed"}, {"closed_at": NOW}])
+async def test_a_failed_push_isnt_retried_once_triaged_or_closed(
+    env: Env, gh: GreenhouseMock, change: dict[str, Any]
+) -> None:
+    await baseline(env, gh, 101)
+    env.notifier.failures_left = 1
+    gh.respond(gh_job(101, published=OLD), gh_job(102, published=FRESH))
+    assert (await env.poll(sources=["greenhouse"])).failed_pushes == 1
+
+    env.update_posting("greenhouse", "102", **change)
+    if "closed_at" in change:  # gone from the board, or the next listing would reopen it
+        gh.respond(gh_job(101, published=OLD))
+    await env.poll(sources=["greenhouse"])
     assert env.notifier.sent == []
 
 

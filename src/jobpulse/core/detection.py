@@ -42,7 +42,6 @@ class EvaluationContext:
     freshness: timedelta
     rules: FilterRules
     weights: Weights
-    instant_threshold: float
     company_priority: float = 0.0
     applicant_cap: int = 200  # applicant counts scale against this (scoring.applicant_cap)
 
@@ -179,10 +178,7 @@ def evaluate(posting: Posting, ctx: EvaluationContext) -> Decision:
         ),
         ctx.weights,
     )
-    instant = total >= ctx.instant_threshold
-    reason = f"score {total:.2f} {'≥' if instant else '<'} {ctx.instant_threshold:.2f}"
+    reason = f"score {total:.2f}"
     if description.level_mismatch:
         reason += f"; {description.reason}"
-    return Decision(
-        tier="instant" if instant else "digest", reason=reason, score=total, breakdown=breakdown
-    )
+    return Decision(tier="instant", reason=reason, score=total, breakdown=breakdown)

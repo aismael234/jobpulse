@@ -58,7 +58,7 @@ def make_posting(**overrides: Any) -> Posting:
 
 
 def posting_row(**overrides: Any) -> PostingRow:
-    """A stored posting, by default an untriaged digest-tier Acme match seen an hour ago."""
+    """A stored posting, by default an untriaged, unpushed Acme match seen an hour ago."""
     external_id = str(overrides.pop("external_id", None) or next(_ROW_IDS))
     values: dict[str, Any] = {
         "source": "greenhouse",
@@ -74,7 +74,7 @@ def posting_row(**overrides: Any) -> PostingRow:
         "posted_at_precision": "exact",
         "first_seen_at": NOW - timedelta(hours=1),
         "last_seen_at": NOW,
-        "tier": "digest",
+        "tier": "instant",
         "tier_reason": "score 0.45 < 0.55",
         "score": 0.45,
         "status": "New",

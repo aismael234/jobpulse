@@ -32,7 +32,7 @@
 {% for row in page.rows %}
 {% include "_posting.html" %}
 {% else %}
-<p class="empty">{% if view == "New" %}Nothing new to look at. Matches that aren't pushed right away land here and in the digest.{% else %}No {{ view|lower }} postings{% if query.text or query.company or query.source %} match these filters{% endif %}.{% endif %}</p>
+<p class="empty">{% if view == "New" %}Nothing new to look at. Every match is pushed and lands here.{% else %}No {{ view|lower }} postings{% if query.text or query.company or query.source %} match these filters{% endif %}.{% endif %}</p>
 {% endfor %}
 </section>
 

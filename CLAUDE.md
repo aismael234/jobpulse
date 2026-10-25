@@ -11,8 +11,8 @@ Personal job-posting watcher. Read PROGRESS.md first: milestone checklists, deci
 - `scripts/check.sh` — all of the above in one go
 - `uv run jobpulse poll --once --dry-run` — one poll cycle over every source (`--source` narrows it); nothing sent, nothing saved, the LLM never called
 - `uv run jobpulse --config tests/fixtures/scenarios/config.yaml poll --once --dry-run --fixtures tests/fixtures/scenarios/first_poll` — the same over recorded responses, JobSpy rows included (set `DATABASE_URL` to a scratch DB and run `db upgrade` first; `second_poll` after a live `first_poll` shows a merge)
-- `uv run jobpulse worker` — the scheduler and the digest (needs `NTFY_TOPIC` when ntfy is enabled)
-- `uv run jobpulse web [--host] [--port]` — the dashboard on 127.0.0.1:8000; `uv run jobpulse digest --dry-run` — the next digest, nothing sent or marked
+- `uv run jobpulse worker` — the scheduler (needs `NTFY_TOPIC` when ntfy is enabled)
+- `uv run jobpulse web [--host] [--port]` — the dashboard on 127.0.0.1:8000
 - `uv run jobpulse companies list` / `companies sync`, `uv run jobpulse notify test`
 - `docker compose up -d` (`--profile postgres` for Postgres) — needs the Docker daemon: `orbctl start` (OrbStack) first. Test with `-p <name>` and an override file mounting a scratch config, so `./config.yaml` and its volumes stay untouched
 - `uv run alembic upgrade head` or `uv run jobpulse db upgrade` — migrate the database (the CLI refuses to run on one that is behind)
@@ -35,6 +35,7 @@ Personal job-posting watcher. Read PROGRESS.md first: milestone checklists, deci
 - JSON columns: assign a new list or dict instead of mutating in place, or the change isn't saved.
 - `[tool.uv] exclude-newer` freezes resolution at a date. To take newer releases, move it forward (keep it a few days back) and run `uv lock --upgrade`.
 - pydantic-settings runs with `env_ignore_empty=True`, so `NTFY_TOPIC=` in `.env` counts as unset.
+- Migrations run with `PRAGMA foreign_keys=ON`, so an SQLite batch rebuild (Alembic's copy, drop, rename) fires the drop's foreign-key actions: rebuilding `postings` would empty `llm_assessments` (CASCADE), and rebuilding `companies` would null `postings.company_id`. Add and drop plain columns in place with `batch_alter_table(..., recreate="never")`; anything that needs a rebuild has to turn the pragma off first. 0004 has a test for this.
 - Alembic autogenerate renders `JSONB(astext_type=Text())` without the `sa.` prefix, and boolean server defaults as `1`/`0`, which Postgres rejects. Fix both by hand (`sa.Text()`, `sa.true()`/`sa.false()`); `test_migrations_match_the_models` catches drift.
 - Typer renders help with Rich markup, so `[...]` in a help string disappears. Use parentheses.
 - `ConfigError` messages must never echo secret values; the tests assert this.
@@ -64,7 +65,7 @@ Personal job-posting watcher. Read PROGRESS.md first: milestone checklists, deci
 - HTMX out-of-band swaps of table rows need a `<template>` wrapper (see `_detect.html`).
 - Hrefs to source data go through the `http_url` filter: feeds are third-party, and a `javascript:` URL must never become a link.
 - Run history is pruned at most once a day per `Poller` (an in-memory timestamp), never in a dry run. Each `env.poll()` builds a new `Poller`; to test the once-a-day rule, keep one `env.poller()`.
-- The digest claims rows (`digest_sent_at`) before sending and releases every row stamped with that exact time if the send fails, including rows that inherited the stamp mid-send through the reverse link.
+- There is no digest and no per-cycle push cap: every match (tier `instant`) is pushed, best first. `scoring.instant_threshold` only centers the LLM band. A push that failed is retried while the posting is fresh, open and still `New`.
 
 ## Verified API facts (2026-10-23, Workday and LinkedIn job pages 2026-10-24)
 

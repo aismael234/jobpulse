@@ -285,7 +285,7 @@ def test_applicants_are_stored_with_the_decision_and_read_back(
             session,
             row_id,
             dataclasses.replace(posting, applicants=count),
-            Decision(tier="digest", reason="score 0.50 < 0.55", score=0.5),
+            Decision(tier="instant", reason="score 0.50", score=0.5),
         )
     with database() as session:
         row = session.get(PostingRow, row_id)

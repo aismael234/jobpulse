@@ -36,10 +36,8 @@ from jobpulse.runtime import (
     WorkerStalled,
     open_database,
     poll_once,
-    render_digest,
     render_report,
     run_worker,
-    send_digest,
     send_test_notification,
 )
 from jobpulse.web.app import create_app
@@ -402,34 +400,3 @@ def _is_loopback(host: str) -> bool:
         return ipaddress.ip_address(host).is_loopback
     except ValueError:
         return False
-
-
-@app.command()
-def digest(
-    ctx: typer.Context,
-    dry_run: Annotated[
-        bool, typer.Option("--dry-run", help="Print the digest; send and mark nothing.")
-    ] = False,
-) -> None:
-    """Send the digest now: the matches that didn't get a push of their own. The worker sends
-    it at schedules.digest_times."""
-    state = _state(ctx)
-    config = _load_config(state)
-    if not dry_run:
-        _require_secrets(state, config)
-    _start_logging(state, config)
-    try:
-        result = asyncio.run(
-            send_digest(
-                config=config,
-                settings=state.settings,
-                database_url=_database_url(state, config),
-                dry_run=dry_run,
-            )
-        )
-    except DatabaseNotReady as exc:
-        _fail(exc)
-    for line in render_digest(result, dry_run=dry_run):
-        typer.echo(line)
-    if result.notification is not None and not dry_run and not result.sent:
-        raise typer.Exit(code=1)

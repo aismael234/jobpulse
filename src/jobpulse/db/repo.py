@@ -56,7 +56,6 @@ MAX_ERROR_CHARS = 2000
 _ATS_KEY_PREFIXES = tuple(f"{ats}:" for ats in sorted(ATS_SOURCES))
 # When several stored rows match, the ATS row is the primary.
 _ATS_ROWS_FIRST = case((PostingRow.source.in_(sorted(ATS_SOURCES)), 0), else_=1)
-_MATCH_TIERS = frozenset({"instant", "digest"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -732,8 +731,8 @@ def adopt_copies(
     feed and job-board copies of the same job (same ATS key, ``gh_jid`` or fingerprint seen
     since ``since``), so the ATS row is the primary and the job is never pushed twice.
 
-    The ATS row inherits the copy's notification and digest marks, status, applicant data
-    and any field it lacks; in a baseline it also takes over a match tier and score, so a
+    The ATS row inherits the copy's notification mark, status, applicant data and any field
+    it lacks; in a baseline it also takes over a match tier and score, so a
     pushed job doesn't vanish into a silent baseline. Rows merged into the copy follow it.
     """
     by_key: dict[str, int] = {}
@@ -787,7 +786,6 @@ def adopt_copies(
 
 _INHERITED = (
     "notified_at",
-    "digest_sent_at",
     "applicant_label",
     "applicant_min",
     "applicant_max",
@@ -818,7 +816,7 @@ def _adopt(
             setattr(primary, field, getattr(copy, field))
     if primary.status == "New" and copy.status != "New":
         primary.status = copy.status
-    if baseline and copy.tier in _MATCH_TIERS:
+    if baseline and copy.tier == "instant":
         primary.tier = copy.tier
         primary.tier_reason = f"{copy.tier_reason} (first seen on {copy.source})"
         primary.score = copy.score
@@ -902,15 +900,16 @@ def pending_rows(
 
 
 def instant_unnotified(session: Session, *, since: datetime) -> list[PostingRow]:
-    """Instant-tier postings whose push hasn't gone out, best first."""
+    """Open, untriaged matches whose push hasn't gone out, best first."""
     return list(
         session.scalars(
             select(PostingRow)
             .where(
                 PostingRow.tier == "instant",
                 PostingRow.notified_at.is_(None),
-                PostingRow.digest_sent_at.is_(None),
                 PostingRow.merged_into_id.is_(None),
+                PostingRow.closed_at.is_(None),
+                PostingRow.status == "New",
                 PostingRow.first_seen_at >= since,
             )
             .order_by(PostingRow.score.desc(), PostingRow.first_seen_at, PostingRow.id)
@@ -918,65 +917,11 @@ def instant_unnotified(session: Session, *, since: datetime) -> list[PostingRow]
     )
 
 
-def hold_back(session: Session, row_id: int, *, reason: str) -> None:
-    session.execute(
-        update(PostingRow).where(PostingRow.id == row_id).values(tier="digest", tier_reason=reason)
-    )
-
-
 def mark_notified(session: Session, row_id: int, *, now: datetime) -> None:
     session.execute(update(PostingRow).where(PostingRow.id == row_id).values(notified_at=now))
 
 
-# --- digest and dashboard ------------------------------------------------------------------
-
-
-def digest_candidates(session: Session, *, push_window_start: datetime) -> list[PostingRow]:
-    """Open, untriaged matches that no push or digest has covered, best first: digest-tier
-    rows, and instant rows first seen before ``push_window_start`` (their push is no longer
-    retried)."""
-    return list(
-        session.scalars(
-            select(PostingRow)
-            .where(
-                PostingRow.merged_into_id.is_(None),
-                PostingRow.closed_at.is_(None),
-                PostingRow.status == "New",
-                PostingRow.notified_at.is_(None),
-                PostingRow.digest_sent_at.is_(None),
-                or_(
-                    PostingRow.tier == "digest",
-                    (PostingRow.tier == "instant") & (PostingRow.first_seen_at < push_window_start),
-                ),
-            )
-            .order_by(
-                PostingRow.score.desc().nulls_last(),
-                PostingRow.first_seen_at.desc(),
-                PostingRow.id,
-            )
-        )
-    )
-
-
-def claim_for_digest(session: Session, row_ids: Sequence[int], *, now: datetime) -> None:
-    """Stamp ``digest_sent_at`` before the digest goes out, so no other digest takes them."""
-    for chunk in _chunks(list(row_ids)):
-        session.execute(
-            update(PostingRow)
-            .where(PostingRow.id.in_(chunk), PostingRow.digest_sent_at.is_(None))
-            .values(digest_sent_at=now)
-        )
-
-
-def release_digest_claim(session: Session, *, claimed_at: datetime) -> int:
-    """Undo a digest whose send failed: every row stamped with exactly ``claimed_at``,
-    including rows that inherited the stamp while the send was in flight."""
-    result = session.execute(
-        update(PostingRow)
-        .where(PostingRow.digest_sent_at == claimed_at)
-        .values(digest_sent_at=None)
-    )
-    return cast(CursorResult[Any], result).rowcount
+# --- dashboard -----------------------------------------------------------------------------
 
 
 def set_status(session: Session, row_id: int, status: str) -> str | None:

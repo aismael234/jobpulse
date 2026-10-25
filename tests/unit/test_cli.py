@@ -17,8 +17,9 @@ def write(path: Path, text: str) -> Path:
 def test_help_lists_every_command() -> None:
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0, result.output
-    for name in ("poll", "worker", "web", "companies", "digest", "db", "config"):
+    for name in ("poll", "worker", "web", "companies", "db", "config"):
         assert name in result.output
+    assert "digest" not in result.output  # every match is pushed; there's no digest
 
 
 def test_config_check_passes_for_valid_files(tmp_path: Path) -> None:
@@ -66,7 +67,7 @@ def test_config_check_prints_placeholder_warnings(tmp_path: Path) -> None:
     assert "<SET ME>" in result.output
 
 
-@pytest.mark.parametrize(("command", "option"), [("web", "--host"), ("digest", "--dry-run")])
+@pytest.mark.parametrize(("command", "option"), [("web", "--host")])
 def test_m3_commands_replace_their_placeholders(command: str, option: str) -> None:
     result = runner.invoke(app, [command, "--help"])
     assert result.exit_code == 0, result.output

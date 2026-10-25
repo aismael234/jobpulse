@@ -46,7 +46,7 @@ from jobpulse.discovery import Discoverer, Sighting
 from jobpulse.health import HealthMonitor, HealthRules
 from jobpulse.llm.scorer import Ask, LlmScorer
 from jobpulse.notify.base import Notifier, NotifierError
-from jobpulse.notify.format import PushContent, instant_notification, overflow_notification
+from jobpulse.notify.format import PushContent, instant_notification
 from jobpulse.sources.base import SourceAdapter
 
 log = logging.getLogger(__name__)
@@ -73,7 +73,6 @@ class TargetReport:
     filtered: int = 0
     stale: int = 0
     instant: list[str] = field(default_factory=list)
-    digest: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     run_id: int | None = None
     not_modified: bool = False
@@ -90,7 +89,6 @@ class TargetReport:
             "filtered": self.filtered,
             "stale": self.stale,
             "instant": len(self.instant),
-            "digest": len(self.digest),
         }
 
 
@@ -100,7 +98,6 @@ class CycleReport:
     targets: list[TargetReport] = field(default_factory=list)
     pushes: list[str] = field(default_factory=list)  # title lines sent (or, in a dry run, due)
     failed_pushes: int = 0
-    held_back: int = 0
     discovered: list[str] = field(default_factory=list)  # boards added (or that would be)
     discovery_deferred: int = 0
     discovery_skipped: list[str] = field(default_factory=list)  # valid, but over a limit
@@ -536,8 +533,8 @@ class Poller:
         postings: list[Posting],
         decisions: list[Decision],
     ) -> list[Decision]:
-        """The LLM layer's second opinion on the decisions within its band of the instant
-        threshold: the answer cached for that exact question, else a call while
+        """The LLM layer's second opinion on the matches within ``llm.band`` of
+        ``scoring.instant_threshold``: the answer cached for that exact question, else a call while
         ``llm.max_calls_per_day`` allows. A dry run never calls."""
         llm = self._llm
         asks = llm.candidates(postings, decisions) if llm is not None else []
@@ -590,8 +587,8 @@ class Poller:
         return decided
 
     async def _notify(self, unit: _UnitOfWork, report: CycleReport) -> None:
-        """Push every instant-tier posting not yet sent (so failed sends retry), best first,
-        capped per cycle; the rest wait for the digest."""
+        """Push every match not yet sent (so failed sends retry), best first, whatever its
+        score."""
         session = unit.session
         now = self._clock()
         due = repo.instant_unnotified(session, since=now - self._freshness)
@@ -602,21 +599,13 @@ class Poller:
                 session, row_id, Decision(tier="filtered", reason="company is on the blocklist")
             )
         due = [row for row in due if row.id not in blocked]
-        cap = self._config.notify.max_instant_per_cycle
-        to_send, held = due[:cap], due[cap:]
-        for row in held:
-            repo.hold_back(session, row.id, reason="held back: over notify.max_instant_per_cycle")
-        report.held_back = len(held)
         unit.checkpoint()
 
         if self._notifier is None and not report.dry_run:
-            if to_send:
-                log.warning(
-                    "no notification channel configured; %d instant matches wait for the digest",
-                    len(to_send),
-                )
+            if due:
+                log.warning("no notification channel configured; %d matches not pushed", len(due))
             return
-        for row in to_send:
+        for row in due:
             message = instant_notification(
                 self._push_content(row),
                 now=now,
@@ -636,15 +625,6 @@ class Poller:
             repo.mark_notified(session, row.id, now=self._clock())
             unit.checkpoint()
             report.pushes.append(message.title)
-        if held and not report.dry_run and self._notifier is not None:
-            try:
-                await self._notifier.send(
-                    overflow_notification(
-                        len(held), dashboard_url=self._config.notify.dashboard_url
-                    )
-                )
-            except NotifierError as exc:
-                log.warning("overflow summary push failed: %s", exc)
 
     async def _check_health(self, unit: _UnitOfWork, report: CycleReport) -> None:
         """Open and resolve incidents for the targets that just ran, then send what's due:
@@ -764,7 +744,6 @@ class Poller:
             freshness=self._freshness,
             rules=self._rules,
             weights=self._weights,
-            instant_threshold=self._config.scoring.instant_threshold,
             company_priority=priority,
             applicant_cap=self._config.scoring.applicant_cap,
         )
@@ -775,7 +754,7 @@ class Poller:
             report.filtered += 1
         elif decision.tier == "stale":
             report.stale += 1
-        elif decision.tier in ("instant", "digest"):
+        elif decision.tier == "instant":
             content = dataclasses.replace(
                 self._content_for(posting, survivor.first_seen_at),
                 score=decision.score,
@@ -785,7 +764,7 @@ class Poller:
                 content, now=self._clock(), short_labels=self._short_labels
             ).title
             score = f" (score {decision.score:.2f})" if decision.score is not None else ""
-            (report.instant if decision.tier == "instant" else report.digest).append(line + score)
+            report.instant.append(line + score)
 
     @staticmethod
     def _content_for(posting: Posting, first_seen_at: datetime) -> PushContent:

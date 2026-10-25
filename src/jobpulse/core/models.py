@@ -13,7 +13,7 @@ Precision = Literal["exact", "day", "none"]
 ErrorKind = Literal[
     "http_429", "http_4xx", "http_5xx", "timeout", "parse", "jobspy_board_error", "other"
 ]
-Tier = Literal["pending", "baseline", "merged", "filtered", "stale", "digest", "instant"]
+Tier = Literal["pending", "baseline", "merged", "filtered", "stale", "instant"]
 Region = Literal["us", "eu"]
 
 FeedName = Literal["simplify"]

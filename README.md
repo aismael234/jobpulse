@@ -1,6 +1,6 @@
 # jobpulse
 
-A personal job-posting watcher for one person on one always-on machine. It polls public applicant-tracking-system boards (Greenhouse, Lever, Ashby, Workday), the SimplifyJobs New-Grad list and a few Indeed/LinkedIn searches, finds postings it hasn't seen, filters and scores them, and pushes the strong matches to your phone within minutes. The rest go into a twice-daily digest and a small dashboard.
+A personal job-posting watcher for one person on one always-on machine. It polls public applicant-tracking-system boards (Greenhouse, Lever, Ashby, Workday), the SimplifyJobs New-Grad list and a few Indeed/LinkedIn searches, finds postings it hasn't seen, filters and scores them, and pushes every match to your phone within minutes, best first. A small dashboard keeps them for triage.
 
 ## What it does, and what it never does
 
@@ -22,7 +22,7 @@ It **detects and notifies**. It never applies, fills in forms or submits anythin
 4. **Freshness.** Only postings younger than 48 h (by the source's own timestamp when there is one) can alert, so reopened listings and old reposts stay quiet.
 5. **Dedupe.** A LinkedIn, Indeed or SimplifyJobs copy of a job you already have from its ATS board (same canonical URL, a `gh_jid` link, or the same company, title and city within 30 days) is merged onto the ATS posting instead of alerting twice.
 6. **Details.** New postings that pass the title and location rules get one detail call: a Greenhouse or Workday job's description, and a LinkedIn job's public page, which also gives its applicant count ("Be among the first 25 applicants").
-7. **Filters and score.** Title, level, years-of-experience, stack and location rules from `config.yaml`, plus the applicant count when LinkedIn gave one. A score at or above `instant_threshold` is pushed right away; other passing postings go to the digest and the dashboard.
+7. **Filters and score.** Title, level, years-of-experience, stack and location rules from `config.yaml`, plus the applicant count when LinkedIn gave one. Every posting that passes is pushed right away, whatever its score; the score orders the pushes and shows in each one.
 8. **A second opinion (optional).** With the LLM layer on, postings that score close to the threshold are read by Claude against your resume, and its answer moves the score a little up or down (see "The LLM layer").
 9. **Closures.** A job missing from two complete, successful polls of its board is marked closed (and reopened if it comes back). Job-board results, and Workday boards searched by keyword, never close anything.
 10. **Health.** One alert when a target fails 3 runs in a row or a normally busy one returns nothing for 24 h, and one message when it recovers.
@@ -40,7 +40,7 @@ uv run jobpulse db upgrade
 uv run jobpulse config check
 uv run jobpulse poll --once --dry-run     # fetch and evaluate everything; save and send nothing
 uv run jobpulse notify test               # one test push to your phone
-uv run jobpulse worker                    # poll on schedule, push, send the digest
+uv run jobpulse worker                    # poll on schedule and push
 uv run jobpulse web                       # the dashboard on http://127.0.0.1:8000
 ```
 
@@ -92,13 +92,11 @@ python3 -c "import secrets; print('jobpulse-' + secrets.token_urlsafe(24))"
 2. Install the ntfy app, tap **+**, and subscribe to that exact topic on `https://ntfy.sh`.
 3. Run `uv run jobpulse notify test` (or `docker compose run --rm worker jobpulse notify test`).
 
-A push looks like `Stripe · Backend Engineer · SF / Remote · posted 25 min ago`; tapping it opens the apply page. At most `notify.max_instant_per_cycle` (10) postings are pushed per cycle; the rest wait for the digest, with one "N more" push.
+A push looks like `Stripe · Backend Engineer · SF / Remote · posted 25 min ago`; tapping it opens the apply page. Every match is pushed, with no per-cycle cap, best score first; a failed push is retried next cycle while the posting is still fresh, open and untriaged.
 
 **Self-hosting ntfy:** set `notify.ntfy.base_url` to your server, and `NTFY_TOKEN` in `.env` if it uses access control. Subscribe the app to your server instead of ntfy.sh.
 
 **Discord as well (or instead):** create a webhook (Server Settings → Integrations → Webhooks), put it in `.env` as `DISCORD_WEBHOOK_URL`, and add `discord` to `notify.channels`.
-
-**The digest** goes out at `schedules.digest_times` (09:00 and 18:00) in `timezone`: one message listing the matches that didn't get their own push, best first, with a link to the dashboard (`notify.dashboard_url`). A posting appears in at most one digest. `uv run jobpulse digest --dry-run` shows what the next one would say.
 
 ## The dashboard
 
@@ -126,8 +124,7 @@ Keep the dashboard on 127.0.0.1 and let [Tailscale](https://tailscale.com) carry
    ```
 
    It prints the address, `https://<machine>.<tailnet>.ts.net/`. Allow HTTPS certificates in the Tailscale admin console if it asks.
-3. Set `notify.dashboard_url` in `config.yaml` to that address, so digests link to it.
-4. Optionally add `DASHBOARD_USER` and `DASHBOARD_PASSWORD` for a password on top.
+3. Optionally add `DASHBOARD_USER` and `DASHBOARD_PASSWORD` for a password on top.
 
 Never use `tailscale funnel` for this: it would put the dashboard on the public internet.
 
@@ -138,11 +135,11 @@ Never use `tailscale funnel` for this: it would put the dashboard on the public 
 - **From the dashboard:** paste a board, job or careers-page URL on the Watchlist page. jobpulse recognizes the board from the URL, or reads the page once to find a Greenhouse, Lever, Ashby or Workday link or embed. It checks the board with one API call, shows the company and its open jobs, and adds it with the priority (and, for Workday, the keywords) you choose.
 - **Automatically:** discovery adds boards linked from the SimplifyJobs feed and job-board postings when one of their postings passes your title and location filters. It adds at most `discovery.max_auto_companies` (50) and skips boards with more than `max_board_jobs` (1,000) open jobs. `uv run jobpulse companies list` shows where each company came from.
 
-Every new company's first poll is a silent baseline. Workday boards are never added by discovery. To never hear about a company again, add it to `blocklist.companies` (or a board to `blocklist.boards`): its postings are kept but never pushed or put in a digest, and discovery leaves it alone.
+Every new company's first poll is a silent baseline. Workday boards are never added by discovery. To never hear about a company again, add it to `blocklist.companies` (or a board to `blocklist.boards`): its postings are kept but never pushed, and discovery leaves it alone.
 
 ## The LLM layer (optional)
 
-Off by default. When it's on, postings whose rule score lands within `llm.band` (0.10) of `instant_threshold` (the ones the rules can't call) are sent to Claude together with your resume. Claude answers with the level the role really hires for, how much of it is backend work (0–100) and how well your resume fits it (0–100). The two scores average into a signal that moves the rule score by up to `scoring.weights.llm` (0.15) either way; a level that isn't in `llm.wanted_levels` counts as a signal of 0. So a borderline posting can be lifted to an instant push or dropped to the digest; nothing is ever filtered out by it.
+Off by default. When it's on, postings whose rule score lands within `llm.band` (0.10) of `instant_threshold` (the borderline ones) are sent to Claude together with your resume. The threshold no longer gates pushes (every match is pushed); it only marks where the LLM looks. Claude answers with the level the role really hires for, how much of it is backend work (0–100) and how well your resume fits it (0–100). The two scores average into a signal that moves the rule score by up to `scoring.weights.llm` (0.15) either way; a level that isn't in `llm.wanted_levels` counts as a signal of 0. So a borderline posting moves up or down the push order and shows its adjusted score; nothing is ever filtered out by it.
 
 To turn it on:
 
@@ -170,14 +167,14 @@ Cost guards: at most `llm.max_calls_per_day` (25) calls in any 24 hours, failed 
 | Section | What it controls |
 |---|---|
 | `contact_email` | Sent in the User-Agent so API operators can reach you. Required. |
-| `timezone` | Digest times and the dashboard's displayed times. Storage is always UTC. |
+| `timezone` | The dashboard's displayed times. Storage is always UTC. |
 | `database_url` | SQLite by default (`sqlite:///data/jobpulse.db`, WAL mode). `DATABASE_URL` overrides it. |
 | `http` | Timeouts, retries with backoff, and concurrent requests per host. |
-| `schedules` | Each source group's interval and jitter, and `digest_times`. |
+| `schedules` | Each source group's interval and jitter. |
 | `detection` | `freshness_hours` (48), closure after missing polls (2), fingerprint window (30 days). |
 | `filters` | Title include/exclude regexes, level words, years of experience, stack keywords, location rules and aliases. |
-| `scoring` | Score weights (including `applicants` and `llm`), `priority_cap`, `applicant_cap`, `instant_threshold`. |
-| `notify` | `channels`, ntfy server and tags, the per-cycle push cap, `dashboard_url`. |
+| `scoring` | Score weights (including `applicants` and `llm`), `priority_cap`, `applicant_cap`, `instant_threshold` (the center of the LLM's band). |
+| `notify` | `channels`, ntfy server, priority and tags. |
 | `watchlist` | Companies on Greenhouse, Lever, Ashby and Workday (with `keywords`). |
 | `searches` | Indeed and LinkedIn searches through JobSpy. |
 | `linkedin` | Pause between LinkedIn requests, the cool-down after a 429, and the job pages (`job_pages`, `max_job_pages_per_hour`). |
@@ -206,16 +203,15 @@ Level, location and stack values in the example are placeholders; set your own. 
 | `JOBPULSE_CONFIG` | Another `config.yaml` path (`--config` beats it). |
 | `LOG_LEVEL` | `INFO` by default. |
 
-Empty values count as unset. Only commands that send (`worker`, a non-dry `poll`, `digest`, `notify test`) need the notification secrets.
+Empty values count as unset. Only commands that send (`worker`, a non-dry `poll`, `notify test`) need the notification secrets.
 
 ## Commands
 
 | Command | What it does |
 |---|---|
 | `jobpulse poll --once [--dry-run] [--source NAME] [--target KEY]` | One cycle over every source (or some). A dry run sends nothing and rolls back. |
-| `jobpulse worker` | The scheduler: every source on its own cadence, plus the digest. |
+| `jobpulse worker` | The scheduler: every source on its own cadence. |
 | `jobpulse web [--host H] [--port P]` | The dashboard. |
-| `jobpulse digest [--dry-run]` | Send (or show) the digest now. |
 | `jobpulse companies list` / `sync` | The watchlist with origin and baseline state / apply `config.yaml` now. |
 | `jobpulse notify test` | One test push through every channel. |
 | `jobpulse db upgrade` / `current` | Apply migrations / show the revision. The other commands refuse a database that is behind. |
@@ -269,7 +265,7 @@ Tests come with it, and never touch the network (`pytest-socket` blocks it; resp
 
 ```bash
 scripts/check.sh                          # ruff, ruff format --check, mypy, pytest (everything)
-uv run pytest -k digest                   # a subset
+uv run pytest -k llm                      # a subset
 JOBPULSE_LIVE=1 uv run pytest -m live     # the live smoke tests against real APIs
 uv run alembic revision --autogenerate -m "..."   # after a schema change; review it by hand
 ```
@@ -306,7 +302,7 @@ src/jobpulse/
   db/          tables, repository, dashboard queries, session
   web/         FastAPI app, routes, templates, static files (htmx)
   poller.py    one poll cycle          scheduler.py   cadences, watchdog
-  digest.py    the digest              health.py      source health alerts
-  discovery.py automatic watchlist     cli.py         the jobpulse command
+  health.py    source health alerts    discovery.py   automatic watchlist
+  cli.py       the jobpulse command
 migrations/    Alembic                 tests/         unit, integration, live
 ```

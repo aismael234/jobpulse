@@ -28,7 +28,7 @@ def nav_count(page: str, view: str) -> int:
 
 
 def test_new_view_lists_untriaged_matches_with_their_age(web: Web) -> None:
-    digest = web.add(title="Backend Engineer", score=0.45)
+    unpushed = web.add(title="Backend Engineer", score=0.45)
     pushed = web.add(
         title="Platform Engineer",
         tier="instant",
@@ -41,13 +41,13 @@ def test_new_view_lists_untriaged_matches_with_their_age(web: Web) -> None:
     closed = web.add(title="API Engineer", score=0.3, closed_at=NOW - timedelta(hours=1))
     for tier in ("baseline", "filtered", "stale", "pending"):
         web.add(title=f"{tier} row", tier=tier, score=None)
-    web.add(title="Merged copy", tier="merged", merged_into_id=digest, source="linkedin")
+    web.add(title="Merged copy", tier="merged", merged_into_id=unpushed, source="linkedin")
     saved = web.add(title="Saved one", status="Saved")
 
     page = web.page("/")
 
-    assert posting_ids(page) == [pushed, digest, closed]
-    assert "posted 2 h ago" in card(page, digest)
+    assert posting_ids(page) == [pushed, unpushed, closed]
+    assert "posted 2 h ago" in card(page, unpushed)
     assert "first seen 3 h ago" in card(page, pushed)
     assert "closed" in card(page, closed)
     assert saved not in posting_ids(page)

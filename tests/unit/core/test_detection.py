@@ -165,7 +165,6 @@ def context(**overrides: object) -> EvaluationContext:
         "freshness": WINDOW,
         "rules": RULES,
         "weights": Weights(),
-        "instant_threshold": 0.55,
         "company_priority": 0.5,
     }
     values.update(overrides)
@@ -221,18 +220,22 @@ def test_evaluate_instant() -> None:
     )
 
 
-def test_evaluate_digest_below_the_threshold() -> None:
+def test_evaluate_a_low_score_is_still_a_match() -> None:
     posting = make_posting(posted_at=NOW - timedelta(hours=40))
     decision = evaluate(posting, context(company_priority=0.0))
-    assert decision.tier == "digest"
+    assert decision.tier == "instant"
     assert decision.score is not None
     assert decision.score < 0.55
+    assert decision.reason == f"score {decision.score:.2f}"
 
 
 def test_evaluate_penalizes_too_many_years() -> None:
     posting = make_posting(description_text="Python. 6+ years of experience.")
     decision = evaluate(posting, context())
-    assert decision.tier == "digest"
+    assert decision.tier == "instant"
+    assert decision.score is not None
+    assert decision.breakdown is not None
+    assert decision.breakdown["level_mismatch"] < 0
     assert "6" in decision.reason
 
 
@@ -286,5 +289,5 @@ def test_evaluate_judges_a_location_still_missing_after_enrichment() -> None:
 def test_evaluate_judges_locations_that_enrichment_supplied() -> None:
     near = evaluate(make_posting(locations=("Seattle, WA",)), context(rules=STRICT_LOCATIONS))
     far = evaluate(make_posting(locations=("Austin, TX",)), context(rules=STRICT_LOCATIONS))
-    assert near.tier in ("instant", "digest")
+    assert near.tier == "instant"
     assert far.tier == "filtered"

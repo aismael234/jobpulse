@@ -46,7 +46,6 @@ EXAMPLE_CONTACT_EMAIL = "you@example.com"
 
 NTFY_TOPIC_PATTERN = re.compile(r"[A-Za-z0-9_-]{24,64}")
 EMAIL_PATTERN = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
-TIME_OF_DAY_PATTERN = re.compile(r"([01]\d|2[0-3]):[0-5]\d")
 SLUG_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]*$"
 BOARD_REF_PATTERN = re.compile(
     r"(greenhouse|lever|ashby)/[A-Za-z0-9][A-Za-z0-9._-]*"
@@ -198,7 +197,6 @@ class SchedulesConfig(_Model):
     watchlist: Cadence = Cadence(**DEFAULT_CADENCES["watchlist"])
     simplify: Cadence = Cadence(**DEFAULT_CADENCES["simplify"])
     job_boards: Cadence = Cadence(**DEFAULT_CADENCES["job_boards"])
-    digest_times: list[str] = ["09:00", "18:00"]
 
     @model_validator(mode="before")
     @classmethod
@@ -210,14 +208,6 @@ class SchedulesConfig(_Model):
                 if isinstance(data.get(name), dict):
                     data[name] = {**defaults, **data[name]}
         return data
-
-    @field_validator("digest_times")
-    @classmethod
-    def _times_of_day(cls, value: list[str]) -> list[str]:
-        for item in value:
-            if not TIME_OF_DAY_PATTERN.fullmatch(item):
-                raise ValueError(f"{item!r} is not a 24-hour HH:MM time")
-        return value
 
 
 class DetectionConfig(_Model):
@@ -280,7 +270,7 @@ class ScoringConfig(_Model):
     weights: ScoringWeights = ScoringWeights()
     priority_cap: int = Field(default=10, ge=1)
     applicant_cap: int = Field(default=200, ge=1)
-    instant_threshold: float = 0.55
+    instant_threshold: float = 0.55  # the LLM layer double-checks scores within llm.band of it
 
 
 class NtfyConfig(_Model):
@@ -304,8 +294,6 @@ class NotifyConfig(_Model):
     channels: list[NotifyChannel] = ["ntfy"]
     ntfy: NtfyConfig = NtfyConfig()
     discord: DiscordConfig = DiscordConfig()
-    max_instant_per_cycle: int = Field(default=10, ge=1)
-    dashboard_url: str | None = None
 
 
 class WatchlistEntry(_Model):

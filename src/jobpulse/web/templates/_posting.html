@@ -24,7 +24,7 @@
       {% if row.department %}<span>{{ row.department }}</span>{% endif %}
       {% if row.applicant_label %}<span>{{ row.applicant_label }}</span>{% endif %}
       {% if row.score_breakdown and "llm" in row.score_breakdown %}<span class="note" title="{{ row.tier_reason }}">LLM {{ "%+.2f"|format(row.score_breakdown["llm"]) }}</span>{% endif %}
-      {% if row.notified_at %}<span class="note" title="{{ row.notified_at|local }}">pushed {{ row.notified_at|ago }}</span>{% elif row.digest_sent_at %}<span class="note" title="{{ row.digest_sent_at|local }}">in a digest {{ row.digest_sent_at|ago }}</span>{% endif %}
+      {% if row.notified_at %}<span class="note" title="{{ row.notified_at|local }}">pushed {{ row.notified_at|ago }}</span>{% endif %}
     </p>
   </div>
   <form class="actions" method="post" action="/postings/{{ row.id }}/status" hx-post="/postings/{{ row.id }}/status" hx-target="#posting-{{ row.id }}" hx-swap="outerHTML">

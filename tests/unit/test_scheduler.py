@@ -2,7 +2,7 @@
 
 import random
 import statistics
-from datetime import UTC, datetime, time
+from datetime import datetime
 from types import SimpleNamespace
 from typing import Any
 
@@ -11,10 +11,8 @@ import pytest
 from jobpulse.config import AppConfig
 from jobpulse.scheduler import (
     Cadence,
-    DailyTimes,
     Worker,
     cadences_from_config,
-    next_daily_run,
     next_delay,
 )
 from tests.factories import NOW, FakeMonotonic
@@ -168,55 +166,6 @@ async def test_worker_jobs_follow_the_config() -> None:
     assert set(scheduled_jobs(quiet, run)) == {"watchlist"}
 
 
-# --- the digest's daily times (Milestone 3) -----------------------------------------------
-
-DIGEST = DailyTimes((time(9, 0), time(18, 0)), "America/Los_Angeles")
-
-
-@pytest.mark.parametrize(
-    ("now", "expected"),
-    [
-        # 2026-10-23 is PDT (UTC-7): 09:00 local is 16:00 UTC, 18:00 local is 01:00 UTC next day
-        (datetime(2026, 10, 23, 14, 0, tzinfo=UTC), datetime(2026, 10, 23, 16, 0, tzinfo=UTC)),
-        (datetime(2026, 10, 23, 16, 0, tzinfo=UTC), datetime(2026, 10, 24, 1, 0, tzinfo=UTC)),
-        (datetime(2026, 10, 23, 20, 30, tzinfo=UTC), datetime(2026, 10, 24, 1, 0, tzinfo=UTC)),
-        (datetime(2026, 10, 24, 1, 0, 1, tzinfo=UTC), datetime(2026, 10, 24, 16, 0, tzinfo=UTC)),
-        # DST ends on 2026-11-01: 09:00 PST is 17:00 UTC
-        (datetime(2026, 11, 1, 2, 0, tzinfo=UTC), datetime(2026, 11, 1, 17, 0, tzinfo=UTC)),
-    ],
-)
-def test_next_daily_run_is_the_next_local_time_in_utc(now: datetime, expected: datetime) -> None:
-    assert next_daily_run(DIGEST, now) == expected
-
-
-def test_next_daily_run_ignores_the_order_of_the_times() -> None:
-    schedule = DailyTimes((time(18, 0), time(9, 0)), "UTC")
-    assert next_daily_run(schedule, NOW) == datetime(2026, 10, 23, 18, 0, tzinfo=UTC)
-
-
-async def test_a_daily_job_waits_for_its_time_and_reschedules_for_the_next() -> None:
-    ran: list[str] = []
-
-    async def digest() -> None:
-        ran.append("digest")
-
-    clock = {"now": NOW}  # 07:00 PDT
-    scheduler = FakeScheduler()
-    worker = Worker(
-        {"digest": (DIGEST, digest)},
-        rng=random.Random(1),
-        scheduler=scheduler,
-        clock=lambda: clock["now"],
-    )
-    worker.start()
-    assert scheduler.jobs[-1].run_date == datetime(2026, 10, 23, 16, 0, tzinfo=UTC)
-
-    clock["now"] = datetime(2026, 10, 23, 16, 0, 2, tzinfo=UTC)
-    await worker.run_job("digest")
-    assert ran == ["digest"]
-    assert scheduler.jobs[-1].run_date == datetime(2026, 10, 24, 1, 0, tzinfo=UTC)
-
-
 # --- the watchdog (Milestone 3) ----------------------------------------------------------
 
 
@@ -233,7 +182,6 @@ def watched_worker(monotonic: FakeMonotonic) -> tuple[Worker, list[str]]:
         {
             "watchlist": (Cadence(1800, 120), job("watchlist")),
             "job_boards": (Cadence(4500, 900), job("job_boards")),
-            "digest": (DIGEST, job("digest")),
         },
         rng=random.Random(2),
         scheduler=FakeScheduler(),
@@ -264,17 +212,6 @@ async def test_watchdog_flags_a_source_that_stopped_finishing_runs() -> None:
     assert worker.stalled() == []
 
 
-async def test_watchdog_ignores_the_daily_digest() -> None:
-    monotonic = FakeMonotonic()
-    worker, _ = watched_worker(monotonic)
-    worker.start()
-    monotonic.now += 3 * 5400 - 10
-    await worker.run_job("watchlist")
-    await worker.run_job("job_boards")
-    monotonic.now += 3 * 5400 - 10  # the digest never ran: fine
-    assert worker.stalled() == []
-
-
 async def test_watch_returns_the_stalled_jobs() -> None:
     monotonic = FakeMonotonic()
     worker, _ = watched_worker(monotonic)
@@ -290,36 +227,7 @@ async def test_watch_returns_the_stalled_jobs() -> None:
     assert len(checks) == 3 * 5400 // 600 + 1
 
 
-def test_a_worker_without_interval_jobs_has_no_watchdog() -> None:
-    async def digest() -> None:
-        return None
-
-    worker = Worker({"digest": (DIGEST, digest)}, scheduler=FakeScheduler(), clock=lambda: NOW)
+def test_a_worker_without_jobs_has_no_watchdog() -> None:
+    worker = Worker({}, scheduler=FakeScheduler(), clock=lambda: NOW)
     assert worker.watchdog_limit is None
     assert worker.stalled() == []
-
-
-def test_digest_job_follows_the_config() -> None:
-    from jobpulse.runtime import digest_job
-
-    async def run() -> None:
-        return None
-
-    config = AppConfig.model_validate(
-        {
-            "contact_email": "dev@example.com",
-            "timezone": "Europe/Berlin",
-            "schedules": {"digest_times": ["18:30", "08:15"]},
-        }
-    )
-    jobs = digest_job(config, run)
-    assert list(jobs) == ["digest"]
-    schedule, _ = jobs["digest"]
-    assert schedule == DailyTimes((time(8, 15), time(18, 30)), "Europe/Berlin")
-    # 18:30 in Berlin (CEST, UTC+2) on 2026-10-23
-    assert next_daily_run(schedule, NOW) == datetime(2026, 10, 23, 16, 30, tzinfo=UTC)
-
-    quiet = AppConfig.model_validate(
-        {"contact_email": "dev@example.com", "schedules": {"digest_times": []}}
-    )
-    assert digest_job(quiet, run) == {}

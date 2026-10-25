@@ -1,5 +1,5 @@
-"""The LLM scoring layer: a second opinion on the rule survivors whose score sits within
-``band`` of the instant threshold. The poller owns the database side (the per-posting cache
+"""The LLM scoring layer: a second opinion on the matches whose score sits within ``band`` of
+``scoring.instant_threshold``. The poller owns the database side (the per-posting cache
 and the daily call count); this decides what to ask, asks with a little concurrency, and
 applies the answers."""
 
@@ -90,7 +90,6 @@ class LlmScorer:
             decision,
             assessment,
             weight=self.weight,
-            threshold=self.threshold,
             wanted_levels=self.wanted_levels,
         )
 

@@ -713,7 +713,7 @@ def test_the_llm_key_is_required_by_commands_that_call_the_llm(tmp_path: Path) -
         require_secrets(config, load_settings(env), env_file=env, llm=True)
     assert "LLM_API_KEY" in str(excinfo.value)
     assert str(env) in str(excinfo.value)
-    require_secrets(config, load_settings(env), env_file=env)  # digest, notify test: no LLM
+    require_secrets(config, load_settings(env), env_file=env)  # notify test: no LLM
 
 
 def test_a_set_llm_key_passes_and_is_never_echoed(tmp_path: Path) -> None:

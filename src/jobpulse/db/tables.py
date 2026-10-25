@@ -107,7 +107,6 @@ class PostingRow(Base):
     applicant_max: Mapped[int | None]
     status: Mapped[str] = mapped_column(String(12), default="New", server_default="New")
     notified_at: Mapped[datetime | None]
-    digest_sent_at: Mapped[datetime | None]
     merged_into_id: Mapped[int | None] = mapped_column(
         ForeignKey("postings.id", ondelete="SET NULL")
     )

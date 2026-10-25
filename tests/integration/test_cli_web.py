@@ -1,28 +1,22 @@
-"""``jobpulse web`` and ``jobpulse digest`` from the command line."""
+"""``jobpulse web`` from the command line."""
 
 from pathlib import Path
 from typing import Any
 
 import pytest
-import respx
 import time_machine
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, select
-from sqlalchemy.orm import Session
 from typer.testing import CliRunner
 
 from jobpulse.cli import app
-from jobpulse.db.tables import PostingRow
-from tests.factories import NOW, posting_row
+from tests.factories import NOW
 
 runner = CliRunner()
-TOPIC = "jobpulse-Zq3vX9kR2mT7wL4pB8nC1dF6"
 CONFIG = """\
 contact_email: dev@example.com
 notify:
   channels: [ntfy]
-  dashboard_url: https://jobpulse.tail1234.ts.net/
 simplify: {enabled: false}
 discovery: {enabled: false}
 """
@@ -45,15 +39,6 @@ class Cli:
     def upgrade(self) -> None:
         result = self("db", "upgrade")
         assert result.exit_code == 0, result.output
-
-    def add(self, **fields: Any) -> None:
-        with Session(create_engine(self.db_url)) as session:
-            session.add(posting_row(**fields))
-            session.commit()
-
-    def digest_marks(self) -> list[Any]:
-        with Session(create_engine(self.db_url)) as session:
-            return list(session.scalars(select(PostingRow.digest_sent_at).order_by(PostingRow.id)))
 
 
 @pytest.fixture
@@ -124,67 +109,6 @@ def test_web_needs_a_migrated_database(cli: Cli, served: dict[str, Any]) -> None
     assert result.exit_code == 2
     assert "jobpulse db upgrade" in result.output
     assert served == {}
-
-
-def test_digest_dry_run_prints_the_message_and_marks_nothing(cli: Cli) -> None:
-    cli.upgrade()
-    cli.add(title="Backend Engineer", score=0.47)
-
-    result = cli("digest", "--dry-run")  # no NTFY_TOPIC needed
-
-    assert result.exit_code == 0, result.output
-    assert "dry run" in result.output
-    assert "jobpulse digest · 1 new match" in result.output
-    assert "1. Acme · Backend Engineer · SF · posted 2 h ago (score 0.47)" in result.output
-    assert cli.digest_marks() == [None]
-
-
-def test_digest_needs_the_notification_secrets(cli: Cli) -> None:
-    cli.upgrade()
-    result = cli("digest")
-    assert result.exit_code == 2
-    assert "NTFY_TOPIC" in result.output
-
-
-def test_digest_with_nothing_to_send(cli: Cli) -> None:
-    cli.upgrade()
-    cli.env.write_text(f"NTFY_TOPIC={TOPIC}\n", encoding="utf-8")
-    result = cli("digest")
-    assert result.exit_code == 0, result.output
-    assert "nothing to send" in result.output
-
-
-def test_digest_sends_one_ntfy_message(cli: Cli, respx_mock: respx.MockRouter) -> None:
-    cli.upgrade()
-    cli.add(title="Backend Engineer", score=0.47)
-    cli.add(title="Platform Engineer", score=0.41)
-    cli.env.write_text(f"NTFY_TOPIC={TOPIC}\n", encoding="utf-8")
-    ntfy = respx_mock.post(f"https://ntfy.sh/{TOPIC}").respond(200, json={"id": "x"})
-
-    result = cli("digest")
-
-    assert result.exit_code == 0, result.output
-    assert "digest sent: 2 postings" in result.output
-    assert TOPIC not in result.output
-    assert ntfy.call_count == 1
-    request = ntfy.calls[0].request
-    assert request.headers["Title"] == "jobpulse digest · 2 new matches"
-    assert request.headers["Click"] == "https://jobpulse.tail1234.ts.net/"
-    assert "Platform Engineer" in request.content.decode()
-    assert all(mark is not None for mark in cli.digest_marks())
-
-
-def test_a_failed_digest_exits_non_zero(cli: Cli, respx_mock: respx.MockRouter) -> None:
-    cli.upgrade()
-    cli.add(title="Backend Engineer")
-    cli.env.write_text(f"NTFY_TOPIC={TOPIC}\n", encoding="utf-8")
-    respx_mock.post(f"https://ntfy.sh/{TOPIC}").respond(403)
-
-    result = cli("digest")
-
-    assert result.exit_code == 1
-    assert "ntfy answered HTTP 403" in result.output
-    assert cli.digest_marks() == [None]
 
 
 def test_web_keeps_health_probes_out_of_the_access_log(cli: Cli, served: dict[str, Any]) -> None:

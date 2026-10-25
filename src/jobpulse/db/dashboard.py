@@ -1,6 +1,6 @@
 """Read models for the dashboard: posting lists and counts per status view, and source health.
 
-The New view holds matches (instant or digest tier) nobody has triaged yet. Saved, Applied and
+The New view holds matches (the instant tier) nobody has triaged yet. Saved, Applied and
 Dismissed hold every posting with that status, whatever its tier. Merged copies never show;
 their primary does, with ``also_seen_on``. Companies on the blocklist are hidden everywhere
 except Applied, which doubles as the record of your applications.
@@ -19,7 +19,6 @@ from jobpulse.core.filters import Blocklist
 from jobpulse.db.tables import Company, HealthIncident, PostingRow, Run, Search
 
 STATUSES: tuple[str, ...] = ("New", "Saved", "Applied", "Dismissed")
-MATCH_TIERS: tuple[str, ...] = ("instant", "digest")
 BLOCKLIST_EXEMPT_STATUSES = frozenset({"Applied"})
 PAGE_SIZE = 50
 
@@ -59,7 +58,7 @@ class PostingPage:
 def _in_view(status: str, hidden: Collection[str]) -> list[ColumnElement[bool]]:
     conditions = [PostingRow.merged_into_id.is_(None), PostingRow.status == status]
     if status == "New":
-        conditions.append(PostingRow.tier.in_(MATCH_TIERS))
+        conditions.append(PostingRow.tier == "instant")
     if hidden and status not in BLOCKLIST_EXEMPT_STATUSES:
         conditions.append(PostingRow.company_name.not_in(sorted(hidden)))
     return conditions
@@ -80,7 +79,7 @@ def hidden_companies(session: Session, blocklist: Blocklist) -> frozenset[str]:
         select(PostingRow.company_name)
         .where(
             PostingRow.merged_into_id.is_(None),
-            or_(PostingRow.tier.in_(MATCH_TIERS), PostingRow.status != "New"),
+            or_(PostingRow.tier == "instant", PostingRow.status != "New"),
         )
         .distinct()
     )

@@ -145,7 +145,7 @@ async def test_a_429_ends_job_pages_and_cools_the_next_search_down(env: Env, li:
     assert {target.ok for target in report.targets} == {True}  # the search itself worked
     for job_id in ("4101100003", "4101100004"):
         row = env.posting("linkedin", job_id)
-        assert row.tier in ("instant", "digest")  # judged without the page
+        assert row.tier == "instant"  # judged without the page
         assert row.applicant_label is None
 
     calls = len(li.scrape.calls)
