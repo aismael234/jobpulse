@@ -25,6 +25,9 @@
       <option value="score"{% if query.sort == "score" %} selected{% endif %}>Best score</option>
       <option value="fresh"{% if query.sort == "fresh" %} selected{% endif %}>Newest</option>
       <option value="pushed"{% if query.sort == "pushed" %} selected{% endif %}>Recently pushed</option>
+      {% if moved_sort %}
+      <option value="moved"{% if query.sort == "moved" %} selected{% endif %}>{{ moved_sort }}</option>
+      {% endif %}
     </select>
     <button type="submit">Filter</button>
     <a class="reset" href="/?view={{ view|lower }}">Clear</a>
@@ -46,15 +49,36 @@
       </select>
       <label class="pay-floor">Pay at least $<input type="number" name="pay" value="{{ query.min_pay }}" min="1" step="5" placeholder="any" aria-label="Pay at least, in thousands of dollars a year">k/yr</label>
       <label class="check"><input type="checkbox" name="pay_listed" value="1"{% if query.pay_listed %} checked{% endif %}> Pay listed</label>
+      <select name="exp" aria-label="Years of experience asked">
+        <option value="">Any experience</option>
+        {% for value, label in experience_choices %}
+        <option value="{{ value }}"{% if query.experience == value %} selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
       <input type="number" name="min_score" value="{{ query.min_score }}" min="0" max="2" step="0.05" placeholder="Min score" aria-label="Minimum score">
       <label class="check"><input type="checkbox" name="open" value="1"{% if query.open_only %} checked{% endif %}> Open only</label>
     </div>
   </details>
 </form>
 
-<p class="summary">{{ page.total }} posting{{ "" if page.total == 1 else "s" }}{% if page.total > page.page_size %}, page {{ page.page }}{% endif %}</p>
+<div class="summary" id="summary">
+  <p>{{ page.total }} posting{{ "" if page.total == 1 else "s" }}{% if page.total > page.page_size %}, page {{ page.page }}{% endif %}</p>
+  {% if page.total %}
+  <a href="{{ export_url }}" download>Export CSV</a>
+  {% if view in bulk_views %}
+  <form class="bulk" method="post" action="/postings/bulk-status" hx-post="/postings/bulk-status" hx-target="#postings" hx-swap="innerHTML" hx-confirm="Dismiss all {{ page.total }} postings these filters show? Undo stays on screen afterwards.">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="status" value="Dismissed">
+    <input type="hidden" name="filters" value="{{ filters }}">
+    <input type="hidden" name="as_of" value="{{ as_of }}">
+    <input type="hidden" name="return_to" value="{{ return_to }}">
+    <button type="submit" class="link status-dismissed">Dismiss all {{ page.total }}</button>
+  </form>
+  {% endif %}
+  {% endif %}
+</div>
 
-<section class="postings">
+<section class="postings" id="postings">
 {% for row in page.rows %}
 {% include "_posting.html" %}
 {% else %}

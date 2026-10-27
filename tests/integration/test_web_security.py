@@ -163,6 +163,9 @@ def test_every_post_route_checks_the_token(web: Web) -> None:
     assert posts(routes.pages) == []
     paths = posts(routes.actions)
     assert paths == [
+        "/companies/block",
+        "/companies/unblock",
+        "/postings/bulk-status",
         "/postings/{posting_id}/status",
         "/watchlist/add",
         "/watchlist/detect",
@@ -238,7 +241,10 @@ def test_templates_escape_what_sources_send(web: Web) -> None:
 @pytest.mark.parametrize("path", ["/", "/health", "/watchlist"])
 def test_pages_load_scripts_and_styles_from_this_server_only(web: Web, path: str) -> None:
     page = web.page(path)
-    assert re.findall(r"<script[^>]*>", page) == ['<script src="/static/htmx.min.js" defer>']
+    assert re.findall(r"<script[^>]*>", page) == [
+        '<script src="/static/htmx.min.js" defer>',
+        '<script src="/static/app.js" defer>',  # the blocked-company listener, no inline code
+    ]
     stylesheets = re.findall(r'<link[^>]*rel="stylesheet"[^>]*href="([^"]+)"', page)
     assert stylesheets == ["/static/app.css"]
     assert "<style" not in page  # the CSP allows no inline styles

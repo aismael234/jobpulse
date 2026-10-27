@@ -46,7 +46,7 @@ class WebState:
     sessions: sessionmaker[Session]
     templates: Jinja2Templates
     clock: Callable[[], datetime]
-    blocklist: Blocklist
+    blocklist: Blocklist  # config.yaml's; routes add the dashboard's blocks per request
     short_labels: dict[str, str]
     zone: ZoneInfo
     detector: AtsDetector | None = None

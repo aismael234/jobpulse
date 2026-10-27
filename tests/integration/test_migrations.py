@@ -1,4 +1,6 @@
+import importlib.util
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 from alembic import command
@@ -9,6 +11,7 @@ from sqlalchemy import create_engine, inspect, text
 from typer.testing import CliRunner
 
 from jobpulse.cli import app
+from jobpulse.core.filters import extract_years_required
 from jobpulse.db.tables import Base
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -106,6 +109,84 @@ def test_0004_turns_digest_rows_into_matches_without_pushing_digested_ones(db_ur
 
     command.downgrade(config, "0003")
     assert "digest_sent_at" in {c["name"] for c in inspect(engine).get_columns("postings")}
+
+
+YEARS_SAMPLES = (
+    None,
+    "",
+    "We have been in business for 10 years.",
+    "3+ years of experience with Python",
+    "Minimum of 2 years building APIs; 5-7 years preferred",
+    "at least 4 yrs of backend work",
+    "You bring 4 years of professional experience.",
+    "Founded 40 years ago. 1+ year experience",
+)
+
+
+def _migration_0005() -> ModuleType:
+    path = next((REPO_ROOT / "migrations" / "versions").glob("0005_*.py"))
+    spec = importlib.util.spec_from_file_location("migration_0005", path)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize("text_", YEARS_SAMPLES)
+def test_0005_reads_years_like_the_filters_do(text_: str | None) -> None:
+    """The migration keeps its own copy of the extraction (migrations never import
+    application code); it must agree with core."""
+    assert _migration_0005().years_required(text_) == extract_years_required(text_)
+
+
+def test_0005_backfills_years_and_adds_status_times_and_blocks(db_url: str) -> None:
+    config = alembic_config(db_url)
+    command.upgrade(config, "0004")
+    engine = create_engine(db_url)
+    insert = text(
+        "INSERT INTO postings (id, source, external_id, company_name, title, locations, "
+        "canonical_url, fingerprint, url, first_seen_at, last_seen_at, also_seen_on, raw, "
+        "description_text) VALUES (:id, 'greenhouse', :id, 'Acme', 'Role', '[]', :id, 'f', "
+        "'https://example.com', :seen, :seen, '[]', '{}', :description)"
+    )
+    seen = "2026-10-24 08:00:00.000000"
+    with engine.begin() as connection:
+        for posting_id, description in enumerate(
+            ("3+ years of experience", None, "No years here", "5-7 years"), start=1
+        ):
+            connection.execute(insert, {"id": posting_id, "seen": seen, "description": description})
+        connection.execute(
+            text(
+                "INSERT INTO llm_assessments (posting_id, input_hash, model, created_at) "
+                "VALUES (1, 'h', 'm', :seen)"
+            ),
+            {"seen": seen},
+        )
+        connection.execute(text("UPDATE postings SET merged_into_id = 1 WHERE id = 4"))
+
+    command.upgrade(config, "0005")
+
+    with engine.connect() as connection:
+        rows = connection.execute(
+            text("SELECT id, years_required, status_changed_at FROM postings ORDER BY id")
+        ).all()
+        assert [tuple(row) for row in rows] == [
+            (1, 3, None),
+            (2, None, None),
+            (3, None, None),
+            (4, 5, None),
+        ]
+        # columns added in place: no foreign-key actions
+        assert connection.execute(text("SELECT count(*) FROM llm_assessments")).scalar() == 1
+        merged = text("SELECT merged_into_id FROM postings WHERE id = 4")
+        assert connection.execute(merged).scalar() == 1
+    assert "blocked_companies" in inspect(engine).get_table_names()
+
+    command.downgrade(config, "0004")
+    columns = {c["name"] for c in inspect(engine).get_columns("postings")}
+    assert not {"years_required", "status_changed_at"} & columns
+    assert "blocked_companies" not in inspect(engine).get_table_names()
 
 
 def test_cli_db_upgrade_uses_database_url(tmp_path: Path, db_url: str) -> None:

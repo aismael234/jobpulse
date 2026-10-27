@@ -66,6 +66,11 @@ Personal job-posting watcher. Read PROGRESS.md first: milestone checklists, deci
 - Hrefs to source data go through the `http_url` filter: feeds are third-party, and a `javascript:` URL must never become a link.
 - Run history is pruned at most once a day per `Poller` (an in-memory timestamp), never in a dry run. Each `env.poll()` builds a new `Poller`; to test the once-a-day rule, keep one `env.poller()`.
 - `filters.locations.countries` places labels with the tables in `core/countries.py` (pure, no gazetteer). A label whose country is unknown sides with the posting's other labels. To fix a misplaced label, add the name to a table and a case to `test_countries.py`; leave out a name shared by places in different countries.
+- The dashboard's location and pay filters run in Python over the ids and labels the SQL filters leave (`dashboard._matches`); a new filter that SQL can express belongs in `_conditions`. Comparing `coalesce(...)` of timestamps with a bound time needs `type_=UTCDateTime()`, or SQLite compares the wrong format.
+- Place parsing below the country is `core/places.py` (tables of city states, areas, metro areas); fix a misplaced label there with a case in `test_places.py`.
+- The blocklist is config.yaml's plus `blocked_companies` rows: the dashboard merges them per request (`routes._blocklist`), the poller at the start of each cycle. `WebState.blocklist` is config.yaml's only.
+- `repo.set_status` takes `now` and sets `status_changed_at`; bulk moves use `repo.set_statuses`.
+- htmx logs a console error for an out-of-band swap whose target is missing; to change cards that may not be on the page, send an `HX-Trigger` event and handle it in `static/app.js`.
 - There is no digest and no per-cycle push cap: every match (tier `instant`) is pushed, best first. `scoring.instant_threshold` only centers the LLM band. A push that failed is retried while the posting is fresh, open and still `New`.
 
 ## Verified API facts (2026-10-23, Workday and LinkedIn job pages 2026-10-24)

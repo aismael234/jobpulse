@@ -107,13 +107,17 @@ A push looks like `Stripe · Backend Engineer · SF / Remote · posted 25 min ag
   - **Location** is one list of the places in the current view, each with its count: countries, US states and Canadian provinces, metro areas (Bay Area, NYC, Seattle, DC, Boston, LA, Dallas–Fort Worth, Austin, Denver–Boulder, Research Triangle, Atlanta, Chicago) and cities. A country includes worldwide-remote postings; a state, metro area or city never includes remote ones.
   - **Pushed** is when jobpulse pushed the posting to you, or first saw it if it never pushed it: within the last hour up to 30 days, or longer ago than a day up to 30 days.
   - **Pay at least $X k/yr** compares the top of the posted range, with hourly and monthly pay turned into yearly; pay in another currency counts as not listed. Postings without pay stay unless you tick "Pay listed".
+  - **Experience:** the most years the description asks for (0–2, 3–5, 6+, or not stated); cards show "asks 3+ yrs".
+- **Applications log:** moving a posting records when, and cards outside New show "applied 3 d ago". Saved, Applied and Dismissed sort by it ("Recently applied"). **Export CSV** (next to the count) downloads every posting the current view and filters show, all pages; cells that would start a spreadsheet formula get a leading `'`.
+- **Dismiss all N** (New and Saved only) dismisses what the filters show, with undo. Only postings pushed and moved before the page was shown are touched, so nothing that arrived after you looked goes with them. Applied is never emptied in bulk.
+- **Block company** on any card hides the company's postings at once (Applied aside), with undo. The worker reads the dashboard's blocks at the start of each cycle, so they apply without a restart: new postings are filtered, waiting pushes dropped, boards neither polled nor discovered. The Watchlist page lists blocked companies, config.yaml's and the dashboard's; the dashboard's can be unblocked there. A company on config.yaml's watchlist can't be blocked from a card.
 - **Health:** per board, search and feed: last run, last success, failures in a row, the last 24 h of runs, fetched and new postings, the last error, and open incidents.
 - **Watchlist:** every company with its priority, status, origin and baseline. Paste a careers URL to add a board (see below); a Workday board gets a keywords field. Priority and pause apply to companies that didn't come from `config.yaml`.
 - A posting the LLM layer assessed shows "LLM +0.12" (or minus); hover for its verdict.
 
-Companies on your blocklist are hidden everywhere except Applied.
+Companies on your blocklist (config.yaml's or the dashboard's) are hidden everywhere except Applied.
 
-**Security.** It listens on 127.0.0.1 unless you say otherwise. Set both `DASHBOARD_USER` and `DASHBOARD_PASSWORD` in `.env` to turn on HTTP basic auth (setting only one is an error). Every POST needs the page's CSRF token, which lives in a `SameSite=Strict` cookie. Pages load scripts and styles only from the dashboard itself (htmx 2.0.11 is vendored), under a strict Content-Security-Policy.
+**Security.** It listens on 127.0.0.1 unless you say otherwise. Set both `DASHBOARD_USER` and `DASHBOARD_PASSWORD` in `.env` to turn on HTTP basic auth (setting only one is an error). Every POST needs the page's CSRF token, which lives in a `SameSite=Strict` cookie. Pages load scripts and styles only from the dashboard itself (htmx 2.0.11 is vendored, plus a few lines of `app.js`), under a strict Content-Security-Policy.
 
 ## Reach the dashboard from your phone with Tailscale
 

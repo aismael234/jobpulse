@@ -111,7 +111,7 @@ input, select, button {
 input:focus, select:focus, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 button { cursor: pointer; }
 button:hover { border-color: var(--accent); }
-button[type="submit"]:not(.actions button) { background: var(--accent); border-color: var(--accent); color: #fff; }
+button[type="submit"]:not(.actions button):not(.link) { background: var(--accent); border-color: var(--accent); color: #fff; }
 .check { display: inline-flex; align-items: center; gap: 0.3rem; color: var(--muted); }
 .check input { margin: 0; }
 
@@ -132,7 +132,20 @@ button[type="submit"]:not(.actions button) { background: var(--accent); border-c
 .filters .more { margin-top: 0.5rem; }
 .filters .more summary { cursor: pointer; color: var(--muted); font-size: 0.9rem; width: max-content; }
 .filters .more[open] summary { margin-bottom: 0.5rem; }
-.summary { color: var(--muted); font-size: 0.9rem; margin: 0.75rem 0 0.5rem; }
+.summary { display: flex; flex-wrap: wrap; gap: 0.25rem 1rem; align-items: center; color: var(--muted); font-size: 0.9rem; margin: 0.75rem 0 0.5rem; }
+.summary p { margin: 0; }
+.summary form { display: inline; }
+button.link { padding: 0; border: none; background: none; color: var(--accent); font-size: inherit; }
+button.link:hover { text-decoration: underline; }
+.summary button.status-dismissed { color: var(--bad); }
+.posting form.block { display: inline; }
+.posting form.block button { color: var(--muted); font-size: 0.8rem; }
+.posting form.block button:hover { color: var(--bad); }
+.bulk-done { display: flex; gap: 1rem; align-items: center; }
+.bulk-done p { margin: 0; }
+.blocked { margin-top: 1.5rem; }
+.blocked ul { margin: 0; padding-left: 1.1rem; }
+.blocked li { margin: 0.3rem 0; }
 
 /* posting cards */
 .postings { display: flex; flex-direction: column; gap: 0.5rem; }

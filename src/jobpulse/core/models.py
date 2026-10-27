@@ -204,3 +204,4 @@ class Decision:
     reason: str
     score: float | None = None
     breakdown: dict[str, float | None] | None = None
+    years_required: int | None = None  # from the description, once it was read

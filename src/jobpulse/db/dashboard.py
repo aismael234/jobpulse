@@ -25,7 +25,26 @@ STATUSES: tuple[str, ...] = ("New", "Saved", "Applied", "Dismissed")
 BLOCKLIST_EXEMPT_STATUSES = frozenset({"Applied"})
 PAGE_SIZE = 50
 
-SortOrder = Literal["score", "fresh", "pushed"]
+SortOrder = Literal["score", "fresh", "pushed", "moved"]
+MOVED_SORT_LABELS = {
+    "Saved": "Recently saved",
+    "Applied": "Recently applied",
+    "Dismissed": "Recently dismissed",
+}
+
+# Years of experience asked: key → (at least, at most); "unstated" is no number at all.
+EXPERIENCE: dict[str, tuple[int | None, int | None]] = {
+    "0-2": (None, 2),
+    "3-5": (3, 5),
+    "6+": (6, None),
+    "unstated": (None, None),
+}
+EXPERIENCE_CHOICES: tuple[tuple[str, str], ...] = (
+    ("0-2", "Asks 0–2 yrs"),
+    ("3-5", "Asks 3–5 yrs"),
+    ("6+", "Asks 6+ yrs"),
+    ("unstated", "Years not stated"),
+)
 
 # How long ago a posting was pushed: key → (age, whether it means "longer ago than that").
 PUSHED_WINDOWS: dict[str, tuple[timedelta, bool]] = {
@@ -71,6 +90,7 @@ class PostingQuery:
     pushed: str | None = None  # a PUSHED_WINDOWS key
     min_pay: int | None = None  # thousands of US dollars a year, the top of the range
     pay_listed: bool = False  # only postings with pay in dollars
+    experience: str | None = None  # an EXPERIENCE key
     sort: SortOrder = "score"
     page: int = 1
     page_size: int = PAGE_SIZE
@@ -86,6 +106,7 @@ class PostingQuery:
             or self.open_only
             or self.min_pay
             or self.pay_listed
+            or self.experience
         )
 
     @property
@@ -179,6 +200,14 @@ def _conditions(
     if query.pushed in PUSHED_WINDOWS:
         age, older = PUSHED_WINDOWS[query.pushed]
         conditions.append(pushed_at() < now - age if older else pushed_at() >= now - age)
+    if query.experience in EXPERIENCE:
+        least, most = EXPERIENCE[query.experience]
+        if least is None and most is None:
+            conditions.append(PostingRow.years_required.is_(None))
+        if least is not None:
+            conditions.append(PostingRow.years_required >= least)
+        if most is not None:
+            conditions.append(PostingRow.years_required <= most)
     return conditions
 
 
@@ -188,44 +217,110 @@ def _order(sort: SortOrder) -> tuple[Any, ...]:
     by_score = PostingRow.score.desc().nulls_last()
     if sort == "pushed":
         return pushed_at().desc(), by_score
+    if sort == "moved":
+        return PostingRow.status_changed_at.desc().nulls_last(), pushed_at().desc()
     return (by_score, freshness) if sort == "score" else (freshness, by_score)
 
 
-def list_postings(
-    session: Session, query: PostingQuery, *, now: datetime, hidden: Collection[str] = ()
-) -> PostingPage:
-    """One page of a view. The SQL filters run in the database; pay and location are read in
-    Python (pay comes in several shapes, places from the label tables), over the ids and
-    labels of every posting the SQL filters leave, which also gives the location options."""
+def _matches(
+    session: Session,
+    query: PostingQuery,
+    *,
+    now: datetime,
+    hidden: Collection[str],
+    as_of: datetime | None = None,
+) -> tuple[list[int], tuple[PlaceGroup, ...]]:
+    """The ids of every posting the query shows, in order, and the location options. The SQL
+    filters run in the database; pay and location are read in Python (pay comes in several
+    shapes, places from the label tables) over the ids and labels the SQL filters leave.
+
+    With ``as_of``, only postings that were in the view by then: pushed (or first seen) and
+    last moved no later."""
+    conditions = _conditions(query, hidden, now)
+    if as_of is not None:
+        conditions += [
+            pushed_at() <= as_of,
+            or_(PostingRow.status_changed_at.is_(None), PostingRow.status_changed_at <= as_of),
+        ]
     columns: list[Any] = [PostingRow.id, PostingRow.locations]
     pay_filter = bool(query.min_pay or query.pay_listed)
     if pay_filter:
         columns.append(PostingRow.compensation)
     found = session.execute(
-        select(*columns)
-        .where(*_conditions(query, hidden, now))
-        .order_by(*_order(query.sort), PostingRow.id.desc())
+        select(*columns).where(*conditions).order_by(*_order(query.sort), PostingRow.id.desc())
     ).all()
     if pay_filter:
         found = [row for row in found if _pays(row.compensation, query)]
     places = place_options((row.locations or () for row in found), selected=query.place)
     if query.place:
         found = [row for row in found if posting_in_place(row.locations or (), query.place)]
-    start = (query.page - 1) * query.page_size
-    ids = [row.id for row in found[start : start + query.page_size]]
-    loaded = {
-        row.id: row
-        for row in session.scalars(
-            select(PostingRow)
-            .where(PostingRow.id.in_(ids))
-            .options(
-                defer(PostingRow.raw, raiseload=True),
-                defer(PostingRow.description_text, raiseload=True),
+    return [row.id for row in found], places
+
+
+def matching_ids(
+    session: Session,
+    query: PostingQuery,
+    *,
+    now: datetime,
+    hidden: Collection[str] = (),
+    as_of: datetime | None = None,
+) -> list[int]:
+    """Every posting the query shows, on any page (bulk moves, CSV export)."""
+    return _matches(session, query, now=now, hidden=hidden, as_of=as_of)[0]
+
+
+def load_postings(session: Session, ids: Sequence[int]) -> list[PostingRow]:
+    """These postings, in this order, without their raw data or description."""
+    loaded: dict[int, PostingRow] = {}
+    for start in range(0, len(ids), PAGE_SIZE * 10):
+        loaded.update(
+            (row.id, row)
+            for row in session.scalars(
+                select(PostingRow)
+                .where(PostingRow.id.in_(ids[start : start + PAGE_SIZE * 10]))
+                .options(
+                    defer(PostingRow.raw, raiseload=True),
+                    defer(PostingRow.description_text, raiseload=True),
+                )
             )
         )
-    }
-    rows = [loaded[posting_id] for posting_id in ids]
-    return PostingPage(rows, len(found), query.page, query.page_size, places)
+    return [loaded[posting_id] for posting_id in ids if posting_id in loaded]
+
+
+def list_postings(
+    session: Session, query: PostingQuery, *, now: datetime, hidden: Collection[str] = ()
+) -> PostingPage:
+    """One page of a view, with the location options for the whole view."""
+    ids, places = _matches(session, query, now=now, hidden=hidden)
+    start = (query.page - 1) * query.page_size
+    rows = load_postings(session, ids[start : start + query.page_size])
+    return PostingPage(rows, len(ids), query.page, query.page_size, places)
+
+
+def company_postings(session: Session, name: str) -> int:
+    """How many postings the views that hide blocked companies show for this company (names
+    compared like the blocklist: "Acme, Inc." is "ACME")."""
+    statuses = [status for status in STATUSES if status not in BLOCKLIST_EXEMPT_STATUSES]
+    names = [
+        found
+        for found in session.scalars(
+            select(PostingRow.company_name)
+            .where(PostingRow.merged_into_id.is_(None), PostingRow.status.in_(statuses))
+            .distinct()
+        )
+        if Blocklist.build(companies=[name]).blocks_company(found)
+    ]
+    if not names:
+        return 0
+    return sum(
+        session.scalar(
+            select(func.count())
+            .select_from(PostingRow)
+            .where(*_in_view(view, ()), PostingRow.company_name.in_(names))
+        )
+        or 0
+        for view in statuses
+    )
 
 
 def view_counts(session: Session, *, hidden: Collection[str] = ()) -> dict[str, int]:

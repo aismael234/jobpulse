@@ -103,4 +103,5 @@ def apply_assessment(
         reason="; ".join(part for part in (verdict, opinion, notes) if part),
         score=total,
         breakdown={**(decision.breakdown or {}), "llm": delta, "total": total},
+        years_required=decision.years_required,
     )

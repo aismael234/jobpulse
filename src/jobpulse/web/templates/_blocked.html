@@ -1,0 +1,9 @@
+<article class="posting moved" id="posting-{{ posting_id }}">
+  <p>Blocked <span class="company">{{ company }}</span> · {{ hidden_count }} posting{{ "" if hidden_count == 1 else "s" }} hidden (Applied stays as it is). The worker stops pushing it from its next cycle.</p>
+  <form class="undo" method="post" action="/companies/unblock" hx-post="/companies/unblock">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="company" value="{{ company }}">
+    <button type="submit">Undo</button>
+  </form>
+</article>
+{% include "_counts.html" %}

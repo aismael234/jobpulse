@@ -20,7 +20,12 @@ from jobpulse.config import SearchEntry, SimplifyConfig, WatchlistEntry
 from jobpulse.core.applicants import ApplicantCount
 from jobpulse.core.assessment import LEVELS, Assessment
 from jobpulse.core.atsurls import gh_jid
-from jobpulse.core.dedupe import canonicalize_url, merge_also_seen, posting_fingerprint
+from jobpulse.core.dedupe import (
+    canonicalize_url,
+    merge_also_seen,
+    normalize_company,
+    posting_fingerprint,
+)
 from jobpulse.core.detection import PresencePlan, PresenceRow
 from jobpulse.core.filters import Blocklist
 from jobpulse.core.models import (
@@ -41,6 +46,7 @@ from jobpulse.core.models import (
     Tier,
 )
 from jobpulse.db.tables import (
+    BlockedCompany,
     Company,
     HealthIncident,
     LlmAssessment,
@@ -835,16 +841,16 @@ def _adopt(
 
 
 def set_decision(session: Session, row_id: int, decision: Decision) -> None:
-    session.execute(
-        update(PostingRow)
-        .where(PostingRow.id == row_id)
-        .values(
-            tier=decision.tier,
-            tier_reason=decision.reason,
-            score=decision.score,
-            score_breakdown=decision.breakdown,
-        )
-    )
+    """A decision on a stored posting. The years asked stay unless this decision read them."""
+    values: dict[str, Any] = {
+        "tier": decision.tier,
+        "tier_reason": decision.reason,
+        "score": decision.score,
+        "score_breakdown": decision.breakdown,
+    }
+    if decision.years_required is not None:
+        values["years_required"] = decision.years_required
+    session.execute(update(PostingRow).where(PostingRow.id == row_id).values(**values))
 
 
 def save_evaluation(session: Session, row_id: int, posting: Posting, decision: Decision) -> None:
@@ -871,6 +877,7 @@ def save_evaluation(session: Session, row_id: int, posting: Posting, decision: D
             tier_reason=decision.reason,
             score=decision.score,
             score_breakdown=decision.breakdown,
+            years_required=decision.years_required,
         )
     )
 
@@ -924,17 +931,73 @@ def mark_notified(session: Session, row_id: int, *, now: datetime) -> None:
 # --- dashboard -----------------------------------------------------------------------------
 
 
-def set_status(session: Session, row_id: int, status: str) -> str | None:
-    """Change a posting's status (New, Saved, Applied, Dismissed) and return the one it had;
-    ``None`` if there's no such posting."""
+def set_status(session: Session, row_id: int, status: str, *, now: datetime) -> str | None:
+    """Change a posting's status (New, Saved, Applied, Dismissed), noting when, and return the
+    one it had; ``None`` if there's no such posting."""
     row = session.get(PostingRow, row_id)
     if row is None:
         return None
     previous = row.status
     if previous != status:
         row.status = status
+        row.status_changed_at = now
         session.flush()
     return previous
+
+
+def set_statuses(session: Session, row_ids: Collection[int], status: str, *, now: datetime) -> int:
+    """Move many postings at once (bulk dismiss and its undo); how many changed."""
+    changed = 0
+    for chunk in _chunks(sorted(set(row_ids))):
+        result = cast(
+            CursorResult[Any],
+            session.execute(
+                update(PostingRow)
+                .where(PostingRow.id.in_(chunk), PostingRow.status != status)
+                .values(status=status, status_changed_at=now)
+            ),
+        )
+        changed += result.rowcount
+    session.flush()
+    return changed
+
+
+# --- the dashboard's blocklist ----------------------------------------------------------------
+
+
+def blocked_companies(session: Session) -> list[BlockedCompany]:
+    return list(session.scalars(select(BlockedCompany).order_by(BlockedCompany.name)))
+
+
+def block_company(session: Session, name: str, *, now: datetime) -> bool:
+    """Block a company by name, compared like the config blocklist ("Acme, Inc." is "Acme");
+    ``False`` if it was already blocked here."""
+    key = normalize_company(name)
+    if not key:
+        raise ValueError("a company needs a name to be blocked")
+    if session.scalar(select(BlockedCompany.id).where(BlockedCompany.name_key == key)):
+        return False
+    session.add(BlockedCompany(name=" ".join(name.split()), name_key=key, created_at=now))
+    session.flush()
+    return True
+
+
+def unblock_company(session: Session, name: str) -> bool:
+    result = cast(
+        CursorResult[Any],
+        session.execute(
+            delete(BlockedCompany).where(BlockedCompany.name_key == normalize_company(name))
+        ),
+    )
+    return result.rowcount > 0
+
+
+def blocklist(session: Session, base: Blocklist) -> Blocklist:
+    """config.yaml's blocklist plus the companies blocked from the dashboard."""
+    keys = set(session.scalars(select(BlockedCompany.name_key)))
+    if not keys:
+        return base
+    return Blocklist(companies=base.companies | keys, boards=base.boards)
 
 
 def update_company(

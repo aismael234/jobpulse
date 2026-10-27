@@ -1,5 +1,7 @@
 """M4: the LLM layer's second opinion as pure functions: the band, the signal, the new score."""
 
+from dataclasses import replace
+
 import pytest
 
 from jobpulse.core.assessment import (
@@ -78,6 +80,12 @@ def test_a_strong_answer_lifts_the_score() -> None:
     assert "llm +0.12" in decided.reason
     assert "mid, backend 90%, fit 90%" in decided.reason
     assert "Python APIs" in decided.reason
+
+
+def test_the_years_asked_survive_the_second_opinion() -> None:
+    decision = replace(match(0.50), years_required=3)
+    decided = apply_assessment(decision, Assessment("mid", 0.9, 0.9), weight=0.15)
+    assert decided.years_required == 3
 
 
 def test_a_weak_answer_lowers_the_score_but_keeps_the_match() -> None:

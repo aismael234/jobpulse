@@ -4,16 +4,21 @@ Filters that need the time or the location labels read ``now``, ``short_labels``
 from the template context, which every page render provides.
 """
 
-from collections.abc import Mapping, Sequence
+import csv
+import hashlib
+import io
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import fields, replace
 from datetime import datetime
 from typing import Any, cast
 from urllib.parse import urlencode, urlsplit
+from zoneinfo import ZoneInfo
 
 from jinja2 import pass_context
 from jinja2.runtime import Context
 
 from jobpulse.core.atsurls import board_url
+from jobpulse.core.dedupe import normalize_company
 from jobpulse.core.locations import location_summary
 from jobpulse.core.models import Precision
 from jobpulse.core.pay import compensation_summary
@@ -32,6 +37,7 @@ _QUERY_PARAMS = {
     "pushed": "pushed",
     "min_pay": "pay",
     "pay_listed": "pay_listed",
+    "experience": "exp",
     "sort": "sort",
     "page": "page",
 }
@@ -115,6 +121,76 @@ def link(query: PostingQuery, **changes: Any) -> str:
     return "/?" + urlencode(params) if params else "/"
 
 
+def export_url(query: PostingQuery) -> str:
+    """The CSV of everything the query shows: ``/export.csv?view=applied``."""
+    url = link(query, page=1)
+    return "/export.csv" + url[1:]
+
+
+def company_key(name: str | None) -> str:
+    """A short id for a company, the same for "Acme, Inc." and "ACME", so a block can find
+    that company's other cards on the page."""
+    return hashlib.sha256(normalize_company(name or "").encode()).hexdigest()[:12]
+
+
+# Third-party text opening with these becomes a formula in a spreadsheet.
+_FORMULA_STARTS = ("=", "+", "-", "@", "\t", "\r")
+CSV_COLUMNS = (
+    "status",
+    "moved",
+    "company",
+    "title",
+    "locations",
+    "source",
+    "link",
+    "posted",
+    "pushed",
+    "first seen",
+    "score",
+    "pay",
+    "years asked",
+    "closed",
+)
+
+
+def postings_csv(rows: Iterable[Any], *, zone: ZoneInfo, redact: Callable[[Any], Any]) -> str:
+    """The rows as CSV, times in ``zone`` as on the cards. Cells pass through ``redact`` (the
+    pages' secret mask) and never start like a formula."""
+
+    def when(value: datetime | None) -> str:
+        return value.astimezone(zone).strftime("%Y-%m-%d %H:%M %Z") if value else ""
+
+    def cell(value: Any) -> str:
+        text = str(redact(value))
+        return f"'{text}" if text.startswith(_FORMULA_STARTS) else text
+
+    out = io.StringIO()
+    writer = csv.writer(out)
+    writer.writerow(CSV_COLUMNS)
+    for row in rows:
+        values = (
+            row.status,
+            when(row.status_changed_at),
+            row.company_name,
+            row.title,
+            "; ".join(row.locations or ()),
+            row.source,
+            http_url(row.apply_url or row.url) or "",
+            # a day-precision date is stored at midnight UTC: the day, not a time
+            f"{row.posted_at:%Y-%m-%d}"
+            if row.posted_at and row.posted_at_precision == "day"
+            else when(row.posted_at),
+            when(row.notified_at),
+            when(row.first_seen_at),
+            "" if row.score is None else f"{row.score:.2f}",
+            compensation_summary(row.compensation) or "",
+            "" if row.years_required is None else row.years_required,
+            when(row.closed_at),
+        )
+        writer.writerow([cell(value) for value in values])
+    return out.getvalue()
+
+
 FILTERS = {
     "ago": ago,
     "posted": posted,
@@ -125,4 +201,5 @@ FILTERS = {
     "pay": pay,
     "http_url": http_url,
     "board": board,
+    "company_key": company_key,
 }

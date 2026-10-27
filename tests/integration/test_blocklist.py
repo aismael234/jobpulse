@@ -6,6 +6,7 @@ from datetime import timedelta
 import pytest
 import respx
 
+from jobpulse.db import repo
 from tests.factories import NOW, jobspy_frame, jobspy_row
 from tests.integration.conftest import (
     LEVER_LIST,
@@ -29,6 +30,78 @@ BLOCKED = "company is on the blocklist"
 
 def block(env: Env, *, companies: tuple[str, ...] = (), boards: tuple[str, ...] = ()) -> None:
     env.reconfigure(blocklist={"companies": list(companies), "boards": list(boards)})
+
+
+def dashboard_block(env: Env, name: str) -> None:
+    """What the dashboard's Block button stores; config.yaml stays as it was."""
+    with env.sessions() as session:
+        repo.block_company(session, name, now=NOW)
+        session.commit()
+
+
+async def test_a_dashboard_block_applies_from_the_next_cycle_of_a_running_worker(
+    env: Env, boards: ScriptedScrape
+) -> None:
+    env.add_search()
+    poller = env.poller()  # the worker keeps one poller for its lifetime
+    boards.queue(
+        "linkedin",
+        jobspy_frame([]),
+        jobspy_frame(
+            [
+                jobspy_row("linkedin", external_id="4101000041", company="Jobot, Inc."),
+                jobspy_row(
+                    "linkedin",
+                    external_id="4101000042",
+                    company="Northwind",
+                    location="Seattle, WA, USA",
+                ),
+            ]
+        ),
+    )
+    await poller.run_cycle(sources=["linkedin"])
+    dashboard_block(env, "JOBOT")
+    await poller.run_cycle(sources=["linkedin"])
+
+    blocked = env.posting("linkedin", "4101000041")
+    assert (blocked.tier, blocked.tier_reason) == ("filtered", BLOCKED)
+    assert [message.title for message in env.notifier.sent] == [
+        "Northwind · Backend Engineer · Seattle · posted today"
+    ]
+
+
+async def test_a_waiting_push_is_dropped_after_a_dashboard_block(
+    env: Env, boards: ScriptedScrape
+) -> None:
+    env.add_search()
+    poller = env.poller()
+    row = jobspy_row(
+        "linkedin", external_id="4101000043", company="Northwind", location="Seattle, WA, USA"
+    )
+    boards.queue("linkedin", jobspy_frame([]), jobspy_frame([row]), jobspy_frame([row]))
+    await poller.run_cycle(sources=["linkedin"])
+    env.notifier.failures_left = 1
+    await poller.run_cycle(sources=["linkedin"])  # decided instant, but the push failed
+
+    dashboard_block(env, "Northwind")
+    await poller.run_cycle(sources=["linkedin"])
+    assert env.notifier.sent == []
+    assert env.posting("linkedin", "4101000043").tier_reason == BLOCKED
+
+
+async def test_a_company_blocked_from_the_dashboard_is_not_discovered(
+    env: Env, feed: SimplifyMock
+) -> None:
+    feed.respond(etag='W/"1"')
+    poller = env.poller()
+    await poller.run_cycle(sources=["simplify"])
+    dashboard_block(env, "Delta")
+    # No route for Delta's board: checking it would fail the test.
+    feed.respond(simplify_listing("d1", url=DELTA_URL, posted=FRESH), etag='W/"2"')
+    await poller.run_cycle(sources=["simplify"])
+
+    assert "delta" not in {c.token for c in env.companies()}
+    assert env.posting("simplify", "d1").tier == "filtered"
 
 
 async def test_a_blocked_company_is_stored_but_never_pushed(

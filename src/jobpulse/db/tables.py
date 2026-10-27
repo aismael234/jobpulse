@@ -106,12 +106,26 @@ class PostingRow(Base):
     applicant_min: Mapped[int | None]
     applicant_max: Mapped[int | None]
     status: Mapped[str] = mapped_column(String(12), default="New", server_default="New")
+    status_changed_at: Mapped[datetime | None]  # the last move between dashboard views
+    years_required: Mapped[int | None]  # the most years of experience the description asks
     notified_at: Mapped[datetime | None]
     merged_into_id: Mapped[int | None] = mapped_column(
         ForeignKey("postings.id", ondelete="SET NULL")
     )
     also_seen_on: Mapped[list[dict[str, Any]]] = mapped_column(JSONType, default=list)
     raw: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
+
+
+class BlockedCompany(Base):
+    """A company blocked from the dashboard. config.yaml's ``blocklist.companies`` and these
+    rows together make the blocklist."""
+
+    __tablename__ = "blocked_companies"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(Text)  # as the posting showed it
+    name_key: Mapped[str] = mapped_column(String(255), unique=True)  # normalize_company(name)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
 
 
 class Run(Base):

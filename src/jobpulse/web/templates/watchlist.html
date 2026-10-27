@@ -31,4 +31,28 @@
   </tbody>
 </table>
 </div>
+
+<section class="blocked">
+  <h2>Blocked companies</h2>
+  <p class="hint">Their postings are never pushed and are hidden everywhere but Applied; their boards aren't polled or discovered.</p>
+  {% if config_blocked or dashboard_blocked %}
+  <ul>
+    {% for name in config_blocked %}
+    <li>{{ name }} <span class="muted small">in config.yaml</span></li>
+    {% endfor %}
+    {% for blocked in dashboard_blocked %}
+    <li>{{ blocked.name }} <span class="muted small">blocked {{ blocked.created_at|ago }}</span>
+      <form class="inline" method="post" action="/companies/unblock">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="company" value="{{ blocked.name }}">
+        <input type="hidden" name="return_to" value="/watchlist">
+        <button type="submit">Unblock</button>
+      </form>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="empty">None. Block a company from any posting's card.</p>
+  {% endif %}
+</section>
 {% endblock %}

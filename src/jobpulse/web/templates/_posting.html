@@ -1,5 +1,5 @@
 {% set labels = {"New": "Back to New", "Saved": "Save", "Applied": "Applied", "Dismissed": "Dismiss"} %}
-<article class="posting{% if row.closed_at %} closed{% endif %}" id="posting-{{ row.id }}">
+<article class="posting{% if row.closed_at %} closed{% endif %}" id="posting-{{ row.id }}" data-company="{{ row.company_name|company_key }}">
   <div class="score {{ row.tier }}" title="{{ row.score_breakdown|breakdown or row.tier_reason }}">{{ row.score|score }}</div>
   <div class="body">
     <h2>
@@ -13,7 +13,7 @@
       <span class="sep" aria-hidden="true">·</span><span title="{{ (row.posted_at or row.first_seen_at)|local }}">{{ row|posted }}</span>
       {% if row.closed_at %}<span class="badge closed" title="{{ row.closed_at|local }}">closed {{ row.closed_at|ago }}</span>{% endif %}
     </p>
-    <p class="details">
+    <div class="details">
       <span class="badge source">{{ row.source }}</span>
       {% for seen in row.also_seen_on or [] %}
       {% set seen_href = seen.url|http_url %}
@@ -23,9 +23,20 @@
       {% if salary %}<span class="pay">{{ salary }}</span>{% endif %}
       {% if row.department %}<span>{{ row.department }}</span>{% endif %}
       {% if row.applicant_label %}<span>{{ row.applicant_label }}</span>{% endif %}
+      {% if row.years_required is not none %}<span>asks {{ row.years_required }}+ yrs</span>{% endif %}
       {% if row.score_breakdown and "llm" in row.score_breakdown %}<span class="note" title="{{ row.tier_reason }}">LLM {{ "%+.2f"|format(row.score_breakdown["llm"]) }}</span>{% endif %}
       {% if row.notified_at %}<span class="note" title="{{ row.notified_at|local }}">pushed {{ row.notified_at|ago }}</span>{% endif %}
-    </p>
+      {% if row.status != "New" and row.status_changed_at %}<span class="note moved" title="{{ row.status_changed_at|local }}">{{ row.status|lower }} {{ row.status_changed_at|ago }}</span>{% endif %}
+      {% if row.company_name|trim %}
+      <form class="block" method="post" action="/companies/block" hx-post="/companies/block" hx-target="#posting-{{ row.id }}" hx-swap="outerHTML" hx-confirm="Block {{ row.company_name }}? Its postings are hidden here (Applied aside) and never pushed again.">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="company" value="{{ row.company_name }}">
+        <input type="hidden" name="posting_id" value="{{ row.id }}">
+        <input type="hidden" name="return_to" value="{{ return_to }}">
+        <button type="submit" class="link" title="Hide this company and never push it again">Block company</button>
+      </form>
+      {% endif %}
+    </div>
   </div>
   <form class="actions" method="post" action="/postings/{{ row.id }}/status" hx-post="/postings/{{ row.id }}/status" hx-target="#posting-{{ row.id }}" hx-swap="outerHTML">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">

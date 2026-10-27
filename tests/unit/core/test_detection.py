@@ -253,6 +253,21 @@ def test_evaluate_excludes_too_many_years_in_exclude_mode() -> None:
     assert evaluate(posting, context(rules=rules)).tier == "filtered"
 
 
+def test_decisions_carry_the_years_asked() -> None:
+    """For the dashboard's experience filter, matches or not."""
+    asked = make_posting(description_text="Python services. 3+ years of experience.")
+    assert evaluate(asked, context()).years_required == 3
+    assert (
+        evaluate(make_posting(description_text="Python services."), context()).years_required
+        is None
+    )
+    rules = FilterRules(title_include=RULES.title_include, max_years=4, years_mode="exclude")
+    filtered = evaluate(
+        make_posting(description_text="6+ years of experience."), context(rules=rules)
+    )
+    assert (filtered.tier, filtered.years_required) == ("filtered", 6)
+
+
 def test_evaluate_stale() -> None:
     assert evaluate(make_posting(posted_at=NOW - timedelta(days=3)), context()).tier == "stale"
 

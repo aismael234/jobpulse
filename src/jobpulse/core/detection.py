@@ -160,7 +160,9 @@ def evaluate(posting: Posting, ctx: EvaluationContext) -> Decision:
         return _stale(posting, ctx)
     description = check_description(posting.description_text, ctx.rules)
     if not description.passed:
-        return Decision(tier="filtered", reason=description.reason)
+        return Decision(
+            tier="filtered", reason=description.reason, years_required=description.years_required
+        )
     title = check_title(posting.title, ctx.rules)
     age = posting_age(posting, first_seen_at=ctx.first_seen_at, now=ctx.now)
     total, breakdown = score(
@@ -181,4 +183,10 @@ def evaluate(posting: Posting, ctx: EvaluationContext) -> Decision:
     reason = f"score {total:.2f}"
     if description.level_mismatch:
         reason += f"; {description.reason}"
-    return Decision(tier="instant", reason=reason, score=total, breakdown=breakdown)
+    return Decision(
+        tier="instant",
+        reason=reason,
+        score=total,
+        breakdown=breakdown,
+        years_required=description.years_required,
+    )

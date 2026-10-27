@@ -4,12 +4,14 @@ Every action works as a plain form post (it redirects back) and through HTMX (it
 the HTML fragment that replaces the one you clicked in).
 """
 
+import json
 import math
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Annotated, Any, Literal
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlsplit
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse, Response
@@ -26,9 +28,14 @@ from jobpulse.core.atsurls import (
     normalize_workday_token,
     workday_board,
 )
+from jobpulse.core.dedupe import normalize_company
+from jobpulse.core.filters import Blocklist
 from jobpulse.core.places import parse_place_key
 from jobpulse.db import dashboard, repo
 from jobpulse.db.dashboard import (
+    EXPERIENCE,
+    EXPERIENCE_CHOICES,
+    MOVED_SORT_LABELS,
     PUSHED_CHOICES,
     PUSHED_WINDOWS,
     STATUSES,
@@ -41,7 +48,7 @@ from jobpulse.runtime import KNOWN_SOURCES
 from jobpulse.sources.ats_detect import Validation, is_fetchable_url
 from jobpulse.sources.workday import PAGE_LIMIT
 from jobpulse.web.security import verify_csrf
-from jobpulse.web.views import link
+from jobpulse.web.views import company_key, export_url, link, postings_csv
 
 pages = APIRouter()
 actions = APIRouter(dependencies=[Depends(verify_csrf)])
@@ -54,7 +61,12 @@ def page(path: str, **options: Any) -> Callable[[DecoratedCallable], DecoratedCa
 
 
 VIEWS = {status.lower(): status for status in STATUSES}
-SORTS: dict[str, SortOrder] = {"score": "score", "fresh": "fresh", "pushed": "pushed"}
+SORTS: dict[str, SortOrder] = {
+    "score": "score",
+    "fresh": "fresh",
+    "pushed": "pushed",
+    "moved": "moved",
+}
 ADDABLE_ATS = ("greenhouse", "lever", "ashby", "workday")
 ATS_NAMES = {"greenhouse": "Greenhouse", "lever": "Lever", "ashby": "Ashby", "workday": "Workday"}
 MAX_PRIORITY = 1000
@@ -91,6 +103,10 @@ def parse_query(params: Mapping[str, str]) -> PostingQuery:
     except ValueError:
         page = 1
     pushed = (params.get("pushed") or "").strip()
+    experience = (params.get("exp") or "").strip()
+    sort = SORTS.get(params.get("sort") or "", "score")
+    if sort == "moved" and status not in MOVED_SORT_LABELS:
+        sort = "score"  # nothing is moved into New to sort by
     return PostingQuery(
         status=status,
         source=source if source in KNOWN_SOURCES else None,
@@ -103,7 +119,8 @@ def parse_query(params: Mapping[str, str]) -> PostingQuery:
         pushed=pushed if pushed in PUSHED_WINDOWS else None,
         min_pay=_thousands(params.get("pay")),
         pay_listed=_checked(params.get("pay_listed")),
-        sort=SORTS.get(params.get("sort") or "", "score"),
+        experience=experience if experience in EXPERIENCE else None,
+        sort=sort,
         page=page,
     )
 
@@ -154,10 +171,22 @@ def render(
         **context,
     }
     if session is not None:
-        hidden = dashboard.hidden_companies(session, state.blocklist)
-        values["counts"] = dashboard.view_counts(session, hidden=hidden)
+        values["counts"] = _counts(request, session)
         values["incident_count"] = len(dashboard.open_incidents(session))
     return state.templates.TemplateResponse(request, template, values, status_code=status_code)
+
+
+def _blocklist(request: Request, session: Session) -> Blocklist:
+    """config.yaml's blocklist with the companies blocked from the dashboard."""
+    return repo.blocklist(session, _state(request).blocklist)
+
+
+def _hidden(request: Request, session: Session) -> frozenset[str]:
+    return dashboard.hidden_companies(session, _blocklist(request, session))
+
+
+def _counts(request: Request, session: Session) -> dict[str, int]:
+    return dashboard.view_counts(session, hidden=_hidden(request, session))
 
 
 # --- postings --------------------------------------------------------------------------------
@@ -167,9 +196,9 @@ def render(
 def postings_page(request: Request) -> HTMLResponse:
     state = _state(request)
     query = parse_query(request.query_params)
+    now = state.clock()
     with state.sessions() as session:
-        hidden = dashboard.hidden_companies(session, state.blocklist)
-        page = dashboard.list_postings(session, query, now=state.clock(), hidden=hidden)
+        page = dashboard.list_postings(session, query, now=now, hidden=_hidden(request, session))
         return render(
             request,
             "postings.html",
@@ -179,11 +208,105 @@ def postings_page(request: Request) -> HTMLResponse:
                 "view": query.status,
                 "sources": KNOWN_SOURCES,
                 "pushed_choices": PUSHED_CHOICES,
+                "experience_choices": EXPERIENCE_CHOICES,
+                "moved_sort": MOVED_SORT_LABELS.get(query.status),
+                "bulk_views": BULK_VIEWS,
                 "link": link,
+                "export_url": export_url(query),
+                "filters": link(query, page=1),
+                "as_of": now.isoformat(),
                 "return_to": str(request.url.path)
                 + (f"?{request.url.query}" if request.url.query else ""),
             },
             session=session,
+        )
+
+
+@page("/export.csv")
+def export_csv(request: Request) -> Response:
+    """Every posting the current view and filters show, as CSV (no paging)."""
+    state = _state(request)
+    query = parse_query(request.query_params)
+    now = state.clock()
+    with state.sessions() as session:
+        ids = dashboard.matching_ids(session, query, now=now, hidden=_hidden(request, session))
+        rows = dashboard.load_postings(session, ids)
+        text = postings_csv(rows, zone=state.zone, redact=state.templates.env.finalize)
+    name = f"jobpulse-{query.status.lower()}-{now.astimezone(state.zone):%Y-%m-%d}.csv"
+    return Response(
+        text,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{name}"'},
+    )
+
+
+MAX_BULK = 5000
+# Applied is your record of applications: never emptied in bulk.
+BULK_VIEWS = ("New", "Saved")
+
+
+def _bulk_ids(value: str) -> list[int]:
+    try:
+        ids = [int(part) for part in value.split(",") if part.strip()]
+    except ValueError:
+        raise HTTPException(status_code=400, detail="ids must be whole numbers") from None
+    if not ids or len(ids) > MAX_BULK:
+        raise HTTPException(status_code=400, detail=f"between 1 and {MAX_BULK} postings at once")
+    return ids
+
+
+@actions.post("/postings/bulk-status", response_class=HTMLResponse)
+def bulk_status(
+    request: Request,
+    status: Annotated[str, Form()],
+    filters: Annotated[str, Form()] = "",
+    as_of: Annotated[str, Form()] = "",
+    ids: Annotated[str, Form()] = "",
+    return_to: Annotated[str, Form()] = "",
+) -> Response:
+    """Dismiss everything the filters showed when the page was rendered (``as_of``), or, with
+    ``ids``, put those postings back (the undo)."""
+    if status not in STATUSES:
+        raise HTTPException(status_code=400, detail=f"unknown status {status!r}")
+    state = _state(request)
+    now = state.clock()
+    with session_scope(state.sessions) as session:
+        if ids:
+            moved = repo.set_statuses(session, _bulk_ids(ids), status, now=now)
+            if not _htmx(request):
+                return RedirectResponse(safe_return_to(return_to), status_code=303)
+            return HTMLResponse("", headers={"HX-Refresh": "true"})
+        if status != "Dismissed":
+            raise HTTPException(status_code=400, detail="only Dismiss works on a whole list")
+        try:
+            shown_at = datetime.fromisoformat(as_of)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="as_of must be a time") from None
+        if shown_at.tzinfo is None:
+            raise HTTPException(status_code=400, detail="as_of needs a timezone")
+        query = parse_query(dict(parse_qsl(urlsplit(filters).query)))
+        if query.status not in BULK_VIEWS:
+            raise HTTPException(
+                status_code=400, detail=f"{query.status} can't be dismissed in bulk"
+            )
+        found = dashboard.matching_ids(
+            session, query, now=now, hidden=_hidden(request, session), as_of=shown_at
+        )[:MAX_BULK]
+        moved = repo.set_statuses(session, found, status, now=now)
+        if not _htmx(request):
+            return RedirectResponse(safe_return_to(return_to), status_code=303)
+        return render(
+            request,
+            "_bulk.html",
+            {
+                "moved": moved,
+                "ids": ",".join(map(str, found)),
+                "previous": query.status,
+                "status": status,
+                "return_to": safe_return_to(return_to),
+                "counts": _counts(request, session),
+                "oob_counts": True,
+            },
         )
 
 
@@ -200,14 +323,13 @@ def change_status(
     state = _state(request)
     current_view = VIEWS.get(view.strip().lower())
     with session_scope(state.sessions) as session:
-        previous = repo.set_status(session, posting_id, status)
+        previous = repo.set_status(session, posting_id, status, now=state.clock())
         if previous is None:
             raise HTTPException(status_code=404, detail="no such posting")
         if not _htmx(request):
             return RedirectResponse(safe_return_to(return_to), status_code=303)
         row = session.get(PostingRow, posting_id)
-        hidden = dashboard.hidden_companies(session, state.blocklist)
-        counts = dashboard.view_counts(session, hidden=hidden)
+        counts = _counts(request, session)
         template = "_posting.html" if current_view in (None, status) else "_moved.html"
         return render(
             request,
@@ -230,7 +352,9 @@ def change_status(
 def health_page(request: Request) -> HTMLResponse:
     state = _state(request)
     with state.sessions() as session:
-        targets = dashboard.known_targets(session, blocklist=state.blocklist, feeds=state.feeds)
+        targets = dashboard.known_targets(
+            session, blocklist=_blocklist(request, session), feeds=state.feeds
+        )
         return render(
             request,
             "health.html",
@@ -278,7 +402,7 @@ class Detection:
 
 
 def _companies(request: Request, session: Session) -> list[dict[str, Any]]:
-    blocklist = _state(request).blocklist
+    blocklist = _blocklist(request, session)
     return [
         {
             "company": company,
@@ -301,6 +425,8 @@ def _watchlist_page(
                 "companies": _companies(request, session),
                 "detection": detection,
                 "added": _blank(request.query_params.get("added")),
+                "config_blocked": _state(request).config.blocklist.companies,
+                "dashboard_blocked": repo.blocked_companies(session),
             },
             session=session,
             status_code=status_code,
@@ -334,6 +460,7 @@ async def _detect(request: Request, url: str) -> Detection:
     board = f"{ref.ats}/{ref.token}"
     with state.sessions() as session:
         known = (ref.ats, ref.token.lower()) in repo.known_companies(session)
+        blocklist = _blocklist(request, session)
     if known:
         return Detection(url, f"{board} is already on your watchlist.", "info", ref)
     if state.blocklist.blocks_board(ref.ats, ref.token):
@@ -345,6 +472,10 @@ async def _detect(request: Request, url: str) -> Detection:
     if state.blocklist.blocks_company(name):
         return Detection(
             url, f"{name} is on your blocklist (blocklist.companies in config.yaml).", ref=ref
+        )
+    if blocklist.blocks_company(name):
+        return Detection(
+            url, f"{name} is blocked (Blocked companies, below; unblock it there).", ref=ref
         )
     return Detection(
         url,
@@ -442,6 +573,10 @@ def add_board(
         )
     source_url = url.strip() if url.strip().startswith(("https://", "http://")) else None
     with session_scope(state.sessions) as session:
+        if _blocklist(request, session).blocks_company(name):
+            raise HTTPException(
+                status_code=400, detail=f"{name} is blocked; unblock it on the Watchlist page"
+            )
         added = repo.add_company(
             session,
             ats=ats,
@@ -505,6 +640,63 @@ def set_priority(
         _editable_company(session, company_id)
         repo.update_company(session, company_id, priority=value)
         return _company_response(request, session, company_id)
+
+
+@actions.post("/companies/block", response_class=HTMLResponse)
+def block_company(
+    request: Request,
+    company: Annotated[str, Form()] = "",
+    posting_id: Annotated[str, Form()] = "",
+    return_to: Annotated[str, Form()] = "",
+) -> Response:
+    """Block a company from its card: hidden from the dashboard (Applied aside) at once, and
+    from the worker's next cycle never pushed, polled or discovered."""
+    state = _state(request)
+    name = " ".join(company.split())
+    if not normalize_company(name):
+        raise HTTPException(status_code=400, detail="the posting has no company to block")
+    watched = Blocklist.build(companies=[name])
+    for entry in state.config.watchlist:
+        if entry.active and watched.blocks_company(entry.name):
+            raise HTTPException(
+                status_code=400,
+                detail=f"{entry.name} is on your watchlist in config.yaml; take it off there "
+                "before blocking it",
+            )
+    with session_scope(state.sessions) as session:
+        repo.block_company(session, name, now=state.clock())
+        hidden = dashboard.company_postings(session, name)
+        if not _htmx(request):
+            return RedirectResponse(safe_return_to(return_to), status_code=303)
+        card_id = posting_id if posting_id.isdigit() else ""
+        response = render(
+            request,
+            "_blocked.html",
+            {
+                "company": name,
+                "hidden_count": hidden,
+                "posting_id": card_id,
+                "counts": _counts(request, session),
+                "oob_counts": True,
+            },
+        )
+    # static/app.js takes the company's other cards off the page
+    event = {"company": company_key(name), "keep": f"posting-{card_id}"}
+    response.headers["HX-Trigger"] = json.dumps({"jobpulse:blocked": event})
+    return response
+
+
+@actions.post("/companies/unblock", response_class=HTMLResponse)
+def unblock_company(
+    request: Request,
+    company: Annotated[str, Form()] = "",
+    return_to: Annotated[str, Form()] = "",
+) -> Response:
+    with session_scope(_state(request).sessions) as session:
+        repo.unblock_company(session, company)
+    if not _htmx(request):
+        return RedirectResponse(safe_return_to(return_to, "/watchlist"), status_code=303)
+    return HTMLResponse("", headers={"HX-Refresh": "true"})
 
 
 @actions.post("/watchlist/{company_id}/active", response_class=HTMLResponse)

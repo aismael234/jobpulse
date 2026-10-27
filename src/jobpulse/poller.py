@@ -10,7 +10,7 @@ import asyncio
 import dataclasses
 import logging
 from collections.abc import Callable, Collection, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import cast
 
@@ -170,7 +170,8 @@ class Poller:
             HealthMonitor(HealthRules.from_config(config.health)) if config.health.enabled else None
         )
         self._rules = filter_rules(config)
-        self._blocklist = self._rules.blocklist
+        self._config_blocklist = self._rules.blocklist
+        self._blocklist = self._config_blocklist  # with the dashboard's blocks, per cycle
         self._weights = scoring_weights(config)
         self._short_labels = short_labels(config)
         self._freshness = timedelta(hours=config.detection.freshness_hours)
@@ -191,6 +192,9 @@ class Poller:
             now = self._clock()
             repo.sync_watchlist(session, self._config.watchlist, now=now)
             repo.sync_searches(session, self._config.searches, now=now)
+            # Companies blocked from the dashboard count from the next cycle, without a restart.
+            self._blocklist = repo.blocklist(session, self._config_blocklist)
+            self._rules = replace(self._rules, blocklist=self._blocklist)
             targets = self._targets(session, sources, target_key)
             unit.checkpoint()
 

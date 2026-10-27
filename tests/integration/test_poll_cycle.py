@@ -367,6 +367,7 @@ async def test_a_too_senior_description_is_still_pushed_with_a_lower_score(
     assert row.score < env.config.scoring.instant_threshold
     assert row.score_breakdown is not None
     assert row.score_breakdown["level_mismatch"] == -0.5
+    assert row.years_required == 8  # for the dashboard's experience filter
     assert [message.title for message in env.notifier.sent] == [TITLE_LINE]
 
 

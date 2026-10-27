@@ -281,6 +281,7 @@ def companies_list(ctx: typer.Context) -> None:
         _fail(exc)
     with session_scope(sessions) as session:
         companies = repo.list_companies(session)
+        blocklist = repo.blocklist(session, blocklist)  # with the dashboard's blocks
     if not companies:
         typer.echo("no companies yet; run `jobpulse companies sync` or `jobpulse poll --once`")
     for company in companies:
