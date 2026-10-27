@@ -7,7 +7,7 @@ except Applied, which doubles as the record of your applications.
 """
 
 from collections import defaultdict
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Literal
@@ -16,13 +16,46 @@ from sqlalchemy import ColumnElement, case, func, or_, select
 from sqlalchemy.orm import Session, defer
 
 from jobpulse.core.filters import Blocklist
+from jobpulse.core.pay import yearly_usd_range
+from jobpulse.core.places import PlaceGroup, place_options, posting_in_place
 from jobpulse.db.tables import Company, HealthIncident, PostingRow, Run, Search
+from jobpulse.db.types import UTCDateTime
 
 STATUSES: tuple[str, ...] = ("New", "Saved", "Applied", "Dismissed")
 BLOCKLIST_EXEMPT_STATUSES = frozenset({"Applied"})
 PAGE_SIZE = 50
 
-SortOrder = Literal["score", "fresh"]
+SortOrder = Literal["score", "fresh", "pushed"]
+
+# How long ago a posting was pushed: key → (age, whether it means "longer ago than that").
+PUSHED_WINDOWS: dict[str, tuple[timedelta, bool]] = {
+    "1h": (timedelta(hours=1), False),
+    "3h": (timedelta(hours=3), False),
+    "6h": (timedelta(hours=6), False),
+    "12h": (timedelta(hours=12), False),
+    "24h": (timedelta(hours=24), False),
+    "3d": (timedelta(days=3), False),
+    "7d": (timedelta(days=7), False),
+    "30d": (timedelta(days=30), False),
+    "over-1d": (timedelta(days=1), True),
+    "over-3d": (timedelta(days=3), True),
+    "over-7d": (timedelta(days=7), True),
+    "over-30d": (timedelta(days=30), True),
+}
+PUSHED_CHOICES: tuple[tuple[str, str], ...] = (
+    ("1h", "Pushed in the last hour"),
+    ("3h", "Last 3 hours"),
+    ("6h", "Last 6 hours"),
+    ("12h", "Last 12 hours"),
+    ("24h", "Last 24 hours"),
+    ("3d", "Last 3 days"),
+    ("7d", "Last 7 days"),
+    ("30d", "Last 30 days"),
+    ("over-1d", "Pushed over a day ago"),
+    ("over-3d", "Over 3 days ago"),
+    ("over-7d", "Over a week ago"),
+    ("over-30d", "Over 30 days ago"),
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,9 +67,30 @@ class PostingQuery:
     min_score: float | None = None
     text: str | None = None  # part of the title, company or description, any case
     open_only: bool = False
+    place: str | None = None  # a key from core.places: "US", "US-TX", "metro:dc", "US-TX/Austin"
+    pushed: str | None = None  # a PUSHED_WINDOWS key
+    min_pay: int | None = None  # thousands of US dollars a year, the top of the range
+    pay_listed: bool = False  # only postings with pay in dollars
     sort: SortOrder = "score"
     page: int = 1
     page_size: int = PAGE_SIZE
+
+    @property
+    def more_filters(self) -> bool:
+        """A filter under "More filters" is set, so the form shows them open."""
+        return bool(
+            self.company
+            or self.source
+            or self.remote is not None
+            or self.min_score is not None
+            or self.open_only
+            or self.min_pay
+            or self.pay_listed
+        )
+
+    @property
+    def filtered(self) -> bool:
+        return self.more_filters or bool(self.text or self.place or self.pushed)
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +99,7 @@ class PostingPage:
     total: int
     page: int
     page_size: int
+    places: tuple[PlaceGroup, ...] = ()  # the location options, with counts
 
     @property
     def has_next(self) -> bool:
@@ -86,9 +141,22 @@ def hidden_companies(session: Session, blocklist: Blocklist) -> frozenset[str]:
     return frozenset(name for name in names if blocklist.blocks_company(name))
 
 
-def list_postings(
-    session: Session, query: PostingQuery, *, hidden: Collection[str] = ()
-) -> PostingPage:
+def pushed_at() -> ColumnElement[datetime]:
+    """When jobpulse pushed a posting, or first saw it if it never pushed it. The type makes
+    SQLite compare against bound times in the stored format."""
+    return func.coalesce(PostingRow.notified_at, PostingRow.first_seen_at, type_=UTCDateTime())
+
+
+def _pays(compensation: Mapping[str, Any] | None, query: PostingQuery) -> bool:
+    found = yearly_usd_range(compensation)
+    if found is None:
+        return not query.pay_listed
+    return not query.min_pay or found[1] >= query.min_pay * 1000
+
+
+def _conditions(
+    query: PostingQuery, hidden: Collection[str], now: datetime
+) -> list[ColumnElement[bool]]:
     conditions = _in_view(query.status, hidden)
     if query.source:
         conditions.append(PostingRow.source == query.source)
@@ -108,23 +176,56 @@ def list_postings(
         )
     if query.open_only:
         conditions.append(PostingRow.closed_at.is_(None))
-    total = session.scalar(select(func.count()).select_from(PostingRow).where(*conditions)) or 0
+    if query.pushed in PUSHED_WINDOWS:
+        age, older = PUSHED_WINDOWS[query.pushed]
+        conditions.append(pushed_at() < now - age if older else pushed_at() >= now - age)
+    return conditions
+
+
+def _order(sort: SortOrder) -> tuple[Any, ...]:
     # Freshness: the source's own timestamp when it has one, else when jobpulse first saw it.
     freshness = func.coalesce(PostingRow.posted_at, PostingRow.first_seen_at).desc()
     by_score = PostingRow.score.desc().nulls_last()
-    order = (by_score, freshness) if query.sort == "score" else (freshness, by_score)
-    rows = session.scalars(
-        select(PostingRow)
-        .where(*conditions)
-        .options(
-            defer(PostingRow.raw, raiseload=True),
-            defer(PostingRow.description_text, raiseload=True),
+    if sort == "pushed":
+        return pushed_at().desc(), by_score
+    return (by_score, freshness) if sort == "score" else (freshness, by_score)
+
+
+def list_postings(
+    session: Session, query: PostingQuery, *, now: datetime, hidden: Collection[str] = ()
+) -> PostingPage:
+    """One page of a view. The SQL filters run in the database; pay and location are read in
+    Python (pay comes in several shapes, places from the label tables), over the ids and
+    labels of every posting the SQL filters leave, which also gives the location options."""
+    columns: list[Any] = [PostingRow.id, PostingRow.locations]
+    pay_filter = bool(query.min_pay or query.pay_listed)
+    if pay_filter:
+        columns.append(PostingRow.compensation)
+    found = session.execute(
+        select(*columns)
+        .where(*_conditions(query, hidden, now))
+        .order_by(*_order(query.sort), PostingRow.id.desc())
+    ).all()
+    if pay_filter:
+        found = [row for row in found if _pays(row.compensation, query)]
+    places = place_options((row.locations or () for row in found), selected=query.place)
+    if query.place:
+        found = [row for row in found if posting_in_place(row.locations or (), query.place)]
+    start = (query.page - 1) * query.page_size
+    ids = [row.id for row in found[start : start + query.page_size]]
+    loaded = {
+        row.id: row
+        for row in session.scalars(
+            select(PostingRow)
+            .where(PostingRow.id.in_(ids))
+            .options(
+                defer(PostingRow.raw, raiseload=True),
+                defer(PostingRow.description_text, raiseload=True),
+            )
         )
-        .order_by(*order, PostingRow.id.desc())
-        .limit(query.page_size)
-        .offset((query.page - 1) * query.page_size)
-    )
-    return PostingPage(list(rows), total, query.page, query.page_size)
+    }
+    rows = [loaded[posting_id] for posting_id in ids]
+    return PostingPage(rows, len(found), query.page, query.page_size, places)
 
 
 def view_counts(session: Session, *, hidden: Collection[str] = ()) -> dict[str, int]:

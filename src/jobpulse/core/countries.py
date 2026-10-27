@@ -34,6 +34,16 @@ def _codes(text: str) -> frozenset[str]:
     return frozenset(text.split())
 
 
+def _first_names(text: str) -> dict[str, str]:
+    """``CODE Name|Other name`` lines → {CODE: Name}; a line without a name is left out."""
+    names: dict[str, str] = {}
+    for line in text.strip().splitlines():
+        code, _, rest = line.strip().partition(" ")
+        if name := rest.split("|")[0].strip():
+            names[code] = name
+    return names
+
+
 # English names from tzdata's iso3166.tab, with common variants. Georgia is left out (a US
 # state too), and so are Puerto Rico (counted as the US) and plain "Congo" (two countries).
 _COUNTRY_LINES = """
@@ -290,8 +300,7 @@ GE
 _COUNTRIES: Final = _table(_COUNTRY_LINES)
 ISO_CODES: Final = frozenset(line.split()[0] for line in _COUNTRY_LINES.strip().splitlines())
 
-_US_STATES: Final = _table(
-    """
+_US_STATE_LINES: Final = """
     AL Alabama
     AK Alaska
     AZ Arizona
@@ -345,10 +354,9 @@ _US_STATES: Final = _table(
     WI Wisconsin
     WY Wyoming
     """
-)
+_US_STATES: Final = _table(_US_STATE_LINES)
 _US_STATE_CODES: Final = frozenset(code for code in _US_STATES.values())
-_CANADIAN_PROVINCES: Final = _table(
-    """
+_CANADIAN_PROVINCE_LINES: Final = """
     AB Alberta
     BC British Columbia
     MB Manitoba
@@ -363,7 +371,7 @@ _CANADIAN_PROVINCES: Final = _table(
     SK Saskatchewan
     YT Yukon
     """
-)
+_CANADIAN_PROVINCES: Final = _table(_CANADIAN_PROVINCE_LINES)
 _CANADIAN_PROVINCE_CODES: Final = frozenset(_CANADIAN_PROVINCES.values())
 
 # States and provinces abroad that labels give without their country ("Pune, Maharashtra").
@@ -726,3 +734,70 @@ def label_countries(label: str) -> frozenset[str] | None:
         # "United States and Canada", but never "Trinidad and Tobago"
         return _union(piece for piece in pieces if piece is not None)
     return _label_place(text)
+
+
+# --- what core/places.py reads below the country ---------------------------------------------
+
+_COUNTRY_NAMES: Final = _first_names(_COUNTRY_LINES)
+_SUBDIVISION_NAMES: Final = {
+    **{f"US-{code}": name for code, name in _first_names(_US_STATE_LINES).items()},
+    **{f"CA-{code}": name for code, name in _first_names(_CANADIAN_PROVINCE_LINES).items()},
+}
+
+
+def is_remote_label(label: str) -> bool:
+    return _REMOTE.search(label) is not None
+
+
+def label_parts(label: str) -> list[str]:
+    """A label's parts as ``label_countries`` reads them, parentheses dropped: "Austin, TX" →
+    ["Austin", "TX"]; "US > Arizona > Phoenix" → ["US", "Arizona", "Phoenix"]."""
+    text = collapse_whitespace(_PARENTHETICAL.sub(" ", collapse_whitespace(label)))
+    parts = (part.strip(_EDGE_CHARS) for part in _PARTS.split(text.strip(_EDGE_CHARS)))
+    return [part for part in parts if part]
+
+
+def subdivision_key(part: str) -> str | None:
+    """ "US-TX" for "TX" or "Texas", "CA-ON" for "ON" or "Ontario"; ``None`` otherwise. Codes
+    count only in capitals, so "In" or "Ok" is never a state."""
+    if len(part) == 2:
+        if part in _US_STATE_CODES:
+            return f"US-{part}"
+        return f"CA-{part}" if part in _CANADIAN_PROVINCE_CODES else None
+    key = collapse_whitespace(part).casefold()
+    if key in _US_STATES:
+        return f"US-{_US_STATES[key]}"
+    if key in _CANADIAN_PROVINCES:
+        return f"CA-{_CANADIAN_PROVINCES[key]}"
+    return None
+
+
+def names_country_or_region(part: str) -> bool:
+    """A country ("USA"), a region ("EMEA", "Bay Area") or a state abroad ("Karnataka")."""
+    key = collapse_whitespace(part).casefold()
+    return country_code(part) is not None or key in _REGIONS or key in _SUBDIVISIONS
+
+
+def city_country(name: str) -> str | None:
+    """The country of a city in the tables: "London" → "GB"."""
+    return _CITIES.get(collapse_whitespace(name).casefold())
+
+
+def trim_noise(part: str) -> str:
+    """ "Greater Seattle Area" → "Seattle", "SF Office" → "SF"."""
+    return collapse_whitespace(_NOISE.sub(" ", part)).strip(_EDGE_CHARS)
+
+
+def split_pieces(part: str) -> list[str]:
+    """Dash and slash pieces: "US-San Francisco" → ["US", "San Francisco"]."""
+    return [piece for piece in (p.strip(_EDGE_CHARS) for p in _PIECES.split(part)) if piece]
+
+
+def country_name(code: str) -> str:
+    """ "US" → "United States"; the code itself when the tables have no name for it."""
+    return _COUNTRY_NAMES.get(code, code)
+
+
+def subdivision_name(key: str) -> str | None:
+    """ "US-TX" → "Texas", "CA-ON" → "Ontario"."""
+    return _SUBDIVISION_NAMES.get(key)

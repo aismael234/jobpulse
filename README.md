@@ -103,7 +103,10 @@ A push looks like `Stripe · Backend Engineer · SF / Remote · posted 25 min ag
 `uv run jobpulse web` serves it on `http://127.0.0.1:8000`.
 
 - **New / Saved / Applied / Dismissed.** New holds the matches nobody has triaged yet. One click moves a posting between views (with undo). Each card shows the score (hover for its breakdown), pay when the source gives it, "posted 25 min ago" (or "first seen 3 h ago" when the source has no timestamp), and where else the job was seen.
-- **Filters:** text (title, company, description), company, source, remote, minimum score, open only; sort by score or newest.
+- **Filters:** text (title, company, description); location; when it was pushed; and, under "More filters", company, source, remote, a pay floor, minimum score and open only. Sort by score, newest (the source's posted date) or most recently pushed.
+  - **Location** is one list of the places in the current view, each with its count: countries, US states and Canadian provinces, metro areas (Bay Area, NYC, Seattle, DC, Boston, LA, Dallas–Fort Worth, Austin, Denver–Boulder, Research Triangle, Atlanta, Chicago) and cities. A country includes worldwide-remote postings; a state, metro area or city never includes remote ones.
+  - **Pushed** is when jobpulse pushed the posting to you, or first saw it if it never pushed it: within the last hour up to 30 days, or longer ago than a day up to 30 days.
+  - **Pay at least $X k/yr** compares the top of the posted range, with hourly and monthly pay turned into yearly; pay in another currency counts as not listed. Postings without pay stay unless you tick "Pay listed".
 - **Health:** per board, search and feed: last run, last success, failures in a row, the last 24 h of runs, fetched and new postings, the last error, and open incidents.
 - **Watchlist:** every company with its priority, status, origin and baseline. Paste a careers URL to add a board (see below); a Workday board gets a keywords field. Priority and pause apply to companies that didn't come from `config.yaml`.
 - A posting the LLM layer assessed shows "LLM +0.12" (or minus); hover for its verdict.

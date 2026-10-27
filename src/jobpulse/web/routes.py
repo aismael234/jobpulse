@@ -26,8 +26,15 @@ from jobpulse.core.atsurls import (
     normalize_workday_token,
     workday_board,
 )
+from jobpulse.core.places import parse_place_key
 from jobpulse.db import dashboard, repo
-from jobpulse.db.dashboard import STATUSES, PostingQuery
+from jobpulse.db.dashboard import (
+    PUSHED_CHOICES,
+    PUSHED_WINDOWS,
+    STATUSES,
+    PostingQuery,
+    SortOrder,
+)
 from jobpulse.db.session import session_scope
 from jobpulse.db.tables import Company, PostingRow
 from jobpulse.runtime import KNOWN_SOURCES
@@ -47,6 +54,7 @@ def page(path: str, **options: Any) -> Callable[[DecoratedCallable], DecoratedCa
 
 
 VIEWS = {status.lower(): status for status in STATUSES}
+SORTS: dict[str, SortOrder] = {"score": "score", "fresh": "fresh", "pushed": "pushed"}
 ADDABLE_ATS = ("greenhouse", "lever", "ashby", "workday")
 ATS_NAMES = {"greenhouse": "Greenhouse", "lever": "Lever", "ashby": "Ashby", "workday": "Workday"}
 MAX_PRIORITY = 1000
@@ -82,7 +90,7 @@ def parse_query(params: Mapping[str, str]) -> PostingQuery:
         page = max(1, int(params.get("page") or "1"))
     except ValueError:
         page = 1
-    sort: Literal["score", "fresh"] = "fresh" if params.get("sort") == "fresh" else "score"
+    pushed = (params.get("pushed") or "").strip()
     return PostingQuery(
         status=status,
         source=source if source in KNOWN_SOURCES else None,
@@ -90,10 +98,27 @@ def parse_query(params: Mapping[str, str]) -> PostingQuery:
         remote=remote,
         min_score=min_score,
         text=_blank(params.get("q")),
-        open_only=(params.get("open") or "") in ("1", "on", "true", "yes"),
-        sort=sort,
+        open_only=_checked(params.get("open")),
+        place=parse_place_key(params.get("place") or ""),
+        pushed=pushed if pushed in PUSHED_WINDOWS else None,
+        min_pay=_thousands(params.get("pay")),
+        pay_listed=_checked(params.get("pay_listed")),
+        sort=SORTS.get(params.get("sort") or "", "score"),
         page=page,
     )
+
+
+def _checked(value: str | None) -> bool:
+    return (value or "") in ("1", "on", "true", "yes")
+
+
+def _thousands(value: str | None) -> int | None:
+    """A pay floor in thousands of dollars: a positive whole number, else no floor."""
+    try:
+        number = int((value or "").strip())
+    except ValueError:
+        return None
+    return number if number > 0 else None
 
 
 def safe_return_to(value: str | None, default: str = "/") -> str:
@@ -144,7 +169,7 @@ def postings_page(request: Request) -> HTMLResponse:
     query = parse_query(request.query_params)
     with state.sessions() as session:
         hidden = dashboard.hidden_companies(session, state.blocklist)
-        page = dashboard.list_postings(session, query, hidden=hidden)
+        page = dashboard.list_postings(session, query, now=state.clock(), hidden=hidden)
         return render(
             request,
             "postings.html",
@@ -153,6 +178,7 @@ def postings_page(request: Request) -> HTMLResponse:
                 "page": page,
                 "view": query.status,
                 "sources": KNOWN_SOURCES,
+                "pushed_choices": PUSHED_CHOICES,
                 "link": link,
                 "return_to": str(request.url.path)
                 + (f"?{request.url.query}" if request.url.query else ""),

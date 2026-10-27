@@ -1,9 +1,13 @@
 """Reading the dashboard's filters and return paths: lenient with blanks, strict with targets."""
 
+from dataclasses import replace
+from urllib.parse import parse_qsl, urlsplit
+
 import pytest
 
 from jobpulse.db.dashboard import PostingQuery
 from jobpulse.web.routes import parse_query, safe_return_to
+from jobpulse.web.views import link
 
 
 def test_no_parameters_mean_the_new_view_by_score() -> None:
@@ -59,6 +63,42 @@ def test_every_filter_is_read() -> None:
 )
 def test_lenient_parsing(params: dict[str, str], expected: PostingQuery) -> None:
     assert parse_query(params) == expected
+
+
+def test_location_pushed_time_and_pay_are_read() -> None:
+    query = parse_query(
+        {"place": "us-tx/ Austin ", "pushed": "over-3d", "pay": "120", "pay_listed": "1"}
+    )
+    assert query == PostingQuery(
+        place="US-TX/Austin", pushed="over-3d", min_pay=120, pay_listed=True
+    )
+    assert parse_query({"sort": "pushed"}) == PostingQuery(sort="pushed")
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"place": "Texas"},
+        {"place": "US-ZZ"},
+        {"pushed": "2h"},
+        {"pay": "lots"},
+        {"pay": "0"},
+        {"pay": "-5"},
+        {"pay": "nan"},
+        {"pay_listed": "maybe"},
+    ],
+)
+def test_unreadable_location_time_and_pay_are_ignored(params: dict[str, str]) -> None:
+    assert parse_query(params) == PostingQuery()
+
+
+def test_links_keep_the_new_filters() -> None:
+    query = PostingQuery(
+        place="US-TX/Austin", pushed="6h", min_pay=150, pay_listed=True, sort="pushed"
+    )
+    url = link(query, page=2)
+    assert parse_query(dict(parse_qsl(urlsplit(url).query))) == replace(query, page=2)
+    assert link(PostingQuery()) == "/"
 
 
 @pytest.mark.parametrize(

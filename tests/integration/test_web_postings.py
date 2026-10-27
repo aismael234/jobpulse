@@ -262,6 +262,151 @@ def test_blocked_companies_are_hidden_except_where_you_applied(
     assert nav_count(page, "Applied") == 1
 
 
+def location_options(page: str) -> dict[str, str]:
+    """The location select's options: value → text."""
+    select = re.search(r'<select name="place".*?</select>', page, re.DOTALL)
+    assert select is not None, "no location select"
+    return {
+        html.unescape(value): html.unescape(" ".join(text.split()))
+        for value, text in re.findall(
+            r'<option value="([^"]*)"[^>]*>(.*?)</option>', select.group(0), re.DOTALL
+        )
+    }
+
+
+def test_location_filter_by_country_state_metro_and_city(web: Web) -> None:
+    sf = web.add(title="SF role", locations=["San Francisco, CA"], score=0.9)
+    sunnyvale = web.add(title="Sunnyvale role", locations=["Sunnyvale"], score=0.8)
+    austin = web.add(title="Austin role", locations=["Austin, TX", "Remote (US)"], score=0.7)
+    remote = web.add(title="Remote role", locations=["Remote (US)"], score=0.6)
+    anywhere = web.add(title="Anywhere role", locations=["Remote (Global)"], score=0.5)
+    london = web.add(title="London role", locations=["London, England, UK"], score=0.4)
+    nowhere = web.add(title="Unplaced role", locations=[], score=0.3)
+
+    assert web.ids() == [sf, sunnyvale, austin, remote, anywhere, london, nowhere]
+    assert web.ids(place="US") == [sf, sunnyvale, austin, remote, anywhere]
+    assert web.ids(place="GB") == [anywhere, london]
+    assert web.ids(place="US-CA") == [sf, sunnyvale]
+    assert web.ids(place="metro:bay-area") == [sf, sunnyvale]
+    assert web.ids(place="US-TX/Austin") == [austin]
+    assert web.ids(place="us-tx/austin") == [austin]
+    assert web.ids(place="US-WA") == []
+    assert web.ids(place="nonsense") == web.ids()  # unreadable values are ignored
+
+    options = location_options(web.page("/"))
+    assert options[""] == "Any location"
+    assert options["US"] == "United States (5)"
+    assert options["US-CA"] == "California (2)"
+    assert options["metro:bay-area"] == "San Francisco Bay Area (2)"
+    assert options["US-CA/Sunnyvale"] == "Sunnyvale, CA (1)"
+    assert options["GB/London"] == "London, United Kingdom (1)"
+
+
+def test_location_options_follow_the_other_filters_and_keep_the_selection(web: Web) -> None:
+    web.add(title="Backend Engineer", locations=["Austin, TX"], company_name="Acme")
+    web.add(title="Data Engineer", locations=["Seattle, WA"], company_name="Beta")
+
+    options = location_options(web.page("/", company="Acme"))
+    assert "US-TX" in options
+    assert "US-WA" not in options
+
+    page = web.page("/", company="Acme", place="US-WA")
+    assert posting_ids(page) == []
+    assert re.search(r'<option value="US-WA"\s+selected>Washington \(0\)</option>', page)
+    assert "No postings match these filters" in page
+
+
+def test_a_location_filter_pages_through_every_match(web: Web) -> None:
+    ids = [
+        web.add(title=f"Role {n}", locations=["Austin, TX"], score=round(0.99 - n / 100, 2))
+        for n in range(55)
+    ]
+    web.add(title="Elsewhere", locations=["Seattle, WA"], score=0.995)
+
+    first = web.page("/", place="US-TX")
+    assert posting_ids(first) == ids[:50]
+    assert "55 postings" in first
+    assert "place=US-TX&amp;page=2" in first
+    assert posting_ids(web.page("/", place="US-TX", page="2")) == ids[50:]
+
+
+def test_pushed_filter_reads_the_push_time_or_else_first_seen(web: Web) -> None:
+    just_pushed = web.add(
+        title="Pushed 30 min ago",
+        first_seen_at=NOW - timedelta(hours=2),
+        notified_at=NOW - timedelta(minutes=30),
+        score=0.9,
+    )
+    never_pushed = web.add(
+        title="Seen 5 h ago, never pushed", first_seen_at=NOW - timedelta(hours=5), score=0.8
+    )
+    # adopted from an earlier copy: pushed before this row was first seen
+    adopted = web.add(
+        title="Pushed 2 days ago",
+        first_seen_at=NOW - timedelta(minutes=10),
+        notified_at=NOW - timedelta(days=2),
+        score=0.7,
+    )
+    old = web.add(
+        title="Pushed 10 days ago",
+        first_seen_at=NOW - timedelta(days=10),
+        notified_at=NOW - timedelta(days=10),
+        score=0.6,
+    )
+
+    assert web.ids(pushed="1h") == [just_pushed]
+    assert web.ids(pushed="6h") == [just_pushed, never_pushed]
+    assert web.ids(pushed="3d") == [just_pushed, never_pushed, adopted]
+    assert web.ids(pushed="over-1d") == [adopted, old]
+    assert web.ids(pushed="over-7d") == [old]
+    assert web.ids(pushed="2h") == web.ids()  # not a preset: ignored
+    page = web.page("/", pushed="6h")
+    assert re.search(r'<option value="6h"\s+selected>', page)
+
+
+def test_sort_by_most_recently_pushed(web: Web) -> None:
+    first = web.add(title="A", score=0.9, notified_at=NOW - timedelta(hours=3))
+    second = web.add(title="B", score=0.5, notified_at=NOW - timedelta(minutes=5))
+    third = web.add(title="C", score=0.7, notified_at=None, first_seen_at=NOW - timedelta(hours=1))
+    assert web.ids(sort="pushed") == [second, third, first]
+    assert re.search(r'<option value="pushed"\s+selected>', web.page("/", sort="pushed"))
+
+
+def test_pay_floor(web: Web) -> None:
+    yearly = web.add(title="Yearly", compensation=LEVER_PAY, score=0.9)  # $180k–$230k
+    hourly = web.add(
+        title="Hourly",
+        compensation={"min_amount": 50, "max_amount": 60, "currency": "USD", "interval": "hourly"},
+        score=0.8,
+    )  # $104k–$124.8k a year
+    euros = web.add(
+        title="Euros",
+        compensation={"currency": "EUR", "interval": "per-year-salary", "min": 1, "max": 900000},
+        score=0.7,
+    )
+    unlisted = web.add(title="No pay", compensation=None, score=0.6)
+
+    assert web.ids(pay="120") == [yearly, hourly, euros, unlisted]
+    assert web.ids(pay="125") == [yearly, euros, unlisted]
+    assert web.ids(pay="125", pay_listed="1") == [yearly]
+    assert web.ids(pay_listed="1") == [yearly, hourly]
+    assert web.ids(pay="lots") == web.ids()
+
+
+def more_filters_open(page: str) -> bool:
+    found = re.search(r'<details class="more"[^>]*>', page)
+    assert found is not None, "no More filters"
+    return " open" in found.group(0)
+
+
+def test_more_filters_open_only_when_one_of_them_is_set(web: Web) -> None:
+    web.add()
+    assert not more_filters_open(web.page("/"))
+    assert not more_filters_open(web.page("/", place="US", pushed="6h", q="python"))
+    for params in ({"company": "Acme"}, {"pay": "100"}, {"open": "1"}, {"remote": "yes"}):
+        assert more_filters_open(web.page("/", **params)), params
+
+
 def test_an_llm_second_opinion_shows_with_its_reason(web: Web) -> None:
     """M4: the LLM layer's move on the score, and its reason on hover."""
     reason = "score 0.50 < 0.55; llm -0.09: mid, backend 20%, fit 20% (Mostly frontend.)"

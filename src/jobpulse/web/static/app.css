@@ -116,19 +116,22 @@ button[type="submit"]:not(.actions button) { background: var(--accent); border-c
 .check input { margin: 0; }
 
 .filters {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-  align-items: center;
   padding: 0.75rem;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
 }
+.filters .row { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
 .filters input[type="search"] { flex: 1 1 16rem; }
+.filters select[name="place"] { flex: 0 1 15rem; min-width: 0; }
 .filters input[name="company"] { flex: 0 1 10rem; }
 .filters input[name="min_score"] { width: 7.5rem; }
+.filters input[name="pay"] { width: 5.5rem; margin: 0 0.2rem; }
+.filters .pay-floor { display: inline-flex; align-items: center; color: var(--muted); }
 .filters .reset { color: var(--muted); font-size: 0.9rem; }
+.filters .more { margin-top: 0.5rem; }
+.filters .more summary { cursor: pointer; color: var(--muted); font-size: 0.9rem; width: max-content; }
+.filters .more[open] summary { margin-bottom: 0.5rem; }
 .summary { color: var(--muted); font-size: 0.9rem; margin: 0.75rem 0 0.5rem; }
 
 /* posting cards */
@@ -213,6 +216,7 @@ form.inline button:hover { border-color: var(--accent); color: var(--accent); }
 
 @media (max-width: 640px) {
   main { padding: 0.75rem; }
+  .filters .row > select, .filters .row > input[type="text"] { flex: 1 1 10rem; }
   .posting { grid-template-columns: 2.8rem 1fr; }
   .posting .actions { grid-column: 1 / -1; justify-content: flex-start; }
   .detect { flex-direction: column; }

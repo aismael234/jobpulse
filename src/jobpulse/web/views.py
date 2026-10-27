@@ -28,6 +28,10 @@ _QUERY_PARAMS = {
     "min_score": "min_score",
     "text": "q",
     "open_only": "open",
+    "place": "place",
+    "pushed": "pushed",
+    "min_pay": "pay",
+    "pay_listed": "pay_listed",
     "sort": "sort",
     "page": "page",
 }
@@ -105,7 +109,7 @@ def link(query: PostingQuery, **changes: Any) -> str:
             value = str(value).lower()
         elif item.name == "remote":
             value = "yes" if value else "no"
-        elif item.name == "open_only":
+        elif item.name in ("open_only", "pay_listed"):
             value = "1"
         params.append((name, str(value)))
     return "/?" + urlencode(params) if params else "/"

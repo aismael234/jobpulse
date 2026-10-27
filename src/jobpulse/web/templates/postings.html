@@ -3,27 +3,53 @@
 {% block content %}
 <form class="filters" method="get" action="/">
   <input type="hidden" name="view" value="{{ view|lower }}">
-  <input type="search" name="q" value="{{ query.text }}" placeholder="Search title, company, description" aria-label="Search">
-  <input type="text" name="company" value="{{ query.company }}" placeholder="Company" aria-label="Company">
-  <select name="source" aria-label="Source">
-    <option value="">Any source</option>
-    {% for source in sources %}
-    <option value="{{ source }}"{% if query.source == source %} selected{% endif %}>{{ source }}</option>
-    {% endfor %}
-  </select>
-  <select name="remote" aria-label="Remote">
-    <option value="">Remote or not</option>
-    <option value="yes"{% if query.remote is sameas true %} selected{% endif %}>Remote</option>
-    <option value="no"{% if query.remote is sameas false %} selected{% endif %}>Not remote</option>
-  </select>
-  <input type="number" name="min_score" value="{{ query.min_score }}" min="0" max="2" step="0.05" placeholder="Min score" aria-label="Minimum score">
-  <select name="sort" aria-label="Sort">
-    <option value="score"{% if query.sort == "score" %} selected{% endif %}>Best score</option>
-    <option value="fresh"{% if query.sort == "fresh" %} selected{% endif %}>Newest</option>
-  </select>
-  <label class="check"><input type="checkbox" name="open" value="1"{% if query.open_only %} checked{% endif %}> Open only</label>
-  <button type="submit">Filter</button>
-  <a class="reset" href="/?view={{ view|lower }}">Clear</a>
+  <div class="row">
+    <input type="search" name="q" value="{{ query.text }}" placeholder="Search title, company, description" aria-label="Search">
+    <select name="place" aria-label="Location">
+      <option value="">Any location</option>
+      {% for group in page.places %}
+      <optgroup label="{{ group.label }}">
+        {% for option in group.options %}
+        <option value="{{ option.key }}"{% if query.place and query.place|lower == option.key|lower %} selected{% endif %}>{{ option.label }} ({{ option.count }})</option>
+        {% endfor %}
+      </optgroup>
+      {% endfor %}
+    </select>
+    <select name="pushed" aria-label="Pushed" title="When jobpulse pushed the posting, or first saw it if it never pushed it">
+      <option value="">Pushed any time</option>
+      {% for value, label in pushed_choices %}
+      <option value="{{ value }}"{% if query.pushed == value %} selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+    <select name="sort" aria-label="Sort">
+      <option value="score"{% if query.sort == "score" %} selected{% endif %}>Best score</option>
+      <option value="fresh"{% if query.sort == "fresh" %} selected{% endif %}>Newest</option>
+      <option value="pushed"{% if query.sort == "pushed" %} selected{% endif %}>Recently pushed</option>
+    </select>
+    <button type="submit">Filter</button>
+    <a class="reset" href="/?view={{ view|lower }}">Clear</a>
+  </div>
+  <details class="more"{% if query.more_filters %} open{% endif %}>
+    <summary>More filters</summary>
+    <div class="row">
+      <input type="text" name="company" value="{{ query.company }}" placeholder="Company" aria-label="Company">
+      <select name="source" aria-label="Source">
+        <option value="">Any source</option>
+        {% for source in sources %}
+        <option value="{{ source }}"{% if query.source == source %} selected{% endif %}>{{ source }}</option>
+        {% endfor %}
+      </select>
+      <select name="remote" aria-label="Remote">
+        <option value="">Remote or not</option>
+        <option value="yes"{% if query.remote is sameas true %} selected{% endif %}>Remote</option>
+        <option value="no"{% if query.remote is sameas false %} selected{% endif %}>Not remote</option>
+      </select>
+      <label class="pay-floor">Pay at least $<input type="number" name="pay" value="{{ query.min_pay }}" min="1" step="5" placeholder="any" aria-label="Pay at least, in thousands of dollars a year">k/yr</label>
+      <label class="check"><input type="checkbox" name="pay_listed" value="1"{% if query.pay_listed %} checked{% endif %}> Pay listed</label>
+      <input type="number" name="min_score" value="{{ query.min_score }}" min="0" max="2" step="0.05" placeholder="Min score" aria-label="Minimum score">
+      <label class="check"><input type="checkbox" name="open" value="1"{% if query.open_only %} checked{% endif %}> Open only</label>
+    </div>
+  </details>
 </form>
 
 <p class="summary">{{ page.total }} posting{{ "" if page.total == 1 else "s" }}{% if page.total > page.page_size %}, page {{ page.page }}{% endif %}</p>
@@ -32,7 +58,7 @@
 {% for row in page.rows %}
 {% include "_posting.html" %}
 {% else %}
-<p class="empty">{% if view == "New" %}Nothing new to look at. Every match is pushed and lands here.{% else %}No {{ view|lower }} postings{% if query.text or query.company or query.source %} match these filters{% endif %}.{% endif %}</p>
+<p class="empty">{% if query.filtered %}No postings match these filters.{% elif view == "New" %}Nothing new to look at. Every match is pushed and lands here.{% else %}No {{ view|lower }} postings.{% endif %}</p>
 {% endfor %}
 </section>
 
