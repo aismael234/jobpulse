@@ -118,6 +118,25 @@ def test_a_page_without_an_applicant_line() -> None:
     assert parsed.description is not None
 
 
+def test_a_first_posting_is_not_a_repost() -> None:
+    assert parse_job_page(PAGE_25).reposted is None
+
+
+def test_reads_linkedins_reposted_marker() -> None:
+    """M5.0: a bumped job reads "Reposted 2 days ago" where the posted time goes."""
+    page = PAGE_25.replace("3 hours ago", "Reposted 2 days ago")
+    assert parse_job_page(page).reposted == "Reposted 2 days ago"
+
+
+async def test_enrich_carries_the_repost_marker(
+    respx_mock: respx.MockRouter, http: HttpClient
+) -> None:
+    page = PAGE_25.replace("3 hours ago", "Reposted 2 days ago")
+    respx_mock.get(page_url("4101100003")).respond(200, html=page)
+    enriched = await Setup(http).pages.enrich(linkedin_posting())
+    assert enriched.reposted == "Reposted 2 days ago"
+
+
 def test_a_page_that_is_not_a_job_page() -> None:
     assert parse_job_page("<html><body><h1>Sign in</h1></body></html>") == JobPage()
 

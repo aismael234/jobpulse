@@ -168,12 +168,12 @@ The full plan, with decisions, code facts and a data snapshot, is in `/Users/ala
 - Stop after each milestone.
 
 - [x] **Before M5.0:** ask whether to commit the uncommitted 10-28…10-31 work first (committed 2026-11-01).
-- [ ] **M5.0 — Early-applicant filters** (migration 0006), as dashboard filters only:
-  - [ ] reposted postings, hidden by default (LinkedIn's "Reposted" marker, after a live check of its wording, plus fingerprint or Greenhouse requisition seen 7+ days earlier);
-  - [ ] maximum applicants (unknown counts pass);
-  - [ ] contract show/hide/only (no signal means full-time);
-  - [ ] no "More filters" fold;
-  - [ ] the ATS lag probe; the `results_wanted` 25→50 suggestion for capped searches.
+- [x] **M5.0 — Early-applicant filters** (migration 0006), as dashboard filters only (committed 2026-11-01; live DB not migrated):
+  - [x] reposted postings, hidden from New by default (LinkedIn's "Reposted" marker, plus a Greenhouse requisition seen 7+ days earlier; the company/title/city rule was dropped); the live check read 2 pages, neither a repost, so the wording is still unconfirmed;
+  - [x] maximum applicants (unknown counts pass);
+  - [x] contract show/hide/only (no signal means full-time);
+  - [x] no "More filters" fold;
+  - [ ] the ATS lag probe (ran 22:15–02:15 UTC into the scratchpad; ETags confirmed working; lag not yet summarized); the `results_wanted` 25→50 suggestion for capped searches (your call).
 - [ ] **M5.1 — Saved filters** (migration 0007):
   - [ ] Settings page, up to 8 labeled filters with pastel bullets and a color-blind mode;
   - [ ] none saved: batch pushes as today; any saved: one message per fitting posting with bullets, most-matched last, at most 10 per cycle and 200 a day, then one summary;
@@ -334,3 +334,16 @@ The full plan, with decisions, code facts and a data snapshot, is in `/Users/ala
   - **Capped searches:** all 6 LinkedIn searches return 25 of 25 in nearly every run.
   - **Simplify links:** 30% of open listings link to Workday, which discovery skips.
   - **ntfy.sh limits:** a burst of 60, then 1 per 5 s, and 250 messages a day.
+- **2026-11-01** — Committed the 10-28…10-31 work (`064dafb`, your OK), then M5.0: early-applicant filters.
+  - **Test-first:** 111 new tests failed against stubs on missing behavior (core rules, LinkedIn marker, cycle, dashboard, migration); the two "More filters" fold tests were removed with the fold.
+  - **Reposts** (`core/reposts.py`, `postings.repost_reason`): LinkedIn's "Reposted …" text in the page's posted-time span, else `repo.earlier_posting`: the same Greenhouse requisition on the board, first seen 7+ days earlier, open or closed. A third rule (same company, title and city) was built, then dropped at your request: companies hire several people under one generic title, so it would hide new openings. A posting under a URL jobpulse already has is never new anyway. Computed for every decided posting; still matched and pushed. Hidden from New unless "Include reposted" is ticked; Saved, Applied and Dismissed always show them; New's count leaves them out. Cards show a Reposted badge with the reason.
+  - **LinkedIn live check** (your OK, 2 reads through jobpulse's client): both pages 200, posted-time "4 hours ago" and "18 hours ago", so no repost was seen. The Visa page said "4 hours ago" though jobpulse first saw it 20 h earlier: LinkedIn's posted time moves without the "Reposted" word.
+  - **Employment type** (`core/employment.py`, `postings.employment_type`): structured fields first (Ashby, Lever, Indeed, Greenhouse metadata about employment, Workday, LinkedIn's criteria line), then tight title/description phrases; contract-to-hire and temporary are contract; none means full time. Set at insert and when decided. A first scratch pass flagged "Contract Administrator"/"Contract Analyst"; a leading "Contract" now needs a role word after it.
+  - **Applicants:** hidden when the known lower bound reaches 25/50/100/200; unknown counts pass.
+  - **Dashboard:** every filter visible in two wrapping rows; new params `reposted=show`, `max_applicants`, `contract=hide|only`, kept by paging, CSV and bulk links. Checked in the built-in browser on a scratch copy at desktop and phone width, no console errors.
+  - **Migration 0006:** both columns in place (`recreate="never"`); backfills the employment type on every row and repost reasons on rows the dashboard can show, with copies of the rules (tests compare them with core). 3 s on a scratch copy of the live DB.
+  - **Replay on the scratch copy** (shown rows): reposts 0 everywhere (the one the dropped rule found was a title match); history only starts 10-24, so the 7-day rule has had little to find yet. Contract: 1 of 98 Applied, 65 of 1,862 Dismissed, 4 of 347 New. Applicants, Applied / Dismissed / New hidden at "under 200": 7 / 45 / 17; "under 100": 12 / 78 / 27; "under 50": 16 / 113 / 36; "under 25": 17 / 142 / 44. Employment over all 40,514 rows: 1,567 contract, 946 internship, 99 part time.
+  - **ATS lag probe** (read-only, 10 busy Greenhouse/Ashby/Lever boards every 2 min for 4 h, from 22:15 UTC): every unchanged poll got a 304. The "no 304s in 24 h" finding was an artifact: `HttpClient` replays a 304 as a 200, so ATS runs never set `not_modified`. Ashby is Cloudflare-cached for at most 60 s (+60 s stale). Lag numbers come when new jobs appear.
+  - `scripts/check.sh` green: 1459 passed.
+  - Not done: live `data/jobpulse.db` is still at 0005 (migrating it, and restarting the dashboard for the new columns, waits for your approval).
+

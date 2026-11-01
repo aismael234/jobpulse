@@ -79,6 +79,9 @@ Personal job-posting watcher. Read PROGRESS.md first: milestone checklists, deci
 
 - A redirect whose final URL path contains "maintenance" is a `maintenance` failure (`HttpAdapter._send`). Each HTTP source's `MaintenanceGate` (built in `runtime.build_adapters`, paced by its `sleep`) retries it, then pauses the source: its targets come back `skipped`, with no run. Health ignores maintenance runs per target and opens one incident for the source (target `*`). respx never suspends, so in tests the first target finishes its retries before the next starts, and the others are skipped.
 - `HealthMonitor.review` groups due messages by (source, kind, recovery): several boards failing or recovering together go out as one message, and `DueMessage.incident_ids` are marked sent together.
+- `postings.repost_reason` is set only when a posting is decided (`save_evaluation`): LinkedIn's "Reposted …" marker from its page, else `repo.earlier_posting` (same Greenhouse requisition on the board, first seen 7+ days earlier, open, closed or merged). Same company, title and city is deliberately not a signal (your decision 2026-11-01: several openings share generic titles). The dashboard hides reposts in New only (`dashboard.REPOST_FILTER_STATUSES`), and New's count leaves them out. LinkedIn's wording was not yet seen live (2 pages read 2026-11-01, neither a repost).
+- `postings.employment_type` is set at insert and again in `save_evaluation` (LinkedIn's criteria line comes with the page). Migration 0006 keeps a copy of `core/employment.py` and `core/reposts.requisition`, and a test compares them: a later rule change needs a new backfill migration, with 0006's samples narrowed to cases both agree on.
+- `repo.py` imports `typing.cast`; for an SQL cast use the column's `.cast(...)`.
 
 ## Verified API facts (2026-10-23, Workday and LinkedIn job pages 2026-10-24)
 
@@ -99,6 +102,7 @@ Confirmed by `JOBPULSE_LIVE=1 uv run pytest -m live` (15 passed) and read-only p
   - `isRemote` is also true for Hybrid jobs, so `workplaceType` decides.
   - Unknown slug → 404 plain text. OpenAI's board is 14 MB.
 - **All three:** they send ETags, and the live test confirms they answer `If-None-Match` with 304. No rate-limit headers were seen.
+- **Conditional requests (probe 2026-11-01):** Greenhouse, Ashby and Lever answer every unchanged poll's `If-None-Match` with 304. Ashby's API sits behind Cloudflare (`public, max-age=60, stale-while-revalidate=60`), Greenhouse behind CloudFront (`max-age=0, private, must-revalidate`, weak ETags). `HttpClient` replays a 304 as a 200 (`X-Jobpulse-Replayed`), so ATS runs never record `not_modified`; only Simplify's do.
 - **Simplify feed:** 13 MB (2 MB gzipped). httpx asks for gzip and gets a weak ETag, which answers `If-None-Match` with 304. 19,325 records, 3,075 open (`active && is_visible`); the 14 hidden ones are all inactive. 784 open listings are dated exactly midnight UTC.
 - **JobSpy 1.4.0:** failures and ignored options are in `frame.attrs["errors"/"warnings"]`, keyed by site; a board never raises, and a 429 reads `response status code 429 (blocked: use a proxy)`. LinkedIn rows never carry `job_url_direct`. `verbose=0` logs errors only, and with root logging configured JobSpy adds no handler of its own.
 - **Workday CXS** (NVIDIA, Salesforce, Workday, Intel, Microchip):

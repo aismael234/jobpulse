@@ -108,6 +108,8 @@ class PostingRow(Base):
     status: Mapped[str] = mapped_column(String(12), default="New", server_default="New")
     status_changed_at: Mapped[datetime | None]  # the last move between dashboard views
     years_required: Mapped[int | None]  # the most years of experience the description asks
+    employment_type: Mapped[str | None] = mapped_column(String(12))  # core.employment
+    repost_reason: Mapped[str | None] = mapped_column(Text)  # NULL: not a repost (core.reposts)
     notified_at: Mapped[datetime | None]
     merged_into_id: Mapped[int | None] = mapped_column(
         ForeignKey("postings.id", ondelete="SET NULL")

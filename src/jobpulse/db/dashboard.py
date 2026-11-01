@@ -26,6 +26,18 @@ BLOCKLIST_EXEMPT_STATUSES = frozenset({"Applied"})
 PAGE_SIZE = 50
 
 SortOrder = Literal["score", "fresh", "pushed", "moved"]
+ContractFilter = Literal["show", "hide", "only"]
+# Reposts are hidden by default where postings wait to be triaged; views of postings you
+# chose (Saved, Applied) and dismissed ones always show them.
+REPOST_FILTER_STATUSES = frozenset({"New"})
+# A posting is hidden when its known lower bound reaches the limit ("Over 200" is 200, "Be
+# among the first 25" is 0). Unknown counts always pass: only LinkedIn has them.
+MAX_APPLICANTS_CHOICES: tuple[int, ...] = (25, 50, 100, 200)
+CONTRACT_CHOICES: tuple[tuple[ContractFilter, str], ...] = (
+    ("show", "Contract or not"),
+    ("hide", "No contract work"),
+    ("only", "Contract only"),
+)
 MOVED_SORT_LABELS = {
     "Saved": "Recently saved",
     "Applied": "Recently applied",
@@ -91,15 +103,24 @@ class PostingQuery:
     min_pay: int | None = None  # thousands of US dollars a year, the top of the range
     pay_listed: bool = False  # only postings with pay in dollars
     experience: str | None = None  # an EXPERIENCE key
+    show_reposted: bool = False  # reposts are hidden from REPOST_FILTER_STATUSES otherwise
+    max_applicants: int | None = None  # one of MAX_APPLICANTS_CHOICES
+    contract: ContractFilter = "show"
     sort: SortOrder = "score"
     page: int = 1
     page_size: int = PAGE_SIZE
 
     @property
-    def more_filters(self) -> bool:
-        """A filter under "More filters" is set, so the form shows them open."""
+    def hides_reposts(self) -> bool:
+        return not self.show_reposted and self.status in REPOST_FILTER_STATUSES
+
+    @property
+    def filtered(self) -> bool:
         return bool(
-            self.company
+            self.text
+            or self.place
+            or self.pushed
+            or self.company
             or self.source
             or self.remote is not None
             or self.min_score is not None
@@ -107,11 +128,9 @@ class PostingQuery:
             or self.min_pay
             or self.pay_listed
             or self.experience
+            or self.max_applicants
+            or self.contract != "show"
         )
-
-    @property
-    def filtered(self) -> bool:
-        return self.more_filters or bool(self.text or self.place or self.pushed)
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,6 +157,10 @@ def _in_view(status: str, hidden: Collection[str]) -> list[ColumnElement[bool]]:
     if hidden and status not in BLOCKLIST_EXEMPT_STATUSES:
         conditions.append(PostingRow.company_name.not_in(sorted(hidden)))
     return conditions
+
+
+def _not_reposted(status: str) -> list[ColumnElement[bool]]:
+    return [PostingRow.repost_reason.is_(None)] if status in REPOST_FILTER_STATUSES else []
 
 
 def _contains(column: Any, text: str) -> ColumnElement[bool]:
@@ -208,6 +231,21 @@ def _conditions(
             conditions.append(PostingRow.years_required >= least)
         if most is not None:
             conditions.append(PostingRow.years_required <= most)
+    if query.hides_reposts:
+        conditions += _not_reposted(query.status)
+    if query.max_applicants in MAX_APPLICANTS_CHOICES:
+        conditions.append(
+            or_(
+                PostingRow.applicant_min.is_(None),
+                PostingRow.applicant_min < query.max_applicants,
+            )
+        )
+    if query.contract == "hide":
+        conditions.append(
+            or_(PostingRow.employment_type.is_(None), PostingRow.employment_type != "contract")
+        )
+    elif query.contract == "only":
+        conditions.append(PostingRow.employment_type == "contract")
     return conditions
 
 
@@ -324,10 +362,13 @@ def company_postings(session: Session, name: str) -> int:
 
 
 def view_counts(session: Session, *, hidden: Collection[str] = ()) -> dict[str, int]:
-    """How many postings each status view shows (with no other filter)."""
+    """How many postings each status view shows with its default filters (reposts hidden from
+    New)."""
     return {
         status: session.scalar(
-            select(func.count()).select_from(PostingRow).where(*_in_view(status, hidden))
+            select(func.count())
+            .select_from(PostingRow)
+            .where(*_in_view(status, hidden), *_not_reposted(status))
         )
         or 0
         for status in STATUSES

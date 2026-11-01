@@ -393,20 +393,6 @@ def test_pay_floor(web: Web) -> None:
     assert web.ids(pay="lots") == web.ids()
 
 
-def more_filters_open(page: str) -> bool:
-    found = re.search(r'<details class="more"[^>]*>', page)
-    assert found is not None, "no More filters"
-    return " open" in found.group(0)
-
-
-def test_more_filters_open_only_when_one_of_them_is_set(web: Web) -> None:
-    web.add()
-    assert not more_filters_open(web.page("/"))
-    assert not more_filters_open(web.page("/", place="US", pushed="6h", q="python"))
-    for params in ({"company": "Acme"}, {"pay": "100"}, {"open": "1"}, {"remote": "yes"}):
-        assert more_filters_open(web.page("/", **params)), params
-
-
 def test_an_llm_second_opinion_shows_with_its_reason(web: Web) -> None:
     """M4: the LLM layer's move on the score, and its reason on hover."""
     reason = "score 0.50 < 0.55; llm -0.09: mid, backend 20%, fit 20% (Mostly frontend.)"

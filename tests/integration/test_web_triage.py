@@ -33,7 +33,6 @@ def test_cards_show_the_years_asked_and_the_filter_reads_them(web: Web) -> None:
     assert web.ids(exp="6+") == [senior]
     assert web.ids(exp="unstated") == [unstated]
     assert web.ids(exp="lots") == [junior, mid, senior, unstated]
-    assert re.search(r'<details class="more" open>', web.page("/", exp="3-5"))
 
 
 # --- when a posting was moved -----------------------------------------------------------------

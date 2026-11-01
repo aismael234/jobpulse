@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Any, cast
 from urllib.parse import urlsplit
 
-from sqlalchemy import case, delete, func, or_, select, update
+from sqlalchemy import String, case, delete, func, or_, select, update
 from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
@@ -27,6 +27,7 @@ from jobpulse.core.dedupe import (
     posting_fingerprint,
 )
 from jobpulse.core.detection import PresencePlan, PresenceRow
+from jobpulse.core.employment import posting_employment_type
 from jobpulse.core.filters import Blocklist
 from jobpulse.core.models import (
     ATS_SOURCES,
@@ -45,6 +46,7 @@ from jobpulse.core.models import (
     Target,
     Tier,
 )
+from jobpulse.core.reposts import EarlierPosting, requisition
 from jobpulse.db.tables import (
     BlockedCompany,
     Company,
@@ -596,6 +598,7 @@ def insert_if_absent(
         "tier_reason": tier_reason,
         "also_seen_on": [],
         "raw": posting.raw,
+        "employment_type": posting_employment_type(posting),
     }
     statement = (
         _dialect_insert(session)(PostingRow)
@@ -853,9 +856,17 @@ def set_decision(session: Session, row_id: int, decision: Decision) -> None:
     session.execute(update(PostingRow).where(PostingRow.id == row_id).values(**values))
 
 
-def save_evaluation(session: Session, row_id: int, posting: Posting, decision: Decision) -> None:
+def save_evaluation(
+    session: Session,
+    row_id: int,
+    posting: Posting,
+    decision: Decision,
+    *,
+    repost_reason: str | None = None,
+) -> None:
     """Store what enrichment added and the final decision. A detail call can name places the
-    list didn't (Workday's "2 Locations"), so the fingerprint is taken again."""
+    list didn't (Workday's "2 Locations"), so the fingerprint is taken again, and LinkedIn's
+    page gives the employment type."""
     applicants = posting.applicants
     session.execute(
         update(PostingRow)
@@ -878,8 +889,31 @@ def save_evaluation(session: Session, row_id: int, posting: Posting, decision: D
             score=decision.score,
             score_breakdown=decision.breakdown,
             years_required=decision.years_required,
+            employment_type=posting_employment_type(posting),
+            repost_reason=repost_reason,
         )
     )
+
+
+def earlier_posting(
+    session: Session, row_id: int, posting: Posting, *, before: datetime
+) -> EarlierPosting | None:
+    """The earliest other posting of the same Greenhouse requisition on the same board first
+    seen no later than ``before``, open or closed, merged or not."""
+    req = requisition(posting.source, posting.raw)
+    if req is None:
+        return None
+    company_id = select(PostingRow.company_id).where(PostingRow.id == row_id).scalar_subquery()
+    first = session.scalar(
+        select(func.min(PostingRow.first_seen_at)).where(
+            PostingRow.company_id == company_id,
+            PostingRow.source == "greenhouse",
+            PostingRow.raw["internal_job_id"].as_string().cast(String) == req,
+            PostingRow.id != row_id,
+            PostingRow.first_seen_at <= before,
+        )
+    )
+    return EarlierPosting(first, requisition=req) if first is not None else None
 
 
 def pending_rows(

@@ -104,6 +104,32 @@ async def test_a_new_match_gets_its_page_read_and_its_applicants_scored(
     assert push.startswith("Northwind · Backend Engineer, Search · Seattle")
 
 
+async def test_linkedins_repost_marker_and_employment_type_are_stored(
+    env: Env, li: LinkedIn
+) -> None:
+    """M5.0: "Reposted 2 days ago" on the page makes the posting a repost; the criteria line
+    gives its employment type. It is still matched and pushed."""
+    await baseline(env, li)
+    page = PAGE_25.replace("3 hours ago", "Reposted 2 days ago")
+    page = re.sub(
+        r'(description__job-criteria-subheader">\s*Employment type\s*</h3>\s*<span[^>]*>)\s*Full-time',
+        r"\1 Contract",
+        page,
+    )
+    li.pages["4101100003"] = httpx.Response(200, html=page)
+    li.scrape.queue(
+        "linkedin",
+        jobspy_frame([linkedin("4101000001"), linkedin("4101100003", "Backend Engineer, Search")]),
+    )
+    await env.poll(sources=["linkedin"])
+
+    row = env.posting("linkedin", "4101100003")
+    assert row.repost_reason == "LinkedIn: Reposted 2 days ago"
+    assert row.employment_type == "contract"
+    assert row.tier == "instant"
+    assert len(env.pushed) == 1
+
+
 async def test_filtered_and_merged_postings_never_cost_a_page(
     env: Env, li: LinkedIn, gh: GreenhouseMock
 ) -> None:

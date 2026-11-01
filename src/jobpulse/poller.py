@@ -42,6 +42,7 @@ from jobpulse.core.models import (
     Precision,
     Target,
 )
+from jobpulse.core.reposts import REPOST_AFTER, repost_reason
 from jobpulse.core.scoring import priority_component
 from jobpulse.core.timeparse import utcnow
 from jobpulse.db import repo
@@ -230,7 +231,13 @@ class Poller:
             ]
             decisions = await self._review(unit, report, survivors, enriched, decisions)
             for survivor, posting, decision in zip(survivors, enriched, decisions, strict=True):
-                repo.save_evaluation(session, survivor.row_id, posting, decision)
+                repo.save_evaluation(
+                    session,
+                    survivor.row_id,
+                    posting,
+                    decision,
+                    repost_reason=self._repost_reason(session, survivor, posting),
+                )
                 self._tally(survivor, posting, decision)
             finished_at = self._clock()
             for target_report in report.targets:
@@ -788,6 +795,18 @@ class Poller:
         self._next_prune = now + timedelta(days=1)
 
     # --- helpers ------------------------------------------------------------------------
+
+    @staticmethod
+    def _repost_reason(session: Session, survivor: _Survivor, posting: Posting) -> str | None:
+        """LinkedIn's marker, else the same requisition first seen a week or more before."""
+        earlier = None
+        if posting.reposted is None:
+            earlier = repo.earlier_posting(
+                session, survivor.row_id, posting, before=survivor.first_seen_at - REPOST_AFTER
+            )
+        return repost_reason(
+            linkedin_marker=posting.reposted, earlier=earlier, first_seen_at=survivor.first_seen_at
+        )
 
     def _context(self, survivor: _Survivor) -> EvaluationContext:
         target = survivor.target

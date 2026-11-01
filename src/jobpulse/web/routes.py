@@ -33,12 +33,15 @@ from jobpulse.core.filters import Blocklist
 from jobpulse.core.places import parse_place_key
 from jobpulse.db import dashboard, repo
 from jobpulse.db.dashboard import (
+    CONTRACT_CHOICES,
     EXPERIENCE,
     EXPERIENCE_CHOICES,
+    MAX_APPLICANTS_CHOICES,
     MOVED_SORT_LABELS,
     PUSHED_CHOICES,
     PUSHED_WINDOWS,
     STATUSES,
+    ContractFilter,
     PostingQuery,
     SortOrder,
 )
@@ -67,6 +70,7 @@ SORTS: dict[str, SortOrder] = {
     "pushed": "pushed",
     "moved": "moved",
 }
+CONTRACTS: dict[str, ContractFilter] = {value: value for value, _ in CONTRACT_CHOICES}
 ADDABLE_ATS = ("greenhouse", "lever", "ashby", "workday")
 ATS_NAMES = {"greenhouse": "Greenhouse", "lever": "Lever", "ashby": "Ashby", "workday": "Workday"}
 MAX_PRIORITY = 1000
@@ -104,6 +108,8 @@ def parse_query(params: Mapping[str, str]) -> PostingQuery:
         page = 1
     pushed = (params.get("pushed") or "").strip()
     experience = (params.get("exp") or "").strip()
+    max_applicants = _thousands(params.get("max_applicants"))
+    contract = CONTRACTS.get((params.get("contract") or "").strip().lower(), "show")
     sort = SORTS.get(params.get("sort") or "", "score")
     if sort == "moved" and status not in MOVED_SORT_LABELS:
         sort = "score"  # nothing is moved into New to sort by
@@ -120,6 +126,9 @@ def parse_query(params: Mapping[str, str]) -> PostingQuery:
         min_pay=_thousands(params.get("pay")),
         pay_listed=_checked(params.get("pay_listed")),
         experience=experience if experience in EXPERIENCE else None,
+        show_reposted=(params.get("reposted") or "").strip().lower() == "show",
+        max_applicants=max_applicants if max_applicants in MAX_APPLICANTS_CHOICES else None,
+        contract=contract,
         sort=sort,
         page=page,
     )
@@ -209,6 +218,8 @@ def postings_page(request: Request) -> HTMLResponse:
                 "sources": KNOWN_SOURCES,
                 "pushed_choices": PUSHED_CHOICES,
                 "experience_choices": EXPERIENCE_CHOICES,
+                "max_applicants_choices": MAX_APPLICANTS_CHOICES,
+                "contract_choices": CONTRACT_CHOICES,
                 "moved_sort": MOVED_SORT_LABELS.get(query.status),
                 "bulk_views": BULK_VIEWS,
                 "link": link,

@@ -54,6 +54,7 @@ class Posting:
     compensation: dict[str, Any] | None = None
     raw: dict[str, Any] = field(default_factory=dict)
     applicants: ApplicantCount | None = None  # LinkedIn's applicant line, from its job page
+    reposted: str | None = None  # LinkedIn's "Reposted 3 hours ago", from its job page
 
     def __post_init__(self) -> None:
         if not self.external_id:

@@ -1,4 +1,5 @@
 {% set labels = {"New": "Back to New", "Saved": "Save", "Applied": "Applied", "Dismissed": "Dismiss"} %}
+{% set kinds = {"contract": "Contract", "part_time": "Part-time", "internship": "Internship"} %}
 <article class="posting{% if row.closed_at %} closed{% endif %}" id="posting-{{ row.id }}" data-company="{{ row.company_name|company_key }}">
   <div class="score {{ row.tier }}" title="{{ row.score_breakdown|breakdown or row.tier_reason }}">{{ row.score|score }}</div>
   <div class="body">
@@ -15,6 +16,8 @@
     </p>
     <div class="details">
       <span class="badge source">{{ row.source }}</span>
+      {% if row.repost_reason %}<span class="badge warn" title="{{ row.repost_reason }}">Reposted</span>{% endif %}
+      {% if row.employment_type in kinds %}<span class="badge warn">{{ kinds[row.employment_type] }}</span>{% endif %}
       {% for seen in row.also_seen_on or [] %}
       {% set seen_href = seen.url|http_url %}
       {% if seen_href %}<a class="badge also" href="{{ seen_href }}" target="_blank" rel="noopener noreferrer">also on {{ seen.source }}</a>{% else %}<span class="badge also">also on {{ seen.source }}</span>{% endif %}

@@ -1,6 +1,7 @@
 import importlib.util
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 
 import pytest
 from alembic import command
@@ -11,7 +12,9 @@ from sqlalchemy import create_engine, inspect, text
 from typer.testing import CliRunner
 
 from jobpulse.cli import app
+from jobpulse.core.employment import employment_type
 from jobpulse.core.filters import extract_years_required
+from jobpulse.core.reposts import requisition
 from jobpulse.db.tables import Base
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -123,9 +126,9 @@ YEARS_SAMPLES = (
 )
 
 
-def _migration_0005() -> ModuleType:
-    path = next((REPO_ROOT / "migrations" / "versions").glob("0005_*.py"))
-    spec = importlib.util.spec_from_file_location("migration_0005", path)
+def _migration(revision: str) -> ModuleType:
+    path = next((REPO_ROOT / "migrations" / "versions").glob(f"{revision}_*.py"))
+    spec = importlib.util.spec_from_file_location(f"migration_{revision}", path)
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -137,7 +140,7 @@ def _migration_0005() -> ModuleType:
 def test_0005_reads_years_like_the_filters_do(text_: str | None) -> None:
     """The migration keeps its own copy of the extraction (migrations never import
     application code); it must agree with core."""
-    assert _migration_0005().years_required(text_) == extract_years_required(text_)
+    assert _migration("0005").years_required(text_) == extract_years_required(text_)
 
 
 def test_0005_backfills_years_and_adds_status_times_and_blocks(db_url: str) -> None:
@@ -187,6 +190,121 @@ def test_0005_backfills_years_and_adds_status_times_and_blocks(db_url: str) -> N
     columns = {c["name"] for c in inspect(engine).get_columns("postings")}
     assert not {"years_required", "status_changed_at"} & columns
     assert "blocked_companies" not in inspect(engine).get_table_names()
+
+
+EMPLOYMENT_SAMPLES: tuple[tuple[str, dict[str, Any], str, str | None], ...] = (
+    ("ashby", {"employmentType": "Contract"}, "Backend Engineer", None),
+    ("ashby", {"employmentType": "Intern"}, "Backend Engineer", None),
+    ("ashby", {"employmentType": "FullTime"}, "Backend Engineer", "A contract role."),
+    ("lever", {"categories": {"commitment": "Temporary/Contract"}}, "Backend Engineer", None),
+    ("lever", {"categories": {"commitment": "International EOR"}}, "Engineer (Contract)", None),
+    ("lever", {"categories": None}, "Backend Engineer", None),
+    ("indeed", {"job_type": "parttime, fulltime"}, "Backend Engineer", None),
+    ("indeed", {"job_type": "fulltime, contract"}, "Backend Engineer", None),
+    ("workday", {"timeType": "Part time"}, "Backend Engineer", None),
+    (
+        "greenhouse",
+        {"metadata": [{"name": "Regular or Temporary", "value": "Temporary"}]},
+        "Backend Engineer",
+        None,
+    ),
+    ("greenhouse", {"metadata": [{"name": "Employment Type", "value": ["Intern"]}]}, "SWE", None),
+    ("greenhouse", {"metadata": "odd"}, "Backend Engineer", None),
+    ("linkedin", {}, "Backend Engineer", "Build.\nEmployment type: Contract\nIndustries: IT"),
+    ("simplify", {}, "Software Engineer Intern", None),
+    ("simplify", {}, "Smart Contract Engineer", "Write smart contracts."),
+    ("simplify", {}, "Contract Analyst", None),
+    ("simplify", {}, "Contract Software Engineer", None),
+    ("simplify", {}, "Backend Engineer", "This is a 6-month contract."),
+    ("simplify", {}, "Backend Engineer", "Open to C2C or 1099 contractors."),
+    ("simplify", {}, "Backend Engineer", None),
+)
+
+
+@pytest.mark.parametrize(("source", "raw", "title", "description"), EMPLOYMENT_SAMPLES)
+def test_0006_reads_employment_like_core(
+    source: str, raw: dict[str, Any], title: str, description: str | None
+) -> None:
+    migration = _migration("0006")
+    assert migration.employment_type(source, raw, title, description) == employment_type(
+        source, raw, title, description
+    )
+    assert migration.requisition(source, raw) == requisition(source, raw)
+    assert migration.requisition("greenhouse", {"internal_job_id": 77}) == requisition(
+        "greenhouse", {"internal_job_id": 77}
+    )
+
+
+def test_0006_backfills_employment_and_reposts_in_place(db_url: str) -> None:
+    config = alembic_config(db_url)
+    command.upgrade(config, "0005")
+    engine = create_engine(db_url)
+    insert = text(
+        "INSERT INTO postings (id, source, external_id, company_id, company_name, title, "
+        "locations, canonical_url, fingerprint, url, first_seen_at, last_seen_at, also_seen_on, "
+        "raw, tier, status) VALUES (:id, :source, :id, :company, 'Acme', 'Backend Engineer', "
+        "'[]', :id, :fingerprint, 'https://example.com', :seen, :seen, '[]', :raw, :tier, "
+        ":status)"
+    )
+    rows = [
+        # id, source, company, fingerprint, raw, first seen (October), tier, status
+        (1, "ashby", None, "a", '{"employmentType": "Contract"}', 1, "instant", "New"),
+        (2, "greenhouse", 1, "b", '{"internal_job_id": 77}', 1, "baseline", "New"),
+        (3, "greenhouse", 1, "c", '{"internal_job_id": 77}', 12, "instant", "New"),
+        (4, "lever", None, "fp", "{}", 1, "baseline", "New"),
+        (5, "lever", None, "fp", "{}", 5, "instant", "New"),
+        (6, "lever", None, "fp", "{}", 20, "filtered", "Applied"),
+        (7, "lever", None, "fp", "{}", 25, "baseline", "New"),
+    ]
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO companies (id, name, ats_type, token, created_at, updated_at) "
+                "VALUES (1, 'Acme', 'greenhouse', 'acme', :at, :at)"
+            ),
+            {"at": "2026-10-01 00:00:00.000000"},
+        )
+        for row_id, source, company, fingerprint, raw, day, tier, status in rows:
+            connection.execute(
+                insert,
+                {
+                    "id": row_id,
+                    "source": source,
+                    "company": company,
+                    "fingerprint": fingerprint,
+                    "raw": raw,
+                    "seen": f"2026-10-{day:02d} 08:00:00.000000",
+                    "tier": tier,
+                    "status": status,
+                },
+            )
+        connection.execute(
+            text(
+                "INSERT INTO llm_assessments (posting_id, input_hash, model, created_at) "
+                "VALUES (3, 'h', 'm', '2026-10-12 08:00:00.000000')"
+            )
+        )
+
+    command.upgrade(config, "0006")
+
+    with engine.connect() as connection:
+        found = connection.execute(
+            text("SELECT id, employment_type, repost_reason FROM postings ORDER BY id")
+        ).all()
+        assert [tuple(row) for row in found] == [
+            (1, "contract", None),
+            (2, "full_time", None),
+            (3, "full_time", "first seen 11 days ago (requisition 77)"),
+            (4, "full_time", None),
+            (5, "full_time", None),  # 4 days after the first: not a repost
+            (6, "full_time", None),  # the same title and place alone is not a repost
+            (7, "full_time", None),  # a baseline row never shows, so it isn't marked
+        ]
+        assert connection.execute(text("SELECT count(*) FROM llm_assessments")).scalar() == 1
+
+    command.downgrade(config, "0005")
+    columns = {c["name"] for c in inspect(engine).get_columns("postings")}
+    assert not {"employment_type", "repost_reason"} & columns
 
 
 def test_cli_db_upgrade_uses_database_url(tmp_path: Path, db_url: str) -> None:

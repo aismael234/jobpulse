@@ -1,5 +1,5 @@
 """LinkedIn's public job page (no login, no cookies): the description and the applicant line
-of a LinkedIn posting, from one request.
+of a LinkedIn posting, and whether LinkedIn marks it reposted, from one request.
 
 ``GET https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/{id}`` answers with an HTML
 fragment. The applicant line ("Be among the first 25 applicants", "87 applicants", "Over 200
@@ -26,6 +26,7 @@ import httpx
 
 from jobpulse.core.applicants import ApplicantCount, parse_applicants
 from jobpulse.core.models import FetchResult, Posting, Target
+from jobpulse.core.reposts import linkedin_repost
 from jobpulse.core.text import html_to_text, texts_by_class
 from jobpulse.httpclient import HttpClient
 from jobpulse.sources.base import EnrichmentDeferred, SourceAdapter
@@ -44,16 +45,19 @@ _SIGN_IN_PATHS = ("/authwall", "/login", "/uas/", "/checkpoint", "/signup")
 _DESCRIPTION_CLASS = "show-more-less-html__markup"
 _CRITERIA_HEADER_CLASS = "description__job-criteria-subheader"
 _CRITERIA_TEXT_CLASS = "description__job-criteria-text"
+_POSTED_CLASS = "posted-time-ago__text"
 
 
 @dataclass(frozen=True, slots=True)
 class JobPage:
     description: str | None = None
     applicants: ApplicantCount | None = None
+    reposted: str | None = None  # "Reposted 3 hours ago"; None for a first posting
 
 
 def parse_job_page(page: str) -> JobPage:
-    """The description (with the criteria list) and the applicant line of a job page."""
+    """The description (with the criteria list), the applicant line and the repost marker of
+    a job page."""
     body = next((text for text in texts_by_class(page, _DESCRIPTION_CLASS) if text), None)
     criteria = [
         f"{header}: {value}"
@@ -65,7 +69,8 @@ def parse_job_page(page: str) -> JobPage:
         if header and value
     ]
     description = "\n".join(part for part in (body, *criteria) if part) or None
-    return JobPage(description, parse_applicants(html_to_text(page)))
+    posted = next((text for text in texts_by_class(page, _POSTED_CLASS) if text), None)
+    return JobPage(description, parse_applicants(html_to_text(page)), linkedin_repost(posted))
 
 
 class LinkedInJobPages:
@@ -105,6 +110,7 @@ class LinkedInJobPages:
             posting,
             description_text=page.description or posting.description_text,
             applicants=page.applicants or posting.applicants,
+            reposted=page.reposted,
         )
 
     def _can_read(self) -> bool:

@@ -38,6 +38,9 @@ _QUERY_PARAMS = {
     "min_pay": "pay",
     "pay_listed": "pay_listed",
     "experience": "exp",
+    "show_reposted": "reposted",
+    "max_applicants": "max_applicants",
+    "contract": "contract",
     "sort": "sort",
     "page": "page",
 }
@@ -117,6 +120,8 @@ def link(query: PostingQuery, **changes: Any) -> str:
             value = "yes" if value else "no"
         elif item.name in ("open_only", "pay_listed"):
             value = "1"
+        elif item.name == "show_reposted":
+            value = "show"
         params.append((name, str(value)))
     return "/?" + urlencode(params) if params else "/"
 
