@@ -1,0 +1,36 @@
+<input type="text" name="company" value="{{ query.company }}" placeholder="Company" aria-label="Company">
+<select name="source" aria-label="Source">
+  <option value="">Any source</option>
+  {% for source in sources %}
+  <option value="{{ source }}"{% if query.source == source %} selected{% endif %}>{{ source }}</option>
+  {% endfor %}
+</select>
+<select name="remote" aria-label="Remote">
+  <option value="">Remote or not</option>
+  <option value="yes"{% if query.remote is sameas true %} selected{% endif %}>Remote</option>
+  <option value="no"{% if query.remote is sameas false %} selected{% endif %}>Not remote</option>
+</select>
+<select name="exp" aria-label="Years of experience asked">
+  <option value="">Any experience</option>
+  {% for value, label in experience_choices %}
+  <option value="{{ value }}"{% if query.experience == value %} selected{% endif %}>{{ label }}</option>
+  {% endfor %}
+</select>
+<select name="max_applicants" aria-label="Applicants" title="LinkedIn's applicant count; postings without one always show">
+  <option value="">Any applicants</option>
+  {% for limit in max_applicants_choices %}
+  <option value="{{ limit }}"{% if query.max_applicants == limit %} selected{% endif %}>Under {{ limit }} applicants</option>
+  {% endfor %}
+</select>
+<select name="contract" aria-label="Contract work">
+  {% for value, label in contract_choices %}
+  <option value="{{ value }}"{% if query.contract == value %} selected{% endif %}>{{ label }}</option>
+  {% endfor %}
+</select>
+<label class="pay-floor">Pay at least $<input type="number" name="pay" value="{{ query.min_pay }}" min="1" step="5" placeholder="any" aria-label="Pay at least, in thousands of dollars a year">k/yr</label>
+<label class="check"><input type="checkbox" name="pay_listed" value="1"{% if query.pay_listed %} checked{% endif %}> Pay listed</label>
+<input type="number" name="min_score" value="{{ query.min_score }}" min="0" max="2" step="0.05" placeholder="Min score" aria-label="Minimum score">
+<label class="check"><input type="checkbox" name="open" value="1"{% if query.open_only %} checked{% endif %}> Open only</label>
+{% if reposted_box %}
+<label class="check" title="Jobs LinkedIn marks reposted, or that jobpulse first saw a week or more earlier"><input type="checkbox" name="reposted" value="show"{% if query.show_reposted %} checked{% endif %}> Include reposted</label>
+{% endif %}

@@ -140,7 +140,8 @@ class CsrfCookieMiddleware:
 
 class SecurityHeadersMiddleware:
     """CSP and hardening headers on every response; ``no-store`` on everything but static
-    files, so a shared or remote browser keeps no copy of your job list."""
+    files, so a shared or remote browser keeps no copy of your job list. Static files are
+    ``no-cache``: revalidated by ETag on each load, so a changed app.js is never stale."""
 
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
@@ -156,8 +157,7 @@ class SecurityHeadersMiddleware:
                 headers = MutableHeaders(scope=message)
                 for name, value in SECURITY_HEADERS.items():
                     headers[name] = value
-                if not static:
-                    headers["cache-control"] = "no-store"
+                headers["cache-control"] = "no-cache" if static else "no-store"
             await send(message)
 
         await self.app(scope, receive, send_with_headers)

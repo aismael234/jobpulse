@@ -167,6 +167,12 @@ def test_every_post_route_checks_the_token(web: Web) -> None:
         "/companies/unblock",
         "/postings/bulk-status",
         "/postings/{posting_id}/status",
+        "/saved-filters/{filter_id}/viewed",
+        "/settings/color-blind",
+        "/settings/filters",
+        "/settings/filters/{filter_id}",
+        "/settings/filters/{filter_id}/active",
+        "/settings/filters/{filter_id}/delete",
         "/watchlist/add",
         "/watchlist/detect",
         "/watchlist/{company_id}/active",
@@ -199,6 +205,8 @@ def test_pages_carry_security_headers(web: Web) -> None:
     script = web.client.get("/static/htmx.min.js")
     assert script.headers["x-content-type-options"] == "nosniff"
     assert "javascript" in script.headers["content-type"]
+    # revalidated on every load (a 304 when unchanged), so an upgraded app.js is never stale
+    assert script.headers["cache-control"] == "no-cache"
 
 
 def test_there_are_no_api_docs(web: Web) -> None:

@@ -134,3 +134,55 @@ def batch_notification(
         priority=priority,
         tags=tuple(tags),
     )
+
+
+def posting_notification(
+    content: PushContent,
+    *,
+    bullets: str,
+    now: datetime,
+    priority: int = 4,
+    tags: Sequence[str] = ("briefcase",),
+    short_labels: Mapping[str, str] = DEFAULT_SHORT_LABELS,
+) -> Notification:
+    """One posting's push while saved filters exist: "🟢🟣 Stripe · Backend Engineer · SF ·
+    0.87", one bullet per saved filter it fits. Tapping it opens the posting."""
+    parts = [content.company, content.title] if content.company else [content.title]
+    where = location_summary(content.locations, short_labels=short_labels)
+    if where:
+        parts.append(where)
+    if content.score is not None:
+        parts.append(f"{content.score:.2f}")
+    places = "; ".join(content.locations) or "location not given"
+    lines = [
+        content.title,
+        f"{content.company}{SEPARATOR}{places}" if content.company else places,
+        when_label(content.posted_at, content.precision, content.first_seen_at, now),
+    ]
+    if content.score is not None:
+        detail = breakdown_text(content.breakdown)
+        lines.append(
+            f"{content.source}{SEPARATOR}score {content.score:.2f}"
+            + (f" ({detail})" if detail else "")
+        )
+    return Notification(
+        title=f"{bullets} {SEPARATOR.join(parts)}",
+        body="\n".join(lines),
+        click_url=content.click_url,
+        priority=priority,
+        tags=tuple(dict.fromkeys((*tags, content.source))),
+    )
+
+
+def saved_filter_summary(
+    counts: Sequence[tuple[str, int]],
+    *,
+    total: int,
+    priority: int = 4,
+    tags: Sequence[str] = ("briefcase",),
+) -> Notification:
+    """The matches past a cycle's cap, in one message: "+7 more matching your saved filters:
+    🟢 4 · 🟣 3" (a posting that fits two filters counts in both)."""
+    title = f"+{total} more matching your saved filters"
+    detail = SEPARATOR.join(f"{bullet} {count}" for bullet, count in counts)
+    return Notification(title=title, body=f"{title}: {detail}", priority=priority, tags=tuple(tags))

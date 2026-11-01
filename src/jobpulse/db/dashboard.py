@@ -267,14 +267,30 @@ def _matches(
     now: datetime,
     hidden: Collection[str],
     as_of: datetime | None = None,
+    within: Collection[int] | None = None,
+    decided_since: datetime | None = None,
+    seen_since: datetime | None = None,
 ) -> tuple[list[int], tuple[PlaceGroup, ...]]:
     """The ids of every posting the query shows, in order, and the location options. The SQL
     filters run in the database; pay and location are read in Python (pay comes in several
     shapes, places from the label tables) over the ids and labels the SQL filters leave.
 
     With ``as_of``, only postings that were in the view by then: pushed (or first seen) and
-    last moved no later."""
+    last moved no later. ``within`` keeps to those ids (a page's cards, a cycle's matches);
+    ``decided_since`` to postings decided (or first seen, if never decided) then or later;
+    ``seen_since`` to postings first seen after it (a saved filter's badge)."""
     conditions = _conditions(query, hidden, now)
+    if within is not None:
+        if not within:
+            return [], ()
+        conditions.append(PostingRow.id.in_(sorted(within)))
+    if decided_since is not None:
+        decided = func.coalesce(
+            PostingRow.decided_at, PostingRow.first_seen_at, type_=UTCDateTime()
+        )
+        conditions.append(decided >= decided_since)
+    if seen_since is not None:
+        conditions.append(PostingRow.first_seen_at > seen_since)
     if as_of is not None:
         conditions += [
             pushed_at() <= as_of,
@@ -302,9 +318,28 @@ def matching_ids(
     now: datetime,
     hidden: Collection[str] = (),
     as_of: datetime | None = None,
+    within: Collection[int] | None = None,
+    decided_since: datetime | None = None,
+    seen_since: datetime | None = None,
 ) -> list[int]:
-    """Every posting the query shows, on any page (bulk moves, CSV export)."""
-    return _matches(session, query, now=now, hidden=hidden, as_of=as_of)[0]
+    """Every posting the query shows, on any page (bulk moves, CSV export, saved filters)."""
+    return _matches(
+        session,
+        query,
+        now=now,
+        hidden=hidden,
+        as_of=as_of,
+        within=within,
+        decided_since=decided_since,
+        seen_since=seen_since,
+    )[0]
+
+
+def place_choices(
+    session: Session, *, now: datetime, hidden: Collection[str] = ()
+) -> tuple[PlaceGroup, ...]:
+    """The location options of the New view, for forms outside the postings page."""
+    return _matches(session, PostingQuery(show_reposted=True), now=now, hidden=hidden)[1]
 
 
 def load_postings(session: Session, ids: Sequence[int]) -> list[PostingRow]:

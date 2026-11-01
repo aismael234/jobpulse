@@ -110,6 +110,7 @@ class PostingRow(Base):
     years_required: Mapped[int | None]  # the most years of experience the description asks
     employment_type: Mapped[str | None] = mapped_column(String(12))  # core.employment
     repost_reason: Mapped[str | None] = mapped_column(Text)  # NULL: not a repost (core.reposts)
+    decided_at: Mapped[datetime | None]  # when the cycle decided it (saved filters fire after)
     notified_at: Mapped[datetime | None]
     merged_into_id: Mapped[int | None] = mapped_column(
         ForeignKey("postings.id", ondelete="SET NULL")
@@ -206,3 +207,45 @@ class LlmAssessment(Base):
     error: Mapped[str | None] = mapped_column(Text)
     input_tokens: Mapped[int] = mapped_column(default=0, server_default="0")
     output_tokens: Mapped[int] = mapped_column(default=0, server_default="0")
+
+
+class SavedFilter(Base):
+    """A labeled set of dashboard filters (M5.1). While any exist, only new matches that fit an
+    active one are pushed, one message each. ``params`` holds every filter written out, read
+    through ``db.query_params``; ``fires_from`` moves on save, edit and switch-on, so a filter
+    never fires for postings decided before it."""
+
+    __tablename__ = "saved_filters"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    label: Mapped[str] = mapped_column(Text)
+    slot: Mapped[int] = mapped_column(unique=True)  # its color, core.palette
+    params: Mapped[dict[str, Any]] = mapped_column(JSONType)
+    active: Mapped[bool] = mapped_column(default=True, server_default=true())
+    position: Mapped[int] = mapped_column(default=0, server_default="0")
+    fires_from: Mapped[datetime]
+    created_at: Mapped[datetime]
+    updated_at: Mapped[datetime]
+    last_viewed_at: Mapped[datetime | None]  # the dashboard badge counts matches since
+
+
+class FilterPush(Base):
+    """A posting pushed on its own for one saved filter it fit (the daily cap counts these)."""
+
+    __tablename__ = "filter_pushes"
+    __table_args__ = (UniqueConstraint("posting_id", "filter_id"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    posting_id: Mapped[int] = mapped_column(ForeignKey("postings.id", ondelete="CASCADE"))
+    filter_id: Mapped[int] = mapped_column(ForeignKey("saved_filters.id", ondelete="CASCADE"))
+    sent_at: Mapped[datetime] = mapped_column(index=True)
+
+
+class Preference(Base):
+    """A dashboard preference kept in the database (``color_blind``)."""
+
+    __tablename__ = "preferences"
+
+    name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[Any] = mapped_column(JSONType)
+    updated_at: Mapped[datetime]

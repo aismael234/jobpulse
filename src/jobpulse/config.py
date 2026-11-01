@@ -310,10 +310,20 @@ class DiscordConfig(_Model):
     username: str = "jobpulse"
 
 
+class SavedFilterPushes(_Model):
+    """Limits on one-message-per-posting pushes, which start once a saved filter exists.
+    ntfy.sh allows a burst of 60, then one request per 5 s, and 250 messages a day."""
+
+    max_per_cycle: int = Field(default=10, ge=1, le=60)
+    max_per_day: int = Field(default=200, ge=1)
+    spacing_seconds: float = Field(default=5.0, ge=0)
+
+
 class NotifyConfig(_Model):
     channels: list[NotifyChannel] = ["ntfy"]
     ntfy: NtfyConfig = NtfyConfig()
     discord: DiscordConfig = DiscordConfig()
+    saved_filters: SavedFilterPushes = SavedFilterPushes()
 
 
 class WatchlistEntry(_Model):

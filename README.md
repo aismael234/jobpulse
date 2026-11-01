@@ -92,7 +92,9 @@ python3 -c "import secrets; print('jobpulse-' + secrets.token_urlsafe(24))"
 2. Install the ntfy app, tap **+**, and subscribe to that exact topic on `https://ntfy.sh`.
 3. Run `uv run jobpulse notify test` (or `docker compose run --rm worker jobpulse notify test`).
 
-Each scheduled job (watchlist, Simplify, job boards) sends one push per run for all its new matches, such as `3 new job postings were found via watchlist. Top score: Stripe - 0.87`; tapping it opens the top posting's apply page, and the dashboard has them all. Every match counts, with no per-cycle cap. A failed push is retried by the same job's next run while its postings are still fresh, open and untriaged. `poll --once` and the worker log list each match's title line, like `Stripe · Backend Engineer · SF / Remote · posted 25 min ago`.
+Each scheduled job (watchlist, Simplify, job boards) sends one push per run for all its new matches, such as `3 new job postings were found via watchlist. Top score: Stripe - 0.87`; tapping it opens the top posting's apply page, and the dashboard has them all. Every match counts, with no per-cycle cap. That changes once you save a filter (below). A failed push is retried by the same job's next run while its postings are still fresh, open and untriaged. `poll --once` and the worker log list each match's title line, like `Stripe · Backend Engineer · SF / Remote · posted 25 min ago`.
+
+**Saved filters narrow pushes.** Once at least one saved filter exists (Settings), only new matches that fit an active one are pushed, one message each: `🟢🟣 Stripe · Backend Engineer · SF / Remote · 0.87`, a colored bullet per saved filter it fits. Tapping it opens the posting. Within a run, messages go out fewest bullets first (then lowest score), so the posting that fits the most lands last, on top of your list. To stay under ntfy.sh's limits they are sent 5 s apart, at most 10 per run and 200 a day (`notify.saved_filters`); the rest of a run go out first as one summary, `+7 more matching your saved filters: 🟢 4 · 🟣 3`. A filter fires only for postings decided after you save it, change its filters or turn it on. Matches that fit no filter still land in New. Turning every filter off means no pushes at all; deleting them all brings back one push per run. Health alerts are never affected.
 
 **Self-hosting ntfy:** set `notify.ntfy.base_url` to your server, and `NTFY_TOKEN` in `.env` if it uses access control. Subscribe the app to your server instead of ntfy.sh.
 
@@ -117,6 +119,7 @@ Each scheduled job (watchlist, Simplify, job boards) sends one push per run for 
 - **Health:** per board, search and feed: last run, last success, failures in a row, the last 24 h of runs, fetched and new postings, the last error, and open incidents.
 - **Watchlist:** every company with its priority, status, origin and baseline. Paste a careers URL to add a board (see below); a Workday board gets a keywords field. Priority and pause apply to companies that didn't come from `config.yaml`.
 - A posting the LLM layer assessed shows "LLM +0.12" (or minus); hover for its verdict.
+- **Saved filters:** "Save these filters" (next to Clear) opens Settings with the current filters filled in; give them a label and one of 8 colors. Each saved filter gets a button above the filters that applies it, with a badge counting its open, untriaged matches first seen since you last clicked it, and cards show the bullets of the filters they fit. Settings lists them with an on/off switch, edit and delete, says which push mode is on, and flags a filter that no longer reads back after an upgrade (it is skipped, never widened). **Color-blind mode** switches to Okabe–Ito-based colors and adds a shape per filter (● ■ ▲ ◆ ★ ✚ ▼ ⬢), on the dashboard and in pushes.
 
 Companies on your blocklist (config.yaml's or the dashboard's) are hidden everywhere except Applied.
 
@@ -185,7 +188,7 @@ Cost guards: at most `llm.max_calls_per_day` (25) calls in any 24 hours, failed 
 | `detection` | `freshness_hours` (48), closure after missing polls (2), fingerprint window (30 days). |
 | `filters` | Title include/exclude regexes, level words, years of experience, stack keywords, location rules and aliases. `filters.locations.countries` (for example `[US]`) keeps only postings with a location in those countries; "Remote (Global)" counts everywhere, and "Remote (EMEA)" only in EMEA. |
 | `scoring` | Score weights (including `applicants` and `llm`), `priority_cap`, `applicant_cap`, `instant_threshold` (the center of the LLM's band). |
-| `notify` | `channels`, ntfy server, priority and tags. |
+| `notify` | `channels`, ntfy server, priority and tags; `saved_filters` limits one-message-per-posting pushes (`max_per_cycle` 10, `max_per_day` 200, `spacing_seconds` 5). |
 | `watchlist` | Companies on Greenhouse, Lever, Ashby and Workday (with `keywords`). |
 | `searches` | Indeed and LinkedIn searches through JobSpy. |
 | `linkedin` | Pause between LinkedIn requests, the cool-down after a 429, and the job pages (`job_pages`, `max_job_pages_per_hour`, and `job_page_wait_hours`: how long a match whose page couldn't be read waits for a later cycle). |

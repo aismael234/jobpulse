@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+{% block title %}Settings · jobpulse{% endblock %}
+{% block content %}
+<h1>Settings</h1>
+
+<section class="settings-block">
+  <h2>Saved filters</h2>
+  {% set active_count = filters|selectattr("row.active")|list|length %}
+  <p class="notice mode">
+    {% if not filters %}No saved filters: every match is pushed, one message per cycle.
+    {% elif not active_count %}Every saved filter is off: nothing is pushed. Delete them all to go back to one message per cycle.
+    {% else %}Only matches that fit an active saved filter are pushed, one message each. Matches that fit none still land in New.
+    {% endif %}
+  </p>
+  {% if filters %}
+  <ul class="saved-list">
+    {% for saved in filters %}
+    <li{% if not saved.row.active %} class="paused"{% endif %}>
+      <span class="name">{% with slot = saved.row.slot, label = saved.row.label %}{% include "_bullet.html" %}{% endwith %} {{ saved.row.label }}</span>
+      {% if saved.query is none %}
+      <span class="badge bad" title="{{ saved.error }}">no longer valid</span>
+      <span class="hint">{{ saved.error }}: skipped until you save it again.</span>
+      {% else %}
+      <span class="hint">{{ summaries[saved.row.id] }}</span>
+      {% endif %}
+      <span class="controls">
+        <form method="post" action="/settings/filters/{{ saved.row.id }}/active">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="active" value="{{ "0" if saved.row.active else "1" }}">
+          <button type="submit" class="link">{{ "Turn off" if saved.row.active else "Turn on" }}</button>
+        </form>
+        <a href="/settings?edit={{ saved.row.id }}">Edit</a>
+        <form method="post" action="/settings/filters/{{ saved.row.id }}/delete" hx-post="/settings/filters/{{ saved.row.id }}/delete" hx-confirm="Delete {{ saved.row.label }}?">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="link status-dismissed">Delete</button>
+        </form>
+      </span>
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</section>
+
+<section class="settings-block">
+  <h2>{% if editing %}Edit {{ editing.label }}{% else %}New saved filter{% endif %}</h2>
+  {% if error %}<p class="notice error">{{ error }}</p>{% endif %}
+  {% if full %}
+  <p class="hint">You have {{ max_filters }} saved filters, one per color. Delete one to add another.</p>
+  {% else %}
+  <form class="filters saved-form" method="post" action="{% if editing %}/settings/filters/{{ editing.id }}{% else %}/settings/filters{% endif %}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="row">
+      <input type="text" name="label" value="{{ label }}" placeholder="Label, e.g. Austin backend" aria-label="Label" maxlength="60" required>
+      <fieldset class="colors">
+        <legend>Color</legend>
+        {% for swatch in swatches %}
+        {% set index = loop.index0 %}
+        {% if index in free_slots %}
+        <label class="color-choice"><input type="radio" name="slot" value="{{ index }}"{% if slot == index %} checked{% endif %}>{% with label = swatch.name %}{% with slot = index %}{% include "_bullet.html" %}{% endwith %}{% endwith %}</label>
+        {% endif %}
+        {% endfor %}
+      </fieldset>
+    </div>
+    <div class="row">
+      <input type="search" name="q" value="{{ query.text }}" placeholder="Search title, company, description" aria-label="Search">
+      {% include "_place_select.html" %}
+    </div>
+    <div class="row">
+      {% include "_filter_fields.html" %}
+    </div>
+    <div class="row">
+      <button type="submit">{% if editing %}Save changes{% else %}Save filter{% endif %}</button>
+      {% if editing %}<a class="reset" href="/settings">Cancel</a>{% endif %}
+    </div>
+    <p class="hint">A saved filter is pushed only for postings decided after you save it, change its filters or turn it on, so nothing already waiting fires at once. Each push names the filters it fits by their colors; at most {{ per_cycle }} go out on their own per cycle, the rest in one summary.</p>
+  </form>
+  {% endif %}
+</section>
+
+<section class="settings-block">
+  <h2>Colors</h2>
+  <form method="post" action="/settings/color-blind" class="inline">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label class="check"><input type="checkbox" name="color_blind" value="1"{% if color_blind %} checked{% endif %}> Color-blind mode: stronger colors, and a shape for each filter on the dashboard and the phone</label>
+    <button type="submit">Save</button>
+  </form>
+</section>
+{% endblock %}

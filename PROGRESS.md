@@ -168,17 +168,17 @@ The full plan, with decisions, code facts and a data snapshot, is in `/Users/ala
 - Stop after each milestone.
 
 - [x] **Before M5.0:** ask whether to commit the uncommitted 10-28…10-31 work first (committed 2026-11-01).
-- [x] **M5.0 — Early-applicant filters** (migration 0006), as dashboard filters only (committed 2026-11-01; live DB not migrated):
+- [x] **M5.0 — Early-applicant filters** (migration 0006), as dashboard filters only (committed 2026-11-01; you migrated the live DB to 0006 the same day):
   - [x] reposted postings, hidden from New by default (LinkedIn's "Reposted" marker, plus a Greenhouse requisition seen 7+ days earlier; the company/title/city rule was dropped); the live check read 2 pages, neither a repost, so the wording is still unconfirmed;
   - [x] maximum applicants (unknown counts pass);
   - [x] contract show/hide/only (no signal means full-time);
   - [x] no "More filters" fold;
   - [ ] the ATS lag probe (ran 22:15–02:15 UTC into the scratchpad; ETags confirmed working; lag not yet summarized); the `results_wanted` 25→50 suggestion for capped searches (your call).
-- [ ] **M5.1 — Saved filters** (migration 0007):
-  - [ ] Settings page, up to 8 labeled filters with pastel bullets and a color-blind mode;
-  - [ ] none saved: batch pushes as today; any saved: one message per fitting posting with bullets, most-matched last, at most 10 per cycle and 200 a day, then one summary;
-  - [ ] only postings decided after a save fire; on/off switches, with all off meaning silence;
-  - [ ] dashboard buttons with new-match badges (cleared when opened) and bullets on cards.
+- [x] **M5.1 — Saved filters** (migration 0007; built 2026-11-01; you backed up to `data/jobpulse-before-0007.db` and upgraded the live DB to 0007 the same day):
+  - [x] Settings page, up to 8 labeled filters with pastel bullets and a color-blind mode;
+  - [x] none saved: batch pushes as today; any saved: one message per fitting posting with bullets, most-matched last, at most 10 per cycle and 200 a day, then one summary;
+  - [x] only postings decided after a save fire; on/off switches, with all off meaning silence;
+  - [x] dashboard buttons with new-match badges (cleared when opened) and bullets on cards.
 - [ ] **M5a — Resume similarity experiment:** local embeddings evaluated on a scratch copy, with dismissals your rules already explain set aside. Stop and decide the weight together.
 - [ ] **M5b — Resume scoring wiring** (migration 0008).
 - [ ] **M6 — Profile in the DB, secrets, Settings, config.yaml import** (migration 0009).
@@ -346,4 +346,14 @@ The full plan, with decisions, code facts and a data snapshot, is in `/Users/ala
   - **ATS lag probe** (read-only, 10 busy Greenhouse/Ashby/Lever boards every 2 min for 4 h, from 22:15 UTC): every unchanged poll got a 304. The "no 304s in 24 h" finding was an artifact: `HttpClient` replays a 304 as a 200, so ATS runs never set `not_modified`. Ashby is Cloudflare-cached for at most 60 s (+60 s stale). Lag numbers come when new jobs appear.
   - `scripts/check.sh` green: 1459 passed.
   - Not done: live `data/jobpulse.db` is still at 0005 (migrating it, and restarting the dashboard for the new columns, waits for your approval).
+- **2026-11-01** — M5.1: saved filters (after you ran `db upgrade` to 0006 on the live DB).
+  - **Test-first:** 48 new tests failed against stubs on missing behavior (palette, saved parameters, push messages, the cycle, Settings and the dashboard, migration 0007); the CSRF route inventory test gained the 6 new POST routes.
+  - **Matching in one place:** `parse_query` moved from `web/routes` to `db/query_params.py`, which the poller can import; `filter_params` writes every filter out (defaults included) and `saved_query` reads it back only if it round-trips exactly, so a renamed or retired filter value is flagged and skipped, never widened. Pushes and card bullets both run `dashboard.matching_ids` (new `within`, `decided_since`, `seen_since`); a parametrized test checks push = dashboard for 15 filter settings, location and pay included.
+  - **Pushes** (`Poller._push_saved`): with any saved filter present, only matches fitting an active, valid one decided at or after its `fires_from` go out, one message each ("🟢🟣 Stripe · Backend Engineer · SF / Remote · 0.87"), fewest filters first then lowest score; 5 s apart through an injected sleep; at most `notify.saved_filters.max_per_cycle` (10) and `max_per_day` (200, counted in `filter_pushes` over 24 h), with the rest summarized in one message sent first. A failed message stops the cycle's sending; unsent ones retry next cycle. All filters off (or invalid) = silence; none = the batch as before.
+  - **Schema 0007:** `saved_filters` (label, unique slot, params, active, position, `fires_from`, timestamps, `last_viewed_at`), `filter_pushes` (CASCADE both ways), `preferences` (`color_blind`), and `postings.decided_at` (in place). Two additions beyond the plan: `decided_at`, so a deferred LinkedIn posting decided after a save still counts as after it; and `preferences` for color-blind mode, which pushes need too.
+  - **Dashboard:** buttons above the filters (highlighted when the page shows exactly that filter; paused ones dimmed), badges of open untriaged matches first seen since last opened (`app.js` POSTs `/saved-filters/{id}/viewed` on click; the plain link works without it), bullets on cards, "Save these filters" next to Clear, a Settings page (mode line, list with switch/edit/delete, form sharing the dashboard's filter fields, color picker of free slots, color-blind toggle), and a Settings tab.
+  - **Found in the browser walkthrough:** the browser kept a heuristically cached `app.js` from before the change (static files had no `Cache-Control`), so the badge never cleared. Static files are now `no-cache` (test first). Then: the view POST answers 204 and the badge clears; a filter saved through the form; color-blind shapes; phone width; no console or CSP errors.
+  - **Replay on a scratch copy** (live DB backed up read-only, upgraded to 0007), last 24 h of pushed matches without blocked companies (190 in 13 batches), four sample filters: Bay Area 25; under 50 applicants, no contract 159 (only LinkedIn has counts, so most pass); pay ≥ $150k, no contract 175 (unlisted pay passes unless "Pay listed"); remote, no contract 2. 188 fit at least one and 2 none; that day would have sent 54 messages of their own plus 2 summaries in 11 cycles, against 13 batches.
+  - `scripts/check.sh` green: 1508 passed.
+  - Live: you backed up to `data/jobpulse-before-0007.db` (integrity ok, 40,514 postings) and ran `db upgrade` to 0007. Worker and dashboard need starting on the new code. Your pushes stay batched until you save a filter. Nothing committed yet.
 

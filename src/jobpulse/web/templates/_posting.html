@@ -15,6 +15,7 @@
       {% if row.closed_at %}<span class="badge closed" title="{{ row.closed_at|local }}">closed {{ row.closed_at|ago }}</span>{% endif %}
     </p>
     <div class="details">
+      {% if bullets is defined %}{% for saved in bullets.get(row.id, []) %}{% with slot = saved.row.slot, label = saved.row.label %}{% include "_bullet.html" %}{% endwith %}{% endfor %}{% endif %}
       <span class="badge source">{{ row.source }}</span>
       {% if row.repost_reason %}<span class="badge warn" title="{{ row.repost_reason }}">Reposted</span>{% endif %}
       {% if row.employment_type in kinds %}<span class="badge warn">{{ kinds[row.employment_type] }}</span>{% endif %}

@@ -9,3 +9,24 @@ document.addEventListener("jobpulse:blocked", (event) => {
     }
   }
 });
+
+// A saved filter's button is a plain link; before it navigates, tell the server the filter was
+// opened so its badge of new matches starts over (CSRF token from the page's htmx headers).
+document.addEventListener("click", (event) => {
+  const link = event.target.closest("a.saved-filter[data-viewed]");
+  if (!link) {
+    return;
+  }
+  let token = "";
+  try {
+    token = JSON.parse(document.body.getAttribute("hx-headers") || "{}")["X-CSRF-Token"] || "";
+  } catch (error) {
+    return;
+  }
+  fetch(link.dataset.viewed, {
+    method: "POST",
+    headers: { "X-CSRF-Token": token },
+    credentials: "same-origin",
+    keepalive: true,
+  });
+});

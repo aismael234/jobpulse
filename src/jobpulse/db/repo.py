@@ -863,6 +863,7 @@ def save_evaluation(
     decision: Decision,
     *,
     repost_reason: str | None = None,
+    decided_at: datetime | None = None,
 ) -> None:
     """Store what enrichment added and the final decision. A detail call can name places the
     list didn't (Workday's "2 Locations"), so the fingerprint is taken again, and LinkedIn's
@@ -891,6 +892,7 @@ def save_evaluation(
             years_required=decision.years_required,
             employment_type=posting_employment_type(posting),
             repost_reason=repost_reason,
+            decided_at=decided_at,
         )
     )
 

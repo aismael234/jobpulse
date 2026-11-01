@@ -20,6 +20,7 @@
       {% endfor %}
       <a href="/health" data-view="health"{% if view == "health" %} aria-current="page"{% endif %}>Health{% if incident_count %} <span class="count alert">{{ incident_count }}</span>{% endif %}</a>
       <a href="/watchlist" data-view="watchlist"{% if view == "watchlist" %} aria-current="page"{% endif %}>Watchlist</a>
+      <a href="/settings" data-view="settings"{% if view == "settings" %} aria-current="page"{% endif %}>Settings</a>
     </nav>
   </header>
   <div id="notice" aria-live="polite"></div>

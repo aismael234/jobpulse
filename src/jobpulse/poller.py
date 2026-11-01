@@ -42,22 +42,33 @@ from jobpulse.core.models import (
     Precision,
     Target,
 )
+from jobpulse.core.palette import phone_bullet
 from jobpulse.core.reposts import REPOST_AFTER, repost_reason
 from jobpulse.core.scoring import priority_component
 from jobpulse.core.timeparse import utcnow
-from jobpulse.db import repo
+from jobpulse.db import repo, saved_filters
+from jobpulse.db.saved_filters import Saved
 from jobpulse.db.tables import PostingRow
 from jobpulse.discovery import Discoverer, Sighting
 from jobpulse.health import HealthMonitor, HealthRules
 from jobpulse.llm.scorer import Ask, LlmScorer
-from jobpulse.notify.base import Notifier, NotifierError
-from jobpulse.notify.format import PushContent, batch_notification, category_label, title_line
+from jobpulse.notify.base import Notification, Notifier, NotifierError
+from jobpulse.notify.format import (
+    PushContent,
+    batch_notification,
+    category_label,
+    posting_notification,
+    saved_filter_summary,
+    title_line,
+)
 from jobpulse.sources.base import EnrichmentDeferred, SourceAdapter
+from jobpulse.sources.maintenance import Sleep
 
 log = logging.getLogger(__name__)
 
 Inserted = tuple[int, Posting, str]  # (row id, posting, fingerprint)
 LLM_CAP_WINDOW = timedelta(hours=24)  # llm.max_calls_per_day counts calls in this window
+PUSH_CAP_WINDOW = timedelta(hours=24)  # notify.saved_filters.max_per_day counts this window
 
 
 @dataclass
@@ -104,7 +115,7 @@ class CycleReport:
     dry_run: bool
     targets: list[TargetReport] = field(default_factory=list)
     pushes: list[str] = field(default_factory=list)  # title lines sent (or, in a dry run, due)
-    push_summary: str | None = None  # the one message they went out in
+    push_summary: str | None = None  # the batch, or the saved-filter summary, they went in
     failed_pushes: int = 0  # matches whose push failed
     discovered: list[str] = field(default_factory=list)  # boards added (or that would be)
     discovery_deferred: int = 0
@@ -166,6 +177,7 @@ class Poller:
         clock: Callable[[], datetime] = utcnow,
         discoverer: Discoverer | None = None,
         llm: LlmScorer | None = None,
+        sleep: Sleep = asyncio.sleep,
     ) -> None:
         self._config = config
         self._sessions = sessions
@@ -174,6 +186,7 @@ class Poller:
         self._clock = clock
         self._discoverer = discoverer
         self._llm = llm
+        self._sleep = sleep  # spaces saved-filter pushes out
         self._health = (
             HealthMonitor(HealthRules.from_config(config.health, config.maintenance))
             if config.health.enabled
@@ -237,6 +250,7 @@ class Poller:
                     posting,
                     decision,
                     repost_reason=self._repost_reason(session, survivor, posting),
+                    decided_at=self._clock(),
                 )
                 self._tally(survivor, posting, decision)
             finished_at = self._clock()
@@ -643,7 +657,8 @@ class Poller:
         self, unit: _UnitOfWork, report: CycleReport, sources: Collection[str] | None
     ) -> None:
         """Push every match from this cycle's sources not yet sent (so a failed push is
-        retried by the same job's next cycle), whatever its score, as one message."""
+        retried by the same job's next cycle), whatever its score, as one message. Once a
+        saved filter exists, only the matches that fit one go out, one message each."""
         session = unit.session
         now = self._clock()
         due = repo.instant_unnotified(session, since=now - self._freshness, sources=sources)
@@ -661,6 +676,10 @@ class Poller:
                 log.warning("no notification channel configured; %d matches not pushed", len(due))
             return
         if not due:
+            return
+        filters = saved_filters.list_filters(session)
+        if filters:
+            await self._push_saved(unit, report, due, filters)
             return
         contents = [self._push_content(row) for row in due]
         message = batch_notification(
@@ -683,6 +702,85 @@ class Poller:
             unit.checkpoint()
         report.push_summary = message.body
         report.pushes = lines
+
+    async def _push_saved(
+        self,
+        unit: _UnitOfWork,
+        report: CycleReport,
+        due: list[PostingRow],
+        filters: list[Saved],
+    ) -> None:
+        """One message per match that fits an active saved filter decided after it started
+        firing, a bullet per filter it fits. They go out fewest filters first (then lowest
+        score), so the most-matched lands last, on top of the phone's list; spaced out and
+        capped per cycle and per day, with one summary, sent first, for the rest. A match
+        that fits none stays unpushed in New; a message that fails is retried next cycle."""
+        session = unit.session
+        now = self._clock()
+        fits = saved_filters.fitting(
+            session, filters, [row.id for row in due], now=now, decided_after_save=True
+        )
+        rows = sorted(
+            (row for row in due if row.id in fits),
+            key=lambda row: (len(fits[row.id]), row.score if row.score is not None else -1.0),
+        )
+        if not rows:
+            return
+        limits = self._config.notify.saved_filters
+        ntfy = self._config.notify.ntfy
+        color_blind = saved_filters.color_blind(session)
+        left_today = limits.max_per_day - saved_filters.pushed_since(session, now - PUSH_CAP_WINDOW)
+        split = len(rows) - max(0, min(limits.max_per_cycle, left_today, len(rows)))
+        rest, singles = rows[:split], rows[split:]
+
+        def bullet(saved: Saved) -> str:
+            return phone_bullet(saved.row.slot, color_blind=color_blind)
+
+        messages: list[tuple[Notification, list[PostingRow]]] = []
+        if rest:
+            counts = [
+                (bullet(saved), sum(saved in fits[row.id] for row in rest))
+                for saved in sorted(filters, key=lambda item: item.row.slot)
+                if any(saved in fits[row.id] for row in rest)
+            ]
+            summary = saved_filter_summary(
+                counts, total=len(rest), priority=ntfy.priority, tags=ntfy.tags
+            )
+            messages.append((summary, rest))
+            report.push_summary = summary.body
+        for row in singles:
+            message = posting_notification(
+                self._push_content(row),
+                bullets="".join(bullet(saved) for saved in fits[row.id]),
+                now=now,
+                priority=ntfy.priority,
+                tags=ntfy.tags,
+                short_labels=self._short_labels,
+            )
+            messages.append((message, [row]))
+            report.pushes.append(message.title)
+        if self._notifier is None or report.dry_run:
+            return
+        for index, (message, covered) in enumerate(messages):
+            if index:
+                await self._sleep(limits.spacing_seconds)
+            try:
+                await self._notifier.send(message)
+            except NotifierError as exc:
+                report.failed_pushes = sum(len(rows) for _, rows in messages[index:])
+                log.warning(
+                    "saved-filter push failed; %d matches retried next cycle: %s",
+                    report.failed_pushes, exc,
+                )  # fmt: skip
+                return
+            sent_at = self._clock()
+            repo.mark_notified(session, [row.id for row in covered], now=sent_at)
+            if not (rest and index == 0):  # the summary doesn't count toward the day
+                row = covered[0]
+                saved_filters.record_pushes(
+                    session, row.id, [saved.row.id for saved in fits[row.id]], now=sent_at
+                )
+            unit.checkpoint()
 
     async def _check_health(self, unit: _UnitOfWork, report: CycleReport) -> None:
         """Open and resolve incidents for the targets that just ran, then send what's due:

@@ -226,6 +226,35 @@ form.inline button:hover { border-color: var(--accent); color: var(--accent); }
 .add label { display: inline-flex; gap: 0.35rem; align-items: center; color: var(--muted); }
 .add input[name="priority"] { width: 5rem; }
 
+/* saved filters: a pastel per slot, Okabe–Ito-based colors in color-blind mode (core/palette.py) */
+.bullet.slot-0 { color: #b9ead3; } .bullet.slot-0.cb { color: #009e73; }
+.bullet.slot-1 { color: #d9c8f2; } .bullet.slot-1.cb { color: #cc79a7; }
+.bullet.slot-2 { color: #bfdcf7; } .bullet.slot-2.cb { color: #0072b2; }
+.bullet.slot-3 { color: #ffd3b5; } .bullet.slot-3.cb { color: #e69f00; }
+.bullet.slot-4 { color: #f8eaa0; } .bullet.slot-4.cb { color: #f0e442; }
+.bullet.slot-5 { color: #f6c3cd; } .bullet.slot-5.cb { color: #d55e00; }
+.bullet.slot-6 { color: #e3d2bf; } .bullet.slot-6.cb { color: #a6761d; }
+.bullet.slot-7 { color: #d6dae0; } .bullet.slot-7.cb { color: #999999; }
+.bullet { font-size: 0.95em; line-height: 1; text-shadow: 0 0 1px var(--muted); }
+.saved { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 0.6rem; }
+.saved-filter { display: inline-flex; align-items: center; gap: 0.35rem; padding: 0.25rem 0.7rem; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); color: var(--text); font-size: 0.9rem; text-decoration: none; }
+.saved-filter:hover { border-color: var(--accent); }
+.saved-filter.current { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.saved-filter.paused { opacity: 0.6; }
+.badge-count { min-width: 1.3rem; padding: 0 0.35rem; border-radius: 999px; background: var(--accent); color: #fff; font-size: 0.75rem; font-weight: 600; text-align: center; }
+.filters .save-filters { color: var(--muted); font-size: 0.9rem; }
+.settings-block { margin-bottom: 1.5rem; }
+.saved-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.4rem; }
+.saved-list li { display: flex; flex-wrap: wrap; gap: 0.3rem 0.8rem; align-items: center; padding: 0.6rem 0.8rem; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
+.saved-list li.paused { opacity: 0.65; }
+.saved-list .name { font-weight: 600; }
+.saved-list .controls { display: inline-flex; gap: 0.8rem; align-items: center; margin-left: auto; }
+.saved-list .controls form { display: inline; }
+.colors { display: inline-flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; margin: 0; padding: 0; border: none; }
+.colors legend { float: left; margin-right: 0.4rem; color: var(--muted); }
+.color-choice { display: inline-flex; align-items: center; gap: 0.15rem; font-size: 1.2rem; }
+.saved-form .row + .row, .saved-form .hint { margin-top: 0.5rem; }
+
 @media (max-width: 640px) {
   main { padding: 0.75rem; }
   .filters .row > select, .filters .row > input[type="text"] { flex: 1 1 10rem; }

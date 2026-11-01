@@ -9,6 +9,8 @@ from jobpulse.notify.format import (
     batch_notification,
     category_label,
     humanize_age,
+    posting_notification,
+    saved_filter_summary,
     title_line,
     when_label,
 )
@@ -136,3 +138,25 @@ def test_an_empty_batch_is_refused() -> None:
 )
 def test_category_label(sources: tuple[str, ...] | list[str] | None, label: str) -> None:
     assert category_label(sources) == label
+
+
+def test_a_posting_message_leads_with_its_bullets() -> None:
+    """M5.1: one message per posting while saved filters exist."""
+    message = posting_notification(content(), bullets="🟢🟣", now=NOW)
+    assert message.title == "🟢🟣 Stripe · Backend Engineer · SF / Remote · 0.82"
+    assert message.click_url == "https://stripe.com/jobs/search?gh_jid=8172487"
+    assert "posted 25 min ago" in message.body
+    assert "San Francisco, CA; Remote (US)" in message.body
+    assert "greenhouse" in message.tags
+
+
+def test_a_posting_message_without_a_score_or_place() -> None:
+    message = posting_notification(content(score=None, locations=()), bullets="🟢", now=NOW)
+    assert message.title == "🟢 Stripe · Backend Engineer"
+
+
+def test_the_summary_counts_the_rest_per_filter() -> None:
+    message = saved_filter_summary([("🟢", 4), ("🟣", 3)], total=7)
+    assert message.title == "+7 more matching your saved filters"
+    assert message.body == "+7 more matching your saved filters: 🟢 4 · 🟣 3"
+    assert message.click_url is None

@@ -307,6 +307,43 @@ def test_0006_backfills_employment_and_reposts_in_place(db_url: str) -> None:
     assert not {"employment_type", "repost_reason"} & columns
 
 
+def test_0007_adds_saved_filters_and_decided_at_in_place(db_url: str) -> None:
+    config = alembic_config(db_url)
+    command.upgrade(config, "0006")
+    engine = create_engine(db_url)
+    seen = "2026-10-24 08:00:00.000000"
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO postings (id, source, external_id, company_name, title, locations, "
+                "canonical_url, fingerprint, url, first_seen_at, last_seen_at, also_seen_on, raw) "
+                "VALUES (1, 'greenhouse', '1', 'Acme', 'Role', '[]', 'c', 'f', 'u', :seen, :seen, "
+                "'[]', '{}')"
+            ),
+            {"seen": seen},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO llm_assessments (posting_id, input_hash, model, created_at) "
+                "VALUES (1, 'h', 'm', :seen)"
+            ),
+            {"seen": seen},
+        )
+
+    command.upgrade(config, "0007")
+
+    tables = set(inspect(engine).get_table_names())
+    assert {"saved_filters", "filter_pushes", "preferences"} <= tables
+    assert "decided_at" in {c["name"] for c in inspect(engine).get_columns("postings")}
+    with engine.connect() as connection:
+        assert connection.execute(text("SELECT count(*) FROM llm_assessments")).scalar() == 1
+
+    command.downgrade(config, "0006")
+    tables = set(inspect(engine).get_table_names())
+    assert not {"saved_filters", "filter_pushes", "preferences"} & tables
+    assert "decided_at" not in {c["name"] for c in inspect(engine).get_columns("postings")}
+
+
 def test_cli_db_upgrade_uses_database_url(tmp_path: Path, db_url: str) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text("contact_email: dev@example.com\n", encoding="utf-8")

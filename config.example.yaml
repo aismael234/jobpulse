@@ -87,6 +87,10 @@ notify:
     base_url: https://ntfy.sh   # or your self-hosted server
     priority: 4
     tags: [briefcase]
+  # Once a saved filter exists (dashboard Settings), each fitting match is its own push. ntfy.sh
+  # allows a burst of 60, then one per 5 s, and 250 messages a day; the rest of a cycle go out
+  # as one summary.
+  # saved_filters: {max_per_cycle: 10, max_per_day: 200, spacing_seconds: 5}
 
 # EXAMPLES: replace with the companies you care about. Tokens verified on 2026-10-23.
 # Greenhouse: job-boards.greenhouse.io/<token> · Lever: jobs.lever.co/<token>

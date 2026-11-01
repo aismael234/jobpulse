@@ -25,7 +25,8 @@ from jobpulse.core.dedupe import canonicalize_url
 from jobpulse.core.locations import normalize_locations
 from jobpulse.core.models import FetchResult, Posting, Target
 from jobpulse.core.timeparse import utcnow
-from jobpulse.db import repo
+from jobpulse.db import repo, saved_filters
+from jobpulse.db.query_params import filter_params, parse_query
 from jobpulse.db.session import create_engine_for, make_session_factory
 from jobpulse.db.tables import (
     Base,
@@ -310,6 +311,7 @@ class Env:
     llm: LlmScorer | None = None
     # Title lines of every match pushed by env.poll(); each cycle's go out as one message.
     pushed: list[str] = field(default_factory=list)
+    sleep: FakeSleep = field(default_factory=FakeSleep)  # spacing between saved-filter pushes
 
     def poller(self) -> Poller:
         return Poller(
@@ -319,7 +321,24 @@ class Env:
             notifier=self.notifier,
             discoverer=self.discoverer,
             llm=self.llm,
+            sleep=self.sleep,
         )
+
+    def save_filter(
+        self,
+        label: str = "Austin",
+        slot: int = 0,
+        *,
+        now: datetime = NOW - timedelta(minutes=1),
+        **params: str,
+    ) -> int:
+        """A saved filter from dashboard-style parameters (``place="US-TX"``)."""
+        with self.sessions() as session:
+            row = saved_filters.create(
+                session, label=label, slot=slot, params=filter_params(parse_query(params)), now=now
+            )
+            session.commit()
+            return row.id
 
     async def poll(self, **kwargs: Any) -> CycleReport:
         report = await self.poller().run_cycle(**kwargs)

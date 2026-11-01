@@ -5,10 +5,9 @@ the HTML fragment that replaces the one you clicked in).
 """
 
 import json
-import math
 import re
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Annotated, Any, Literal
 from urllib.parse import parse_qsl, urlsplit
@@ -30,23 +29,21 @@ from jobpulse.core.atsurls import (
 )
 from jobpulse.core.dedupe import normalize_company
 from jobpulse.core.filters import Blocklist
-from jobpulse.core.places import parse_place_key
-from jobpulse.db import dashboard, repo
+from jobpulse.core.palette import SWATCHES
+from jobpulse.db import dashboard, repo, saved_filters
 from jobpulse.db.dashboard import (
     CONTRACT_CHOICES,
-    EXPERIENCE,
     EXPERIENCE_CHOICES,
     MAX_APPLICANTS_CHOICES,
     MOVED_SORT_LABELS,
     PUSHED_CHOICES,
-    PUSHED_WINDOWS,
     STATUSES,
-    ContractFilter,
     PostingQuery,
-    SortOrder,
 )
+from jobpulse.db.query_params import VIEWS, filter_params, filter_summary, parse_query
+from jobpulse.db.saved_filters import Saved, SavedFilterError
 from jobpulse.db.session import session_scope
-from jobpulse.db.tables import Company, PostingRow
+from jobpulse.db.tables import Company, PostingRow, SavedFilter
 from jobpulse.runtime import KNOWN_SOURCES
 from jobpulse.sources.ats_detect import Validation, is_fetchable_url
 from jobpulse.sources.workday import PAGE_LIMIT
@@ -63,14 +60,6 @@ def page(path: str, **options: Any) -> Callable[[DecoratedCallable], DecoratedCa
     return pages.api_route(path, methods=["GET", "HEAD"], **options)
 
 
-VIEWS = {status.lower(): status for status in STATUSES}
-SORTS: dict[str, SortOrder] = {
-    "score": "score",
-    "fresh": "fresh",
-    "pushed": "pushed",
-    "moved": "moved",
-}
-CONTRACTS: dict[str, ContractFilter] = {value: value for value, _ in CONTRACT_CHOICES}
 ADDABLE_ATS = ("greenhouse", "lever", "ashby", "workday")
 ATS_NAMES = {"greenhouse": "Greenhouse", "lever": "Lever", "ashby": "Ashby", "workday": "Workday"}
 MAX_PRIORITY = 1000
@@ -88,63 +77,6 @@ def _htmx(request: Request) -> bool:
 def _blank(value: str | None) -> str | None:
     value = (value or "").strip()
     return value or None
-
-
-def parse_query(params: Mapping[str, str]) -> PostingQuery:
-    """Filters from the query string. Blank or unreadable values are ignored, not errors."""
-    status = VIEWS.get((params.get("view") or "").strip().lower(), "New")
-    source = _blank(params.get("source"))
-    remote = {"yes": True, "no": False}.get((params.get("remote") or "").strip().lower())
-    min_score: float | None = None
-    try:
-        number = float(params.get("min_score") or "")
-        if math.isfinite(number):
-            min_score = max(0.0, number)
-    except ValueError:
-        pass
-    try:
-        page = max(1, int(params.get("page") or "1"))
-    except ValueError:
-        page = 1
-    pushed = (params.get("pushed") or "").strip()
-    experience = (params.get("exp") or "").strip()
-    max_applicants = _thousands(params.get("max_applicants"))
-    contract = CONTRACTS.get((params.get("contract") or "").strip().lower(), "show")
-    sort = SORTS.get(params.get("sort") or "", "score")
-    if sort == "moved" and status not in MOVED_SORT_LABELS:
-        sort = "score"  # nothing is moved into New to sort by
-    return PostingQuery(
-        status=status,
-        source=source if source in KNOWN_SOURCES else None,
-        company=_blank(params.get("company")),
-        remote=remote,
-        min_score=min_score,
-        text=_blank(params.get("q")),
-        open_only=_checked(params.get("open")),
-        place=parse_place_key(params.get("place") or ""),
-        pushed=pushed if pushed in PUSHED_WINDOWS else None,
-        min_pay=_thousands(params.get("pay")),
-        pay_listed=_checked(params.get("pay_listed")),
-        experience=experience if experience in EXPERIENCE else None,
-        show_reposted=(params.get("reposted") or "").strip().lower() == "show",
-        max_applicants=max_applicants if max_applicants in MAX_APPLICANTS_CHOICES else None,
-        contract=contract,
-        sort=sort,
-        page=page,
-    )
-
-
-def _checked(value: str | None) -> bool:
-    return (value or "") in ("1", "on", "true", "yes")
-
-
-def _thousands(value: str | None) -> int | None:
-    """A pay floor in thousands of dollars: a positive whole number, else no floor."""
-    try:
-        number = int((value or "").strip())
-    except ValueError:
-        return None
-    return number if number > 0 else None
 
 
 def safe_return_to(value: str | None, default: str = "/") -> str:
@@ -207,7 +139,8 @@ def postings_page(request: Request) -> HTMLResponse:
     query = parse_query(request.query_params)
     now = state.clock()
     with state.sessions() as session:
-        page = dashboard.list_postings(session, query, now=now, hidden=_hidden(request, session))
+        hidden = _hidden(request, session)
+        page = dashboard.list_postings(session, query, now=now, hidden=hidden)
         return render(
             request,
             "postings.html",
@@ -220,6 +153,8 @@ def postings_page(request: Request) -> HTMLResponse:
                 "experience_choices": EXPERIENCE_CHOICES,
                 "max_applicants_choices": MAX_APPLICANTS_CHOICES,
                 "contract_choices": CONTRACT_CHOICES,
+                "reposted_box": query.status == "New",
+                **_saved_context(session, query, page.rows, now=now, hidden=hidden),
                 "moved_sort": MOVED_SORT_LABELS.get(query.status),
                 "bulk_views": BULK_VIEWS,
                 "link": link,
@@ -231,6 +166,50 @@ def postings_page(request: Request) -> HTMLResponse:
             },
             session=session,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class SavedButton:
+    saved: Saved
+    href: str
+    count: int  # new matches since it was last opened
+    current: bool  # its filters are the ones on the page
+
+
+def _saved_context(
+    session: Session,
+    query: PostingQuery,
+    rows: list[PostingRow],
+    *,
+    now: datetime,
+    hidden: frozenset[str],
+) -> dict[str, Any]:
+    """The saved-filter buttons above the filters, the bullets on this page's cards, and the
+    "Save these filters" link."""
+    filters = [saved for saved in saved_filters.list_filters(session) if saved.query is not None]
+    counts = saved_filters.new_match_counts(session, filters, now=now, hidden=hidden)
+    shown = filter_params(query)
+    buttons = [
+        SavedButton(
+            saved,
+            link(replace(saved.query, status="New", sort="score", page=1)),
+            counts.get(saved.row.id, 0),
+            query.status == "New" and shown == saved.row.params,
+        )
+        for saved in filters
+        if saved.query is not None
+    ]
+    bullets = saved_filters.fitting(
+        session, filters, [row.id for row in rows], now=now, status=query.status
+    )
+    plain = replace(query, status="New", sort="score", page=1, pushed=None)
+    return {
+        "saved_buttons": buttons,
+        "bullets": bullets,
+        "color_blind": saved_filters.color_blind(session),
+        "swatches": SWATCHES,
+        "save_url": "/settings" + link(plain)[1:],
+    }
 
 
 @page("/export.csv")
@@ -709,3 +688,179 @@ def set_active(request: Request, company_id: int, active: Annotated[str, Form()]
         _editable_company(session, company_id)
         repo.update_company(session, company_id, active=active.strip() in ("1", "true", "on"))
         return _company_response(request, session, company_id)
+
+
+# --- settings: saved filters ----------------------------------------------------------------
+
+
+def _settings_page(
+    request: Request,
+    session: Session,
+    *,
+    query: PostingQuery,
+    editing: SavedFilter | None = None,
+    label: str = "",
+    slot: int | None = None,
+    error: str | None = None,
+    status_code: int = 200,
+) -> HTMLResponse:
+    state = _state(request)
+    filters = saved_filters.list_filters(session)
+    taken = {saved.row.slot for saved in filters if editing is None or saved.row.id != editing.id}
+    free = [index for index in range(len(SWATCHES)) if index not in taken]
+    if slot is None:
+        slot = editing.slot if editing is not None else (free[0] if free else None)
+    return render(
+        request,
+        "settings.html",
+        {
+            "view": "settings",
+            "filters": filters,
+            "summaries": {
+                saved.row.id: filter_summary(saved.query)
+                for saved in filters
+                if saved.query is not None
+            },
+            "query": query,
+            "editing": editing,
+            "label": label or (editing.label if editing is not None else ""),
+            "slot": slot,
+            "free_slots": free,
+            "full": editing is None and len(filters) >= saved_filters.MAX_FILTERS,
+            "max_filters": saved_filters.MAX_FILTERS,
+            "error": error,
+            "color_blind": saved_filters.color_blind(session),
+            "swatches": SWATCHES,
+            "places": dashboard.place_choices(
+                session, now=state.clock(), hidden=_hidden(request, session)
+            ),
+            "sources": KNOWN_SOURCES,
+            "experience_choices": EXPERIENCE_CHOICES,
+            "max_applicants_choices": MAX_APPLICANTS_CHOICES,
+            "contract_choices": CONTRACT_CHOICES,
+            "reposted_box": True,
+            "per_cycle": state.config.notify.saved_filters.max_per_cycle,
+        },
+        session=session,
+        status_code=status_code,
+    )
+
+
+def _readable_params(row: SavedFilter) -> dict[str, str]:
+    """A saved filter's parameters for its edit form, even one that no longer reads back."""
+    params = row.params if isinstance(row.params, dict) else {}
+    return {key: value for key, value in params.items() if isinstance(value, str)}
+
+
+@page("/settings", response_class=HTMLResponse)
+def settings_page(request: Request) -> HTMLResponse:
+    """Saved filters: the push mode, each filter with its switch, and the form, prefilled
+    from the dashboard's filters (``/settings?contract=only``) or a filter (``?edit=3``)."""
+    with _state(request).sessions() as session:
+        editing = None
+        edit = request.query_params.get("edit", "")
+        if edit.isdigit():
+            editing = session.get(SavedFilter, int(edit))
+        source = _readable_params(editing) if editing is not None else request.query_params
+        return _settings_page(request, session, query=parse_query(source), editing=editing)
+
+
+async def _filter_form(
+    request: Request,
+) -> tuple[str, int, dict[str, str], PostingQuery]:
+    """Label, color slot (-1 when unreadable) and filters from a Settings form post."""
+    form = await request.form()
+    values = {key: value for key, value in form.items() if isinstance(value, str)}
+    query = parse_query({key: value for key, value in values.items() if key != "view"})
+    slot_text = values.get("slot", "").strip()
+    slot = int(slot_text) if slot_text.isdigit() else -1
+    return values.get("label", ""), slot, filter_params(query), query
+
+
+@actions.post("/settings/filters", response_class=HTMLResponse)
+async def create_saved_filter(request: Request) -> Response:
+    label, slot, params, query = await _filter_form(request)
+    state = _state(request)
+    with session_scope(state.sessions) as session:
+        try:
+            saved_filters.create(session, label=label, slot=slot, params=params, now=state.clock())
+        except SavedFilterError as exc:
+            session.rollback()
+            return _settings_page(
+                request, session, query=query, label=label, slot=slot, error=str(exc),
+                status_code=400,
+            )  # fmt: skip
+    return RedirectResponse("/settings", status_code=303)
+
+
+@actions.post("/settings/filters/{filter_id}", response_class=HTMLResponse)
+async def update_saved_filter(request: Request, filter_id: int) -> Response:
+    label, slot, params, query = await _filter_form(request)
+    state = _state(request)
+    with session_scope(state.sessions) as session:
+        if session.get(SavedFilter, filter_id) is None:
+            raise HTTPException(status_code=404, detail="no such saved filter")
+        try:
+            saved_filters.update(
+                session, filter_id, label=label, slot=slot, params=params, now=state.clock()
+            )
+        except SavedFilterError as exc:
+            session.rollback()
+            return _settings_page(
+                request, session, query=query, editing=session.get(SavedFilter, filter_id),
+                label=label, slot=slot, error=str(exc), status_code=400,
+            )  # fmt: skip
+    return RedirectResponse("/settings", status_code=303)
+
+
+@actions.post("/settings/filters/{filter_id}/active")
+def switch_saved_filter(
+    request: Request, filter_id: int, active: Annotated[str, Form()] = ""
+) -> Response:
+    state = _state(request)
+    with session_scope(state.sessions) as session:
+        try:
+            saved_filters.set_active(
+                session, filter_id, active.strip() in ("1", "true", "on"), now=state.clock()
+            )
+        except LookupError:
+            raise HTTPException(status_code=404, detail="no such saved filter") from None
+    return _back_to_settings(request)
+
+
+@actions.post("/settings/filters/{filter_id}/delete")
+def delete_saved_filter(request: Request, filter_id: int) -> Response:
+    with session_scope(_state(request).sessions) as session:
+        try:
+            saved_filters.delete(session, filter_id)
+        except LookupError:
+            raise HTTPException(status_code=404, detail="no such saved filter") from None
+    return _back_to_settings(request)
+
+
+@actions.post("/settings/color-blind")
+def set_color_blind(request: Request, color_blind: Annotated[str, Form()] = "") -> Response:
+    state = _state(request)
+    with session_scope(state.sessions) as session:
+        saved_filters.set_color_blind(
+            session, color_blind.strip() in ("1", "true", "on"), now=state.clock()
+        )
+    return _back_to_settings(request)
+
+
+@actions.post("/saved-filters/{filter_id}/viewed")
+def saved_filter_viewed(request: Request, filter_id: int) -> Response:
+    """Sent by static/app.js when a saved filter's button is clicked: its badge starts over."""
+    state = _state(request)
+    with session_scope(state.sessions) as session:
+        try:
+            saved_filters.mark_viewed(session, filter_id, now=state.clock())
+        except LookupError:
+            raise HTTPException(status_code=404, detail="no such saved filter") from None
+    return Response(status_code=204)
+
+
+def _back_to_settings(request: Request) -> Response:
+    if _htmx(request):
+        return Response(headers={"HX-Redirect": "/settings"})
+    return RedirectResponse("/settings", status_code=303)
