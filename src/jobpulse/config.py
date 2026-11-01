@@ -375,6 +375,9 @@ class LinkedInPacing(_Model):
     cooldown_minutes: float = Field(default=30.0, ge=0)
     job_pages: bool = True
     max_job_pages_per_hour: int = Field(default=40, ge=1, le=1000)
+    # How long a posting whose job page couldn't be read waits for a later cycle to read it
+    # before it's judged without the page. 0 judges it at once.
+    job_page_wait_hours: float = Field(default=12, ge=0)
 
     @model_validator(mode="after")
     def _ordered(self) -> Self:
@@ -398,6 +401,14 @@ class SimplifyConfig(_Model):
 
 class WorkdayConfig(_Model):
     max_pages: int = Field(default=25, ge=1, le=100)
+
+
+class MaintenanceConfig(_Model):
+    """A source redirected to its maintenance page is retried, then paused as a whole."""
+
+    retries: int = Field(default=2, ge=0, le=10)
+    retry_delay_seconds: float = Field(default=30, ge=0, le=600)
+    cooldown_minutes: float = Field(default=30, gt=0)
 
 
 class LlmConfig(_Model):
@@ -469,6 +480,7 @@ class AppConfig(_Model):
     discovery: DiscoveryConfig = DiscoveryConfig()
     blocklist: BlocklistConfig = BlocklistConfig()
     health: HealthConfig = HealthConfig()
+    maintenance: MaintenanceConfig = MaintenanceConfig()
     retention: RetentionConfig = RetentionConfig()
     dashboard: DashboardConfig = DashboardConfig()
     llm: LlmConfig = LlmConfig()
@@ -525,6 +537,17 @@ class AppConfig(_Model):
             raise ValueError(
                 f"{field} blocks watchlist[{index}] ({entry.name}), which is active; remove one "
                 "of them, or set active: false on the watchlist entry"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _job_pages_wait_within_freshness(self) -> Self:
+        wait, fresh = self.linkedin.job_page_wait_hours, self.detection.freshness_hours
+        if wait >= fresh:
+            raise ValueError(
+                f"linkedin.job_page_wait_hours ({wait:g}) must be less than "
+                f"detection.freshness_hours ({fresh:g}): a posting still waiting when it stops "
+                "being fresh would never be judged"
             )
         return self
 

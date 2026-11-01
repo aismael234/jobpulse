@@ -14,6 +14,7 @@ Personal job-posting watcher. Read PROGRESS.md first: milestone checklists, deci
 - `uv run jobpulse worker` — the scheduler (needs `NTFY_TOPIC` when ntfy is enabled)
 - `uv run jobpulse web [--host] [--port]` — the dashboard on 127.0.0.1:8000
 - `uv run jobpulse companies list` / `companies sync`, `uv run jobpulse notify test`
+- `uv run jobpulse companies import FILE --workday-keywords "..." [--dry-run]` — add the boards behind a file's links (validated like the paste box)
 - `docker compose up -d` (`--profile postgres` for Postgres) — needs the Docker daemon: `orbctl start` (OrbStack) first. Test with `-p <name>` and an override file mounting a scratch config, so `./config.yaml` and its volumes stay untouched
 - `uv run alembic upgrade head` or `uv run jobpulse db upgrade` — migrate the database (the CLI refuses to run on one that is behind)
 
@@ -48,6 +49,8 @@ Personal job-posting watcher. Read PROGRESS.md first: milestone checklists, deci
 - Searches are synced from config at the start of every cycle, so a `searches` row added by hand is deactivated. Integration tests use `env.add_search()`, which edits the config.
 - JobSpy frames under pandas 3 hold `nan` (a float) for missing text cells; `jobspy_boards._clean` turns them into None. LinkedIn's page delay is the class attribute `jobspy.linkedin.LinkedIn.delay`, set from config on first use.
 - Every LinkedIn request (JobSpy searches, job pages) goes through one `LinkedInGate` built in `runtime.build_adapters`. A `JobSpyAdapter` without a `gate` builds its own from `pacing`/`sleep`/`rng`/`monotonic`, which the M2 tests rely on.
+- An adapter's `enrich` raises `sources.base.EnrichmentDeferred` when its detail couldn't be read now (LinkedIn's hourly cap, cool-down, a block, a network error, a 5xx). The poller leaves the row `pending` (reported as `waiting`) and the next cycle of its source tries again, until `linkedin.job_page_wait_hours`; then it's decided without the detail. Pending rows of job-board searches aren't tied to one search, so the cycle's `claimed` set hands each to the first target of its source.
+- `LinkedInGate.turn(when=...)` checks `when` before the pause and yields False without pausing or counting a request. A caller that may give up must pass it, or every caller queued behind a cap or a cool-down sleeps a full pause. Tests of queuing hold `gate.turn()` while the callers start: respx answers without suspending, so plain `gather` never queues.
 - `prescreen` judges locations only when the list gave some (Workday's "2 Locations" comes as none); `evaluate` judges a posting still without locations after its detail call.
 - Workday's `searchText` matches descriptions too: a common word ("platform" on Workday's own board) can match every job. Keyword boards never close postings; a board without keywords closes only after a full read whose count reaches the first page's `total`.
 - `Settings()` reads `./.env`; tests that build settings pass `_env_file=None`.
@@ -71,7 +74,11 @@ Personal job-posting watcher. Read PROGRESS.md first: milestone checklists, deci
 - The blocklist is config.yaml's plus `blocked_companies` rows: the dashboard merges them per request (`routes._blocklist`), the poller at the start of each cycle. `WebState.blocklist` is config.yaml's only.
 - `repo.set_status` takes `now` and sets `status_changed_at`; bulk moves use `repo.set_statuses`.
 - htmx logs a console error for an out-of-band swap whose target is missing; to change cards that may not be on the page, send an `HX-Trigger` event and handle it in `static/app.js`.
-- There is no digest and no per-cycle push cap: every match (tier `instant`) is pushed, best first. `scoring.instant_threshold` only centers the LLM band. A push that failed is retried while the posting is fresh, open and still `New`.
+- There is no digest and no per-cycle push cap: every match (tier `instant`) is pushed, whatever its score. `scoring.instant_threshold` only centers the LLM band. A push that failed is retried while the posting is fresh, open and still `New`.
+- A cycle sends its matches as one message (`format.batch_notification`: "3 new job postings were found via watchlist. Top score: Stripe - 0.87"), and only matches from its own sources, so a failed push is retried by the same scheduled job. `report.pushes` keeps each match's title line; integration tests read them from `env.pushed`, while `env.notifier.sent` holds the batch messages (and health alerts).
+
+- A redirect whose final URL path contains "maintenance" is a `maintenance` failure (`HttpAdapter._send`). Each HTTP source's `MaintenanceGate` (built in `runtime.build_adapters`, paced by its `sleep`) retries it, then pauses the source: its targets come back `skipped`, with no run. Health ignores maintenance runs per target and opens one incident for the source (target `*`). respx never suspends, so in tests the first target finishes its retries before the next starts, and the others are skipped.
+- `HealthMonitor.review` groups due messages by (source, kind, recovery): several boards failing or recovering together go out as one message, and `DueMessage.incident_ids` are marked sent together.
 
 ## Verified API facts (2026-10-23, Workday and LinkedIn job pages 2026-10-24)
 
@@ -95,9 +102,11 @@ Confirmed by `JOBPULSE_LIVE=1 uv run pytest -m live` (15 passed) and read-only p
 - **Simplify feed:** 13 MB (2 MB gzipped). httpx asks for gzip and gets a weak ETag, which answers `If-None-Match` with 304. 19,325 records, 3,075 open (`active && is_visible`); the 14 hidden ones are all inactive. 784 open listings are dated exactly midnight UTC.
 - **JobSpy 1.4.0:** failures and ignored options are in `frame.attrs["errors"/"warnings"]`, keyed by site; a board never raises, and a 429 reads `response status code 429 (blocked: use a proxy)`. LinkedIn rows never carry `job_url_direct`. `verbose=0` logs errors only, and with root logging configured JobSpy adds no handler of its own.
 - **Workday CXS** (NVIDIA, Salesforce, Workday, Intel, Microchip):
+  - Maintenance (2026-10-31, every tenant): `POST .../jobs` answers 303 to `community.workday.com/maintenance-page`, which lands on `static.community.workday.com/maintenance-page.html` (HTML).
   - `POST .../wday/cxs/{tenant}/{site}/jobs`: `limit: 21` answers HTTP 400; `total` is filled on the first page only (later pages say 0). No ETag.
   - Items: `title`, `externalPath`, `locationsText` ("2 Locations" for several, often "US, CA, Santa Clara"), `postedOn`, `bulletFields` (requisition id), sometimes `remoteType` ("Flex", "Remote").
   - Mostly newest first, but not strictly (4 out of order in 120), so a partial read can't be trusted.
+  - `searchText` (probed 2026-10-28 on NVIDIA, Salesforce, CVS, Leidos, Associated Bank): fuzzy and ignores quotes. "full stack" finds a bank's "Full Time" jobs, "machine learning" finds CVS's "Pharmacy Intern", and "fullstack" finds almost nothing. Keyword results come newest first on Salesforce and CVS but by relevance on NVIDIA (a job posted yesterday sat near result 1,000), so a keyword finding more than `workday.max_pages` × 20 jobs can hide new ones. `total` caps at 2,000.
   - The site path is case-insensitive. An unknown site answers 404 JSON; an unknown tenant or wrong `wdN` host answers 422.
   - `wdN.myworkdaysite.com/recruiting/{tenant}/{site}` tenants answer on `{tenant}.wdN.myworkdayjobs.com` too.
   - Detail `GET {api}{externalPath}` keys on the last path segment (any location slug works) and returns `jobPostingInfo` with `jobDescription` (HTML), `startDate` (a date), `location`, `additionalLocations`, `remoteType`, `jobReqId`.

@@ -22,11 +22,11 @@ from sqlalchemy.orm import Session
 from jobpulse.config import SLUG_PATTERN, AppConfig, clean_keywords
 from jobpulse.core.atsurls import (
     AtsRef,
+    default_board_name,
     detect_ats_url,
     detect_workday_url,
     gh_jid,
     normalize_workday_token,
-    workday_board,
 )
 from jobpulse.core.dedupe import normalize_company
 from jobpulse.core.filters import Blocklist
@@ -468,7 +468,7 @@ async def _detect(request: Request, url: str) -> Detection:
     validation = await state.detector.validate(ref)
     if not validation.ok:
         return Detection(url, f"{board} couldn't be validated: {validation.error}", ref=ref)
-    name = validation.name or _default_name(ref)
+    name = validation.name or default_board_name(ref)
     if state.blocklist.blocks_company(name):
         return Detection(
             url, f"{name} is on your blocklist (blocklist.companies in config.yaml).", ref=ref
@@ -485,13 +485,6 @@ async def _detect(request: Request, url: str) -> Detection:
         tone="success",
         warning=_size_warning(state.config, ref, validation.job_count),
     )
-
-
-def _default_name(ref: AtsRef) -> str:
-    """What the name field starts with when the board doesn't say: a Workday tenant, else
-    the token."""
-    board = workday_board(ref.token) if ref.ats == "workday" else None
-    return board.tenant if board is not None else ref.token
 
 
 def _size_warning(config: AppConfig, ref: AtsRef, job_count: int) -> str | None:

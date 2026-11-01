@@ -42,6 +42,7 @@ class Validation:
     job_count: int = 0
     error: str | None = None
     error_kind: ErrorKind | None = None
+    titles: tuple[str, ...] = ()  # Workday: the first page's titles
 
     @property
     def permanent(self) -> bool:
@@ -137,14 +138,19 @@ class AtsDetector:
         validation, _ = await self._check(board, AshbyAdapter.list_url(ref.token), _jobs)
         return validation
 
-    async def _check_workday(self, ref: AtsRef) -> Validation:
+    async def workday_search(self, ref: AtsRef, keyword: str) -> Validation:
+        """How many jobs a keyword finds on a Workday board, from the first page of that
+        search (``job_count``)."""
+        return await self._check_workday(AtsRef(ref.ats, ref.token, None, ref.region), keyword)
+
+    async def _check_workday(self, ref: AtsRef, keyword: str = "") -> Validation:
         """The first page of the board's job search: Workday counts its jobs there."""
         board = workday_board(ref.token)
         if board is None:
             return Validation(ref, ok=False, error="not a Workday board", error_kind="parse")
         try:
             payload = await self._json.post_json(
-                WorkdayAdapter.jobs_url(board), WorkdayAdapter.search_body("", 0)
+                WorkdayAdapter.jobs_url(board), WorkdayAdapter.search_body(keyword, 0)
             )
         except FetchError as exc:
             return Validation(ref, ok=False, error=exc.message, error_kind=exc.kind)
@@ -153,7 +159,12 @@ class AtsDetector:
             return Validation(ref, ok=False, error="unexpected payload", error_kind="parse")
         total = payload.get("total")
         count = total if isinstance(total, int) and total >= len(jobs) else len(jobs)
-        return Validation(ref, ok=True, job_count=count)
+        titles = tuple(
+            job["title"]
+            for job in jobs
+            if isinstance(job, dict) and isinstance(job.get("title"), str)
+        )
+        return Validation(ref, ok=True, job_count=count, titles=titles)
 
     async def _check(
         self,

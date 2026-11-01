@@ -41,9 +41,7 @@ async def test_only_postings_in_your_countries_are_pushed(env: Env, boards: Scri
     await env.poll(sources=["linkedin"])
     report = await env.poll(sources=["linkedin"])
 
-    assert [message.title for message in env.notifier.sent] == [
-        "Northwind · Backend Engineer · USA · posted today"
-    ]
+    assert env.pushed == ["Northwind · Backend Engineer · USA · posted today"]
     abroad = env.posting("linkedin", "4101000032")
     assert (abroad.tier, abroad.tier_reason) == ("filtered", "no location in US (Nigeria)")
     assert env.posting("linkedin", "4101000033").tier == "filtered"

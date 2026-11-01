@@ -308,6 +308,8 @@ class Env:
     adapters: dict[str, Any]
     discoverer: Discoverer | None = None
     llm: LlmScorer | None = None
+    # Title lines of every match pushed by env.poll(); each cycle's go out as one message.
+    pushed: list[str] = field(default_factory=list)
 
     def poller(self) -> Poller:
         return Poller(
@@ -320,7 +322,10 @@ class Env:
         )
 
     async def poll(self, **kwargs: Any) -> CycleReport:
-        return await self.poller().run_cycle(**kwargs)
+        report = await self.poller().run_cycle(**kwargs)
+        if not report.dry_run and report.push_summary is not None:
+            self.pushed.extend(report.pushes)
+        return report
 
     @property
     def board(self) -> FakeBoardAdapter:
@@ -438,7 +443,7 @@ def env(
 ) -> Env:
     time_machine.move_to(NOW, tick=False)
     config = make_config()
-    adapters: dict[str, Any] = dict(build_adapters(http, config))
+    adapters: dict[str, Any] = dict(build_adapters(http, config, sleep=FakeSleep()))
     adapters["linkedin"] = FakeBoardAdapter("linkedin")
     return Env(
         database, http, config, RecordingNotifier(), adapters, build_discoverer(http, config)

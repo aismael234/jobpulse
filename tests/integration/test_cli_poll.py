@@ -81,6 +81,7 @@ def test_dry_run_after_a_baseline_prints_the_push_it_would_send(
         "would notify: Acme · Backend Engineer, Platform API · SF / Remote · posted 25 min ago"
         in output
     )
+    assert "push (would send): 2 new job postings were found via all sources. Top score: " in output
     assert "greenhouse/acme: 6 fetched, 1 new" in output
     assert count_rows(db_url, "postings") == postings_before
     assert count_rows(db_url, "runs") == runs_before

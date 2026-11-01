@@ -906,26 +906,33 @@ def pending_rows(
     return list(session.scalars(query.order_by(PostingRow.id)))
 
 
-def instant_unnotified(session: Session, *, since: datetime) -> list[PostingRow]:
-    """Open, untriaged matches whose push hasn't gone out, best first."""
+def instant_unnotified(
+    session: Session, *, since: datetime, sources: Collection[str] | None = None
+) -> list[PostingRow]:
+    """Open, untriaged matches whose push hasn't gone out, best first; only from ``sources``
+    when given."""
+    query = select(PostingRow).where(
+        PostingRow.tier == "instant",
+        PostingRow.notified_at.is_(None),
+        PostingRow.merged_into_id.is_(None),
+        PostingRow.closed_at.is_(None),
+        PostingRow.status == "New",
+        PostingRow.first_seen_at >= since,
+    )
+    if sources is not None:
+        query = query.where(PostingRow.source.in_(list(sources)))
     return list(
         session.scalars(
-            select(PostingRow)
-            .where(
-                PostingRow.tier == "instant",
-                PostingRow.notified_at.is_(None),
-                PostingRow.merged_into_id.is_(None),
-                PostingRow.closed_at.is_(None),
-                PostingRow.status == "New",
-                PostingRow.first_seen_at >= since,
-            )
-            .order_by(PostingRow.score.desc(), PostingRow.first_seen_at, PostingRow.id)
+            query.order_by(PostingRow.score.desc(), PostingRow.first_seen_at, PostingRow.id)
         )
     )
 
 
-def mark_notified(session: Session, row_id: int, *, now: datetime) -> None:
-    session.execute(update(PostingRow).where(PostingRow.id == row_id).values(notified_at=now))
+def mark_notified(session: Session, row_ids: Collection[int], *, now: datetime) -> None:
+    if row_ids:
+        session.execute(
+            update(PostingRow).where(PostingRow.id.in_(list(row_ids))).values(notified_at=now)
+        )
 
 
 # --- dashboard -----------------------------------------------------------------------------

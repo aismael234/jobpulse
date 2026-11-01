@@ -11,11 +11,13 @@ import typer
 import uvicorn
 
 from jobpulse import __version__
+from jobpulse.board_import import ImportReport, import_boards, read_links, render_import
 from jobpulse.config import (
     DEFAULT_ENV_FILE,
     AppConfig,
     ConfigError,
     Settings,
+    clean_keywords,
     company_blocklist,
     config_warnings,
     dashboard_credentials,
@@ -34,12 +36,14 @@ from jobpulse.runtime import (
     KNOWN_SOURCES,
     DatabaseNotReady,
     WorkerStalled,
+    build_http,
     open_database,
     poll_once,
     render_report,
     run_worker,
     send_test_notification,
 )
+from jobpulse.sources.ats_detect import AtsDetector
 from jobpulse.web.app import create_app
 
 log = logging.getLogger("jobpulse")
@@ -320,6 +324,68 @@ def companies_sync(ctx: typer.Context) -> None:
             typer.echo(f"{label}: {name}")
     if not (report.added or report.updated or report.deactivated):
         typer.echo("watchlist already in sync")
+
+
+@companies_app.command("import")
+def companies_import(
+    ctx: typer.Context,
+    file: Annotated[
+        Path,
+        typer.Argument(
+            help="A file with job or careers links: JSON (every URL value; a company name "
+            "beside it names the board) or any text.",
+            exists=True,
+            dir_okay=False,
+        ),
+    ],
+    workday_keywords: Annotated[
+        str,
+        typer.Option(
+            "--workday-keywords",
+            help="Comma-separated keywords each Workday board is searched for every poll, e.g. "
+            '"software engineer, full stack". Without them, Workday boards are left out.',
+        ),
+    ] = "",
+    priority: Annotated[
+        int,
+        typer.Option("--priority", min=0, max=1000, help="Priority of the added companies."),
+    ] = 0,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Find and validate the boards; add nothing.")
+    ] = False,
+) -> None:
+    """Add the Greenhouse, Lever, Ashby and Workday boards behind a file's links to the
+    watchlist, each validated like a URL pasted on the Watchlist page."""
+    state = _state(ctx)
+    config = _load_config(state)
+    try:
+        keywords = clean_keywords(workday_keywords.split(","))
+    except ValueError as exc:
+        _fail(exc)
+    try:
+        links = read_links(file.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError) as exc:
+        _fail(f"couldn't read {file}: {exc}")
+    try:
+        sessions = open_database(_database_url(state, config))
+    except DatabaseNotReady as exc:
+        _fail(exc)
+    _start_logging(state, config)
+
+    async def run() -> ImportReport:
+        async with build_http(config) as http:
+            return await import_boards(
+                links,
+                detector=AtsDetector(http),
+                sessions=sessions,
+                config=config,
+                keywords=keywords,
+                priority=priority,
+                dry_run=dry_run,
+            )
+
+    for line in render_import(asyncio.run(run()), config=config):
+        typer.echo(line)
 
 
 @notify_app.command("test")

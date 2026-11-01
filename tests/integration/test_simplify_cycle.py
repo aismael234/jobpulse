@@ -77,7 +77,7 @@ async def test_a_fresh_new_listing_is_pushed_once(env: Env, feed: SimplifyMock) 
 
     assert feed.sent_etag() == ETAG_1
     assert report.pushes == [DELTA_PUSH]
-    assert [message.title for message in env.notifier.sent] == [DELTA_PUSH]
+    assert env.pushed == [DELTA_PUSH]
     assert env.posting("simplify", "a2").tier == "instant"
     assert env.feed_state().etag == ETAG_2
 
@@ -224,4 +224,4 @@ async def test_a_pending_listing_is_finished_even_when_the_feed_is_unchanged(
     feed.not_modified()
     await env.poll(sources=["simplify"])
     assert env.posting("simplify", "a2").tier == "instant"
-    assert [message.title for message in env.notifier.sent] == [DELTA_PUSH]
+    assert env.pushed == [DELTA_PUSH]

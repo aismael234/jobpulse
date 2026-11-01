@@ -1,12 +1,14 @@
-"""Message formatting. Push title line:
-``Stripe · Backend Engineer · SF / Remote · posted 25 min ago``."""
+"""Message formatting. A cycle's matches go out as one push,
+``3 new job postings were found via watchlist. Top score: Stripe - 0.87``; each match's title
+line, ``Stripe · Backend Engineer · SF / Remote · posted 25 min ago``, is what the CLI and the
+worker log show."""
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from jobpulse.core.locations import DEFAULT_SHORT_LABELS, location_summary
-from jobpulse.core.models import Precision
+from jobpulse.core.models import ATS_SOURCES, FEED_SOURCES, JOB_BOARD_SOURCES, Precision
 from jobpulse.core.timeparse import ensure_utc
 from jobpulse.notify.base import Notification
 
@@ -20,6 +22,12 @@ _BREAKDOWN_LABELS = {
     "level_mismatch": "level",
     "llm": "llm",
 }
+# The worker's scheduled jobs, by the sources each one polls.
+_CATEGORIES = (
+    ("watchlist", ATS_SOURCES),
+    ("Simplify", FEED_SOURCES),
+    ("job boards", JOB_BOARD_SOURCES),
+)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -89,26 +97,40 @@ def breakdown_text(breakdown: Mapping[str, float | None] | None) -> str:
     return ", ".join(f"{label} {value:+.2f}" for label, value in parts)
 
 
-def instant_notification(
-    content: PushContent,
+def category_label(sources: Collection[str] | None) -> str:
+    """The scheduled job a cycle stands for: "watchlist", "Simplify", "job boards", several of
+    them, or "all sources"."""
+    if sources is None:
+        return "all sources"
+    wanted = set(sources)
+    names = [name for name, group in _CATEGORIES if group & wanted]
+    if not names:
+        return ", ".join(sorted(wanted))
+    return names[0] if len(names) == 1 else f"{', '.join(names[:-1])} and {names[-1]}"
+
+
+def batch_notification(
+    matches: Sequence[PushContent],
     *,
-    now: datetime,
+    category: str,
     priority: int = 4,
     tags: Sequence[str] = ("briefcase",),
-    short_labels: Mapping[str, str] = DEFAULT_SHORT_LABELS,
 ) -> Notification:
-    where = "; ".join(content.locations) or "location not given"
-    lines = [content.title, f"{content.company}{SEPARATOR}{where}" if content.company else where]
-    if content.score is not None:
-        detail = breakdown_text(content.breakdown)
-        lines.append(
-            f"{content.source}{SEPARATOR}score {content.score:.2f}"
-            + (f" ({detail})" if detail else "")
-        )
+    """One push for a cycle's matches: "3 new job postings were found via watchlist. Top
+    score: Stripe - 0.87". Tapping it opens the top posting."""
+    if not matches:
+        raise ValueError("a batch needs at least one match")
+    count = len(matches)
+    noun = "job posting" if count == 1 else "job postings"
+    text = f"{count} new {noun} {'was' if count == 1 else 'were'} found via {category}."
+    scored = [match for match in matches if match.score is not None]
+    top = max(scored, key=lambda match: match.score or 0.0) if scored else matches[0]
+    if top.score is not None:
+        text += f" Top score: {top.company or top.title} - {top.score:.2f}"
     return Notification(
-        title=title_line(content, now=now, short_labels=short_labels),
-        body="\n".join(lines),
-        click_url=content.click_url,
+        title=f"{count} new {noun}{SEPARATOR}{category}",
+        body=text,
+        click_url=top.click_url,
         priority=priority,
-        tags=tuple(dict.fromkeys((*tags, content.source))),
+        tags=tuple(tags),
     )

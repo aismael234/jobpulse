@@ -55,16 +55,23 @@ class LinkedInGate:
         return until
 
     @asynccontextmanager
-    async def turn(self) -> AsyncIterator[None]:
-        """Hold this for one request: it waits for the previous one's pause first."""
+    async def turn(self, when: Callable[[], bool] | None = None) -> AsyncIterator[bool]:
+        """Hold this for one request: it waits for the previous one's pause first.
+
+        ``when`` is checked once the turn comes, before the pause: when it says no, the turn
+        yields False at once, with no pause and nothing counted as a request, so callers
+        queued behind a cap or a cool-down don't each sleep a pause for nothing."""
         async with self._lock:
+            if when is not None and not when():
+                yield False
+                return
             if self._last is not None:
                 delay = self._rng.uniform(self.pacing.delay_min, self.pacing.delay_max)
                 wait = delay - (self._monotonic() - self._last)
                 if wait > 0:
                     await self._sleep(wait)
             try:
-                yield
+                yield True
             finally:
                 self._last = self._monotonic()
 

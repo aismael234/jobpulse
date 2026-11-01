@@ -110,8 +110,8 @@ async def test_the_first_poll_is_silent_and_a_new_job_is_pushed(
     await env.poll(sources=["workday"])
 
     assert workday.detail_route.call_count == 1  # only the new survivor
-    [push] = env.notifier.sent
-    assert push.title == "Omega · Backend Engineer, Search · Seattle · posted today"
+    [push] = env.pushed
+    assert push == "Omega · Backend Engineer, Search · Seattle · posted today"
     row = env.posting("workday", external_id(wd_job(3, "Backend Engineer, Search")))
     assert row.tier == "instant"
     assert row.description_text is not None

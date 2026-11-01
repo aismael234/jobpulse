@@ -11,7 +11,14 @@ AtsName = Literal["greenhouse", "lever", "ashby", "workday"]
 SearchSite = Literal["indeed", "linkedin"]
 Precision = Literal["exact", "day", "none"]
 ErrorKind = Literal[
-    "http_429", "http_4xx", "http_5xx", "timeout", "parse", "jobspy_board_error", "other"
+    "http_429",
+    "http_4xx",
+    "http_5xx",
+    "timeout",
+    "parse",
+    "jobspy_board_error",
+    "maintenance",  # redirected to the source's maintenance page
+    "other",
 ]
 Tier = Literal["pending", "baseline", "merged", "filtered", "stale", "instant"]
 Region = Literal["us", "eu"]

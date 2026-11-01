@@ -1,6 +1,7 @@
 """M4: LinkedIn's public job page. The applicant line in its phrasings, the description with
 its criteria, pages one at a time with pauses, and a 429 that ends job pages for the cycle and
-cools LinkedIn searches down too."""
+cools LinkedIn searches down too. A page that couldn't be read raises EnrichmentDeferred, and
+pages queued behind the cap or a cool-down don't sleep a pause each."""
 
 import asyncio
 import random
@@ -14,6 +15,7 @@ import respx
 from jobpulse.core.applicants import ApplicantCount
 from jobpulse.core.models import FetchResult, Posting, SearchTarget
 from jobpulse.httpclient import HttpClient
+from jobpulse.sources.base import EnrichmentDeferred
 from jobpulse.sources.jobspy_boards import JobSpyAdapter
 from jobpulse.sources.linkedin_gate import LinkedInGate, Pacing
 from jobpulse.sources.linkedin_guest import (
@@ -155,6 +157,21 @@ async def test_the_gate_lets_one_request_through_at_a_time() -> None:
     assert most == 1
 
 
+async def test_a_turn_declined_by_when_neither_pauses_nor_counts() -> None:
+    sleep, monotonic = FakeSleep(), FakeMonotonic()
+    gate = LinkedInGate(sleep=sleep, rng=random.Random(1), monotonic=monotonic)
+    async with gate.turn(when=lambda: True) as allowed:
+        assert allowed
+    for _ in range(3):
+        async with gate.turn(when=lambda: False) as allowed:
+            assert not allowed
+    assert sleep.calls == []
+    monotonic.now += 100  # the declined turns didn't count as requests
+    async with gate.turn() as allowed:
+        assert allowed
+    assert sleep.calls == []
+
+
 def test_the_gate_cools_down_after_a_block() -> None:
     clock = Clock()
     gate = LinkedInGate(Pacing(cooldown=timedelta(minutes=30)), clock=clock)
@@ -207,13 +224,14 @@ async def test_a_block_ends_job_pages_and_starts_the_cooldown(
     later = respx_mock.get(page_url("4101100004")).respond(200, html=PAGE_200)
     setup = Setup(http)
 
-    first = linkedin_posting("4101100003")
-    assert await setup.pages.enrich(first) == first
+    with pytest.raises(EnrichmentDeferred, match=f"HTTP {status}"):
+        await setup.pages.enrich(linkedin_posting("4101100003"))
     assert blocked.call_count == 1  # no retries
     assert setup.gate.blocked_until() == NOW + timedelta(minutes=30)
 
     second = linkedin_posting("4101100004")
-    assert await setup.pages.enrich(second) == second
+    with pytest.raises(EnrichmentDeferred, match="cool-down until 14:30 UTC"):
+        await setup.pages.enrich(second)
     assert later.call_count == 0  # stopped for the rest of the cycle
 
     setup.clock.now += timedelta(minutes=31)
@@ -229,15 +247,23 @@ async def test_a_redirect_to_the_sign_in_wall_is_a_block(
     )
     respx_mock.get("https://www.linkedin.com/authwall?trk=bf").respond(200, html="<h1>Join</h1>")
     setup = Setup(http)
-    posting = linkedin_posting()
-    assert await setup.pages.enrich(posting) == posting
+    with pytest.raises(EnrichmentDeferred, match="sign-in wall"):
+        await setup.pages.enrich(linkedin_posting())
     assert setup.gate.blocked_until() is not None
 
 
-@pytest.mark.parametrize(
-    "outcome", [httpx.Response(404), httpx.Response(500), httpx.ConnectError("down")]
-)
-async def test_other_failures_leave_the_posting_alone_without_a_cooldown(
+async def test_a_page_that_is_gone_leaves_the_posting_alone(
+    respx_mock: respx.MockRouter, http: HttpClient
+) -> None:
+    respx_mock.get(page_url("4101100003")).respond(404)
+    setup = Setup(http)
+    posting = linkedin_posting()
+    assert await setup.pages.enrich(posting) == posting
+    assert setup.gate.blocked_until() is None
+
+
+@pytest.mark.parametrize("outcome", [httpx.Response(500), httpx.ConnectError("down")])
+async def test_a_server_or_network_error_defers_without_a_cooldown(
     respx_mock: respx.MockRouter, http: HttpClient, outcome: Any
 ) -> None:
     respx_mock.get(page_url("4101100003")).mock(
@@ -245,8 +271,8 @@ async def test_other_failures_leave_the_posting_alone_without_a_cooldown(
         return_value=None if isinstance(outcome, Exception) else outcome,
     )
     setup = Setup(http)
-    posting = linkedin_posting()
-    assert await setup.pages.enrich(posting) == posting
+    with pytest.raises(EnrichmentDeferred):
+        await setup.pages.enrich(linkedin_posting())
     assert setup.gate.blocked_until() is None
 
 
@@ -256,14 +282,54 @@ async def test_at_most_max_per_hour_pages(respx_mock: respx.MockRouter, http: Ht
         for job_id in ("4101100003", "4101100004", "4101100005")
     }
     setup = Setup(http, max_per_hour=2)
-    for job_id in routes:
-        await setup.pages.enrich(linkedin_posting(job_id))
+    await setup.pages.enrich(linkedin_posting("4101100003"))
+    await setup.pages.enrich(linkedin_posting("4101100004"))
+    with pytest.raises(EnrichmentDeferred, match="2 job pages read in the last hour"):
+        await setup.pages.enrich(linkedin_posting("4101100005"))
     assert [route.call_count for route in routes.values()] == [1, 1, 0]
 
     setup.monotonic.now += 3601
     enriched = await setup.pages.enrich(linkedin_posting("4101100005"))
     assert enriched.applicants is not None
     assert routes["4101100005"].call_count == 1
+
+
+async def enrich_while_queued(setup: Setup, job_ids: list[str]) -> list[object]:
+    """Enrich every posting while a search holds LinkedIn's turn, so that all of them pass
+    the first check and queue behind it, as pages do behind a cycle's searches."""
+    async with setup.gate.turn():
+        tasks = [
+            asyncio.create_task(setup.pages.enrich(linkedin_posting(job_id))) for job_id in job_ids
+        ]
+        await asyncio.sleep(0)
+    return list(await asyncio.gather(*tasks, return_exceptions=True))
+
+
+async def test_pages_queued_behind_the_cap_defer_without_pausing(
+    respx_mock: respx.MockRouter, http: HttpClient
+) -> None:
+    job_ids = [f"41011000{n:02d}" for n in range(10, 16)]
+    for job_id in job_ids:
+        respx_mock.get(page_url(job_id)).respond(200, html=PAGE_25)
+    setup = Setup(http, max_per_hour=2)
+    outcomes = await enrich_while_queued(setup, job_ids)
+    assert [isinstance(outcome, EnrichmentDeferred) for outcome in outcomes] == [
+        False, False, True, True, True, True,
+    ]  # fmt: skip
+    assert len(setup.sleep.calls) == 2  # before each of the two pages read
+
+
+async def test_pages_queued_behind_a_block_defer_without_pausing(
+    respx_mock: respx.MockRouter, http: HttpClient
+) -> None:
+    respx_mock.get(page_url("4101100010")).respond(429)
+    others = [f"41011000{n:02d}" for n in range(11, 15)]
+    routes = [respx_mock.get(page_url(job_id)).respond(200, html=PAGE_25) for job_id in others]
+    setup = Setup(http)
+    outcomes = await enrich_while_queued(setup, ["4101100010", *others])
+    assert all(isinstance(outcome, EnrichmentDeferred) for outcome in outcomes)
+    assert all(route.call_count == 0 for route in routes)
+    assert len(setup.sleep.calls) == 1  # before the refused page only
 
 
 async def test_postings_from_other_sources_are_left_alone(http: HttpClient) -> None:
@@ -295,7 +361,8 @@ async def test_a_job_page_429_cools_linkedin_searches_down_too(
     scrape = FakeScrape(jobspy_frame([]))
     searches = JobSpyAdapter(scrape=scrape, gate=setup.gate, clock=setup.clock)
 
-    await setup.pages.enrich(linkedin_posting())
+    with pytest.raises(EnrichmentDeferred):
+        await setup.pages.enrich(linkedin_posting())
     result = await searches.fetch(SEARCH)
     assert result.skipped
     assert result.error_kind == "http_429"
@@ -311,8 +378,8 @@ async def test_a_search_429_stops_job_pages(respx_mock: respx.MockRouter, http: 
     searches = JobSpyAdapter(scrape=FakeScrape(blocked), gate=setup.gate, clock=setup.clock)
 
     assert (await searches.fetch(SEARCH)).error_kind == "http_429"
-    posting = linkedin_posting()
-    assert await setup.pages.enrich(posting) == posting
+    with pytest.raises(EnrichmentDeferred, match="cool-down"):
+        await setup.pages.enrich(linkedin_posting())
     assert route.call_count == 0
 
 

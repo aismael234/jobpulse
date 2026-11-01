@@ -31,6 +31,7 @@ Source of truth for what is built, what was decided, and what is left. The appro
 - **Dashboard views:** New holds untriaged matches (the `instant` tier). Saved, Applied and Dismissed hold every posting with that status, whatever its tier, so a triaged posting never disappears because of its tier. Merged copies never show; their primary does, with `also_seen_on`.
 - **Blocked companies in the dashboard** are hidden everywhere except Applied, which is also your record of applications. It's decided when the page is read, so unblocking brings them back.
 - **No digest, no push cap (your request, 2026-10-24):** every posting that passes the filters is a match (tier `instant`) and is pushed in the cycle that decides it, best score first, whatever the score. `jobpulse digest`, `schedules.digest_times`, `notify.max_instant_per_cycle`, `notify.dashboard_url` and `postings.digest_sent_at` are gone (migration 0004: `digest` rows became `instant`, and rows a digest had listed took its time as `notified_at`, so they aren't pushed again). `scoring.instant_threshold` stays only as the center of the LLM band. A failed push is retried next cycle while the posting is fresh, open and still `New`.
+- **One push per scheduled job run (your request, 2026-10-28):** one message per push made ntfy answer 429. Each cycle now sends its matches as one message: "N new job posting(s) were found via watchlist / Simplify / job boards. Top score: Company - 0.87", tapping through to the top posting. A cycle pushes only matches from its own sources, so the job named is the one that found them and a failed push is retried by that job's next run. `poll --once` without `--source` says "all sources". Health alerts are still sent one per incident.
 - **Watchdog:** every interval job must finish a run within 3× the longest interval plus jitter (4.5 h with the defaults). It checks each job, not just "any job", so one hung source is caught too, and it uses the monotonic clock, so a machine waking from sleep doesn't look stalled. The worker exits with code 1 and Docker restarts it.
 - **Dashboard security:** basic auth when both `DASHBOARD_USER` and `DASHBOARD_PASSWORD` are set (only one is an error); `/healthz` is exempt and says only "ok". The CSRF token is per browser, in an `HttpOnly`, `SameSite=Strict` cookie, and every POST sends it back as `X-CSRF-Token` (HTMX) or a form field; cross-site POSTs are refused by `Sec-Fetch-Site`. Strict CSP (no inline scripts or styles), `no-store` on pages, no API docs, secrets masked in every rendered value, and links to source URLs only when they are http(s).
 - **Watchlist paste:** the URL first, then the page once (public hosts only); one validation call (a Workday board answers the first page of its search, and the form adds a keywords field); a board already stored isn't validated again; blocked boards and companies are refused. A board bigger than `discovery.max_board_jobs` can still be added by hand, with a warning. Added boards are `dashboard`-owned with the priority you pick; priority and pause can be changed only for companies that aren't in config.yaml, because each poll applies config.yaml again.
@@ -39,7 +40,7 @@ Source of truth for what is built, what was decided, and what is left. The appro
 - **Health page "24 h fetched"** sums `fetched_count` over the window, as the spec asks, next to the number of runs.
 - **Run history retention (your request, 2026-10-24):** `retention.runs_days` (30; `null` keeps everything) must cover `health.busy_window_days` while health checks are on. The poller deletes older runs at most once a day per process and never in a dry run. A target that has failed for longer than the window shows "never" as its last success.
 - **HEAD (your request, 2026-10-24):** the dashboard's GET pages answer HEAD too (uvicorn sends no body); static files already did.
-- **LinkedIn job pages (M4):** `jobs-guest/jobs/api/jobPosting/{id}` for LinkedIn postings that pass the prescreen (never in a baseline, never for merged copies), one at a time through the gate the JobSpy searches use (4–8 s), one attempt each. A 429, 999, 403 or a redirect to the sign-in wall starts the shared cool-down (30 min), which also ends job pages for the rest of the cycle; other failures leave the posting as it was. At most `linkedin.max_job_pages_per_hour` (40). The applicant line is the first applicant phrase in the page's text; the description is the description section plus its criteria list ("Seniority level: Mid-Senior level").
+- **LinkedIn job pages (M4):** `jobs-guest/jobs/api/jobPosting/{id}` for LinkedIn postings that pass the prescreen (never in a baseline, never for merged copies), one at a time through the gate the JobSpy searches use (4–8 s), one attempt each. A 429, 999, 403 or a redirect to the sign-in wall starts the shared cool-down (30 min), which also ends job pages for the rest of the cycle. At most `linkedin.max_job_pages_per_hour` (40). A page that couldn't be read (the cap, the cool-down, a block, a network error, a 5xx) leaves the posting pending, undecided and unpushed; the next job-board cycle tries again, for up to `linkedin.job_page_wait_hours` (12, under the freshness window), and then judges it without the page (2026-10-28). A 404 or a page that isn't a job page leaves the posting as it was. The applicant line is the first applicant phrase in the page's text; the description is the description section plus its criteria list ("Seniority level: Mid-Senior level").
 - **No cookies:** the HTTP client keeps none (a cookie policy that allows no domain), so no request carries a session. LinkedIn's guest page sets several.
 - **Applicant signal:** `1 - count / scoring.applicant_cap` (200), a range counted from its known end: "Be among the first 25" scores 0.875, "Over 200" scores 0.
 - **Workday tokens and ids:** a board is `tenant.wdN/site` (config and the paste box also take its URL). A posting's id is `tenant.wdn/site/jobpostingid`, lowercased, because Workday ids are unique only within a site. Job URLs in every form canonicalize to `workday:{token}:{id}`, so feed and job-board copies merge onto a watched Workday row, and a new Workday board takes over earlier copies.
@@ -59,6 +60,7 @@ Source of truth for what is built, what was decided, and what is left. The appro
 - **Years asked** come from `evaluate` on `Decision.years_required` (the LLM step carries it), stored with the decision; `set_decision` keeps stored years when a later decision didn't read the description.
 - **Bulk dismiss** works only in New and Saved (Applied is your record). It re-runs the page's filters across all pages and moves only postings pushed (or first seen) and last moved before the page was rendered (`as_of`). Undo puts the same ids back.
 - **Dashboard blocklist:** `blocked_companies` rows, by `normalize_company` key, merged with config.yaml's in the dashboard per request and in the poller at the start of every cycle (so a running worker needs no restart). Blocking a company on config.yaml's watchlist is refused, like the config rule. Removing that company's other cards uses an `HX-Trigger` event and `static/app.js`: an htmx out-of-band delete logs a console error when no card matches.
+- **Board import (your request, 2026-10-28):** `jobpulse companies import FILE` adds the boards behind a file's links. JSON: every value that is a URL, with the company name beside it (URLs inside text such as descriptions don't count); other text: every URL. Only URLs that name a Greenhouse, Lever, Ashby or Workday board are used, plus `gh_jid` pages (read once per host); nothing else is fetched. Each board is checked like a pasted URL (merged blocklist, one validation call, `discovery.max_board_jobs`) and added with origin `import`, which counts toward no cap and stays editable on the Watchlist page. Workday boards need `--workday-keywords`; each keyword is searched once, dropped for a board when it finds more than a poll reads (relevance-sorted sites would hide new jobs past it), or when it costs more than one page and no title on its first page passes your title rules (Workday's search is fuzzy). `routes._default_name` became `core.atsurls.default_board_name`.
 - **Dashboard query:** SQL filters run in the database; pay and location are read in Python over the ids and labels of every posting the SQL filters leave (which also gives the location options and their counts), then the page's rows are loaded by id. On a copy of your data a page takes 140–200 ms.
 
 ## Deviations from the spec layout
@@ -155,6 +157,34 @@ Source of truth for what is built, what was decided, and what is left. The appro
 - [x] live smoke tests: a Workday board, a LinkedIn job page; VERIFY results in CLAUDE.md
 - [x] README, `config.example.yaml`, `.env.example`, CLAUDE.md
 - [x] `scripts/check.sh` green, commit `feat(m4): …`
+
+## M5–M9 — Packaged, personalized aggregator (plan approved 2026-11-01)
+
+The full plan, with decisions, code facts and a data snapshot, is in `/Users/aladdinismael/.claude/plans/develop-a-plan-to-jiggly-glade.md`. Read its "Start here" section first. In short:
+- Self-hosted, one user per install; LinkedIn and Indeed on by default.
+- Resume similarity from local embeddings; preferences in the database and edited on Settings; secrets entered on Settings go in the database (`.env` wins).
+- A web onboarding wizard; a seed of boards synced from the public repo, with `companies contribute`.
+- `jobpulse up` plus a GHCR image; a new public repo `aismael234/jobpulse` under MIT, with squashed history.
+- Stop after each milestone.
+
+- [x] **Before M5.0:** ask whether to commit the uncommitted 10-28…10-31 work first (committed 2026-11-01).
+- [ ] **M5.0 — Early-applicant filters** (migration 0006), as dashboard filters only:
+  - [ ] reposted postings, hidden by default (LinkedIn's "Reposted" marker, after a live check of its wording, plus fingerprint or Greenhouse requisition seen 7+ days earlier);
+  - [ ] maximum applicants (unknown counts pass);
+  - [ ] contract show/hide/only (no signal means full-time);
+  - [ ] no "More filters" fold;
+  - [ ] the ATS lag probe; the `results_wanted` 25→50 suggestion for capped searches.
+- [ ] **M5.1 — Saved filters** (migration 0007):
+  - [ ] Settings page, up to 8 labeled filters with pastel bullets and a color-blind mode;
+  - [ ] none saved: batch pushes as today; any saved: one message per fitting posting with bullets, most-matched last, at most 10 per cycle and 200 a day, then one summary;
+  - [ ] only postings decided after a save fire; on/off switches, with all off meaning silence;
+  - [ ] dashboard buttons with new-match badges (cleared when opened) and bullets on cards.
+- [ ] **M5a — Resume similarity experiment:** local embeddings evaluated on a scratch copy, with dismissals your rules already explain set aside. Stop and decide the weight together.
+- [ ] **M5b — Resume scoring wiring** (migration 0008).
+- [ ] **M6 — Profile in the DB, secrets, Settings, config.yaml import** (migration 0009).
+- [ ] **M7 — Seed, remote sync, contribute** (migration 0010).
+- [ ] **M8 — `jobpulse up` and the onboarding wizard.**
+- [ ] **M9 — Packaging and publishing** (repo creation, push and GHCR only with your explicit OK).
 
 ## Log
 
@@ -270,3 +300,37 @@ Source of truth for what is built, what was decided, and what is left. The appro
   - **Found and fixed there:** bulk dismiss was offered in Applied (now New and Saved only, checked on the server too); a day-precision posted date showed as 17:00 PDT in the CSV (now the date); "Dismiss all" stayed on screen after it ran; the out-of-band delete logged console errors (now `HX-Trigger` and `app.js`).
   - `scripts/check.sh` green: 1296 passed.
   - Not done: `data/jobpulse.db` is still at 0004. Shipping needs the worker and dashboard stopped, the branch merged, `uv run jobpulse db upgrade`, and both started again.
+- **2026-10-27** — Sprint shipped (your request). Another Claude session had stopped the worker and dashboard on purpose (last run 15:19); main fast-forwarded to the branch (the uncommitted 10-26 log entry was in it, line for line); `data/jobpulse.db` backed up to `data/jobpulse-before-0005.db`, then upgraded to 0005 (years asked set on 7,221 postings); both restarted in the app's Terminal panel. First cycle: every run ok, 16 pushes.
+- **2026-10-28** — Boards from another service's export (your request, step 1 of the review below).
+  - **Read-only review of the export** (173 jobs, Oct 23–28; now `data/job_posting.json`, which git ignores): jobpulse had stored 27 and pushed 10; 125 of the 146 others pass your title and location rules. 99 links name boards jobpulse can read, on 61 unwatched boards (25 Workday, 17 Greenhouse, 17 Ashby, 2 Lever); 48 are on systems it can't read (Oracle Cloud, SmartRecruiters, Workable and Eightfold lead, as in the Simplify feed). Rules rejected 23 titles: 14 internships, 6 Staff or Member of Technical Staff, 2 New Grad, 1 Support Engineer.
+  - **Workday probes** (read-only): see CLAUDE.md; they led to the keyword checks above.
+  - **Test-first:** 11 import tests failed against a stub on missing behavior, then 1 more for the title check. One test of mine assumed lowercased Workday tokens; tokens keep the site's case.
+  - **Scratch copy first:** imported 64 boards, then a dry Workday poll baselined all 25 boards in 35 s.
+  - **Live:** 63 boards added (19 Greenhouse, 2 Lever, 17 Ashby, 25 Workday), 7 already watched. Workday keywords "software engineer, full stack, backend engineer, machine learning engineer": 90 searches, about 267 requests a watchlist poll. Dropped per board: "software engineer" at NVIDIA, Salesforce, Leidos, GDIT and Blue Origin (more than 500 results), "machine learning engineer" at NVIDIA, "full stack" at Associated Bank and First American (no matching title); Dexcom keeps only "full stack" and "backend engineer", because your rules don't match its "SW Development Engineer" titles.
+  - Another Claude session had stopped the worker and dashboard on purpose at 08:27 UTC. Restarted at 09:04 for the import; the next cycle baselined all 63 boards with every run ok.
+  - Two imported boards are staffing agencies (The Mural Group, True Talent Solutions Partners); their postings will be pushed unless you block them.
+  - `scripts/check.sh` green.
+- **2026-10-28** — One push per scheduled job run (your request: ntfy answered 429 to one push per posting).
+  - Each cycle's matches go out as one message naming the count, the job (watchlist, Simplify, job boards) and the top score; a cycle pushes only its own sources' matches.
+  - Tests: the integration suite reads pushed title lines from `env.pushed`; new tests for the batch format, the job labels and a failed LinkedIn push that waits for the next job-board run instead of riding along with the watchlist's.
+  - `scripts/check.sh` green.
+  - Not done: the running worker keeps sending one push per posting until it is restarted; nothing committed.
+- **2026-10-28** — LinkedIn job pages wait for a later cycle (your request, after asking why no score passed 0.80).
+  - **Why no LinkedIn match had its page since 10-27 13:34 UTC:** a page read past the hourly cap or during a cool-down still waited its turn and slept the 15–30 s pause before giving up, so a cycle with a few hundred LinkedIn survivors spent hours sleeping and was stopped before it saved anything (the cycle that started at 22:25 was still in that phase at 23:10). Only cycles where a 429 had blocked every read from the start finished, so every decided LinkedIn match was judged without its page. Leftover pending rows were also taken up by every LinkedIn search (six times each), since they aren't tied to one search. A live probe at 23:00 UTC (two requests) read a page fine from the home IP.
+  - **Fixes:** `LinkedInGate.turn(when=...)` declines a turn before its pause, without counting it as a request; a cycle hands each pending row to the first target of its source that runs (`claimed`).
+  - **Retry queue:** `enrich` raises `EnrichmentDeferred` when the page couldn't be read now; `Poller._hold_deferred` keeps the row pending (counted as `waiting` in the report and the run's stats) until it has waited `linkedin.job_page_wait_hours`, then decides it without the page. No migration: waiting rows are ordinary `pending` rows.
+  - **Tests:** queued pages behind the cap or a block don't pause (they failed against the old gate: 6 pauses instead of 2); a 429 keeps a cycle's matches waiting until a later cycle reads their pages; the wait limit; a wait of 0; one search takes up a waiting posting (failed against the old pickup); config default and the freshness rule.
+  - `scripts/check.sh` green.
+  - Not done: the running worker keeps the old behavior until it is restarted; nothing committed.
+- **2026-10-31** — Workday maintenance: retries, a 30-minute pause, one message (your request).
+  - **What happened:** Workday's maintenance redirects every tenant's API (303) to `community.workday.com/maintenance-page`; jobpulse read the HTML as "invalid JSON" (`parse`). Three cycles from 06:13 UTC opened 20 per-board failing incidents, and 20 alerts went out at 06:46.
+  - **Retries and pause:** a redirect to a maintenance page is a new `maintenance` error kind. Each HTTP source has a `MaintenanceGate`: 2 retries 30 s apart (one target retries at a time for the whole source), then the source is paused for 30 minutes; its targets are skipped, with no run recorded. `maintenance:` in config (`retries`, `retry_delay_seconds`, `cooldown_minutes`). The pause is in memory: a restart tries again at once.
+  - **One message:** maintenance runs count for no target's failing streak. Instead one incident for the whole source (target `*`) says "jobpulse: workday is down for maintenance; pausing it for 30 min", and one message says when it's back. Separately, alerts and recoveries of one source that are due together are grouped ("jobpulse: 20 workday boards are failing" / "... recovered"), so the 20 incidents already open will recover as one message.
+  - **Tests:** the gate (retries, pause, skip, concurrent targets, an answer mid-retry), the redirect detection, assess ignoring maintenance runs, the texts, and three cycles end to end (maintenance down and back; two boards failing and recovering together; a grouped send that fails and is retried whole).
+  - `scripts/check.sh` green.
+  - Not done: the running worker keeps the old behavior until it is restarted; nothing committed.
+- **2026-11-01** — Plan for M5–M9 (packaging, onboarding, resume scoring, early-applicant filters, saved filters), approved after grilling. Planning only, no code changed. Read-only findings that shaped it:
+  - **Lag:** ATS jobs reach jobpulse a median of 2.7 h (Ashby), 5 h (Greenhouse) and 6 h (Lever) after their own published time, though each board is polled about every 21 min. None of the roughly 6,200 Greenhouse, Ashby and Lever polls in the last 24 h got a 304.
+  - **Capped searches:** all 6 LinkedIn searches return 25 of 25 in nearly every run.
+  - **Simplify links:** 30% of open listings link to Workday, which discovery skips.
+  - **ntfy.sh limits:** a burst of 60, then 1 per 5 s, and 250 messages a day.

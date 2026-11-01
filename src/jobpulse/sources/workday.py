@@ -35,6 +35,7 @@ from jobpulse.core.text import html_to_text
 from jobpulse.core.timeparse import parse_workday_posted_on, utcnow
 from jobpulse.httpclient import HttpClient
 from jobpulse.sources.base import FetchError, HttpAdapter, require_company
+from jobpulse.sources.maintenance import MaintenanceGate
 
 log = logging.getLogger(__name__)
 
@@ -111,8 +112,9 @@ class WorkdayAdapter(HttpAdapter):
         aliases: Mapping[str, str] | None = None,
         clock: Callable[[], datetime] = utcnow,
         max_pages: int = DEFAULT_MAX_PAGES,
+        maintenance: MaintenanceGate | None = None,
     ) -> None:
-        super().__init__(http, aliases=aliases, clock=clock)
+        super().__init__(http, aliases=aliases, clock=clock, maintenance=maintenance)
         self.max_pages = max_pages
 
     @staticmethod

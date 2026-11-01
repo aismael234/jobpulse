@@ -113,7 +113,7 @@ async def test_only_the_band_is_asked_about_and_the_answer_moves_the_score(
     assert band.score_breakdown["llm"] == pytest.approx(-0.09)
     assert band.tier_reason is not None
     assert "llm -0.09" in band.tier_reason
-    assert [push.title.split(" · ")[1] for push in env.notifier.sent] == [
+    assert [push.split(" · ")[1] for push in env.pushed] == [
         "Backend Engineer, Payments",
         "Platform Engineer",
     ]

@@ -577,10 +577,19 @@ def write_resume(tmp_path: Path, text: str = RESUME_TEXT) -> Path:
     return path
 
 
+@pytest.mark.parametrize("wait", ["12", "20"])
+def test_job_pages_wait_less_than_the_freshness_window(tmp_path: Path, wait: str) -> None:
+    body = f"detection: {{freshness_hours: 12}}\nlinkedin: {{job_page_wait_hours: {wait}}}\n"
+    message = config_error(write_config(tmp_path, body))
+    assert f"linkedin.job_page_wait_hours ({wait}) must be less than" in message
+    assert "detection.freshness_hours (12)" in message
+
+
 def test_m4_sections_get_their_defaults(tmp_path: Path) -> None:
     config = load_config(write_config(tmp_path))
     assert config.linkedin.job_pages
     assert config.linkedin.max_job_pages_per_hour == 40
+    assert config.linkedin.job_page_wait_hours == 12
     assert config.workday.max_pages == 25
     assert config.scoring.applicant_cap == 200
     assert config.scoring.weights.llm == 0.15

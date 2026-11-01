@@ -10,6 +10,13 @@ Rules (``health`` in config.yaml), per (source, target):
   (detection rule 6); this alert is how you hear about it.
 A failing incident recovers on the next successful run, a silent one when postings come
 back. A skipped search records no run, so it neither fails nor recovers.
+
+A source redirected to its maintenance page (``sources.maintenance``) opens one "maintenance"
+incident for the whole source (target ``*``) in the cycle that paused it, and recovers when
+a target of that source succeeds again. Those runs count for no target's failing streak.
+
+Messages of one source that are due together (20 Workday boards failing at once, then
+recovering) go out as one message.
 """
 
 import logging
@@ -21,14 +28,17 @@ from typing import Literal, cast
 
 from sqlalchemy.orm import Session
 
-from jobpulse.config import HealthConfig
+from jobpulse.config import HealthConfig, MaintenanceConfig
+from jobpulse.core.models import JOB_BOARD_SOURCES
 from jobpulse.db import repo
-from jobpulse.db.tables import Run
+from jobpulse.db.tables import HealthIncident, Run
 from jobpulse.notify.base import Notification
 
 log = logging.getLogger(__name__)
 
-IncidentKind = Literal["failing", "silent"]
+IncidentKind = Literal["failing", "silent", "maintenance"]
+SOURCE_WIDE = "*"  # the target of a maintenance incident
+GROUP_NAMES_SHOWN = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,14 +57,21 @@ class HealthRules:
     busy_min: int = 5
     busy_window: timedelta = timedelta(days=7)
     zero_window: timedelta = timedelta(hours=24)
+    maintenance_retries: int = 2  # for the maintenance message only
+    maintenance_cooldown: timedelta = timedelta(minutes=30)
 
     @classmethod
-    def from_config(cls, config: HealthConfig) -> "HealthRules":
+    def from_config(
+        cls, config: HealthConfig, maintenance: MaintenanceConfig | None = None
+    ) -> "HealthRules":
+        maintenance = maintenance or MaintenanceConfig()
         return cls(
             consecutive_failures=config.consecutive_failures,
             busy_min=config.busy_min,
             busy_window=timedelta(days=config.busy_window_days),
             zero_window=timedelta(hours=config.zero_hours),
+            maintenance_retries=maintenance.retries,
+            maintenance_cooldown=timedelta(minutes=maintenance.cooldown_minutes),
         )
 
 
@@ -71,7 +88,9 @@ class Assessment:
 
 
 def assess(runs: Sequence[RunSample], *, now: datetime, rules: HealthRules) -> Assessment:
-    """Judge one target from its runs, newest first."""
+    """Judge one target from its runs, newest first. Runs that landed on a maintenance page
+    are left out: the source-wide maintenance incident covers them."""
+    runs = [run for run in runs if run.error_kind != "maintenance"]
     if not runs:
         return Assessment()
     streak = 0
@@ -117,7 +136,20 @@ def _when(value: datetime) -> str:
 
 def _duration(value: timedelta) -> str:
     hours = max(0.0, value.total_seconds()) / 3600
+    if hours < 1:
+        return f"{hours * 60:.0f} min"
     return f"{hours:.0f} h" if hours < 72 else f"{hours / 24:.0f} d"
+
+
+def _targets(source: str, count: int) -> str:
+    noun = "search" if source in JOB_BOARD_SOURCES else "board"
+    return f"{count} {source} {noun}{'' if count == 1 else ('es' if noun == 'search' else 's')}"
+
+
+def _names(targets: Sequence[str]) -> str:
+    shown = ", ".join(targets[:GROUP_NAMES_SHOWN])
+    more = len(targets) - GROUP_NAMES_SHOWN
+    return f"{shown} and {more} more" if more > 0 else shown
 
 
 def failing_alert(source: str, target: str, assessment: Assessment) -> tuple[str, str]:
@@ -144,9 +176,51 @@ def silent_alert(
     return f"jobpulse: {source}/{target} returned no postings for {_duration(now - since)}", body
 
 
+def maintenance_alert(source: str, rules: HealthRules) -> tuple[str, str]:
+    """Title and body for a source that's down for maintenance."""
+    cooldown = _duration(rules.maintenance_cooldown)
+    retries = rules.maintenance_retries
+    body = (
+        f"Its API redirects to its maintenance page, also after {retries} "
+        f"{'retry' if retries == 1 else 'retries'}. "
+        f"{source} is paused for {cooldown} at a time until it answers again. "
+        "Nothing is closed meanwhile; you'll get one message when it's back."
+    )
+    return f"jobpulse: {source} is down for maintenance; pausing it for {cooldown}", body
+
+
+def group_alert(
+    kind: IncidentKind, source: str, incidents: Sequence[HealthIncident]
+) -> tuple[str, str]:
+    """One alert for several targets of one source."""
+    names = _names([incident.target for incident in incidents])
+    targets = _targets(source, len(incidents))
+    first = incidents[0]
+    if kind == "silent":
+        title = f"jobpulse: {targets} returned no postings"
+    else:
+        title = f"jobpulse: {targets} are failing"
+    return title, f"{names}. {source}/{first.target}: {first.detail}"
+
+
+def group_recovery(
+    kind: IncidentKind, source: str, incidents: Sequence[HealthIncident]
+) -> tuple[str, str]:
+    names = _names([incident.target for incident in incidents])
+    targets = _targets(source, len(incidents))
+    if kind == "silent":
+        return f"jobpulse: {targets} are returning postings again", f"{names}."
+    return f"jobpulse: {targets} recovered", f"{names}: runs succeed again."
+
+
 def recovery_text(
     kind: IncidentKind, source: str, target: str, *, opened_at: datetime, now: datetime
 ) -> tuple[str, str]:
+    if kind == "maintenance":
+        return (
+            f"jobpulse: {source} is back from maintenance",
+            f"It answers again after {_duration(now - opened_at)} of maintenance.",
+        )
     if kind == "failing":
         return (
             f"jobpulse: {source}/{target} recovered",
@@ -160,7 +234,7 @@ def recovery_text(
 
 @dataclass(frozen=True, slots=True)
 class DueMessage:
-    incident_id: int
+    incident_ids: tuple[int, ...]
     recovery: bool
     notification: Notification
 
@@ -176,34 +250,85 @@ class HealthMonitor:
         self.rules = rules
 
     def review(
-        self, session: Session, keys: Collection[tuple[str, str]], *, now: datetime
+        self,
+        session: Session,
+        keys: Collection[tuple[str, str]],
+        *,
+        now: datetime,
+        maintenance: Collection[str] = (),
+        answered: Collection[str] = (),
     ) -> list[DueMessage]:
         """Update the incidents of the targets in ``keys`` (they just ran), then return every
-        message still due, including alerts whose earlier send failed."""
+        message still due, including alerts whose earlier send failed. ``maintenance`` names
+        the sources that landed on their maintenance page this cycle, ``answered`` those with
+        a successful run."""
         for source, target in sorted(keys):
             self._review(session, source, target, now=now)
-        due: list[DueMessage] = []
+        for source in sorted(set(maintenance) | set(answered)):
+            self._review_maintenance(session, source, down=source in maintenance, now=now)
+        groups: dict[tuple[str, str, bool], list[HealthIncident]] = {}
         for incident in repo.incidents_due(session):
-            if incident.resolved_at is None:
-                message = Notification(
-                    title=incident.title, body=incident.detail, priority=4, tags=("warning",)
-                )
-            else:
-                title, body = recovery_text(
-                    cast(IncidentKind, incident.kind),
-                    incident.source,
-                    incident.target,
-                    opened_at=incident.opened_at,
-                    now=incident.resolved_at,
-                )
-                message = Notification(
-                    title=title, body=body, priority=3, tags=("white_check_mark",)
-                )
-            due.append(DueMessage(incident.id, incident.resolved_at is not None, message))
-        return due
+            key = (incident.source, incident.kind, incident.resolved_at is not None)
+            groups.setdefault(key, []).append(incident)
+        return [
+            self._message(cast(IncidentKind, kind), source, incidents, recovery=recovery)
+            for (source, kind, recovery), incidents in groups.items()
+        ]
 
     def mark_sent(self, session: Session, message: DueMessage, *, now: datetime) -> None:
-        repo.mark_incident_sent(session, message.incident_id, recovery=message.recovery, now=now)
+        for incident_id in message.incident_ids:
+            repo.mark_incident_sent(session, incident_id, recovery=message.recovery, now=now)
+
+    @staticmethod
+    def _message(
+        kind: IncidentKind, source: str, incidents: Sequence[HealthIncident], *, recovery: bool
+    ) -> DueMessage:
+        ids = tuple(incident.id for incident in incidents)
+        if not recovery:
+            if len(incidents) == 1:
+                title, body = incidents[0].title, incidents[0].detail
+            else:
+                title, body = group_alert(kind, source, incidents)
+            return DueMessage(
+                ids, False, Notification(title=title, body=body, priority=4, tags=("warning",))
+            )
+        if len(incidents) == 1:
+            [incident] = incidents
+            assert incident.resolved_at is not None
+            title, body = recovery_text(
+                kind,
+                source,
+                incident.target,
+                opened_at=incident.opened_at,
+                now=incident.resolved_at,
+            )
+        else:
+            title, body = group_recovery(kind, source, incidents)
+        return DueMessage(
+            ids, True, Notification(title=title, body=body, priority=3, tags=("white_check_mark",))
+        )
+
+    def _review_maintenance(
+        self, session: Session, source: str, *, down: bool, now: datetime
+    ) -> None:
+        incident = repo.open_incidents(session, source=source, target=SOURCE_WIDE).get(
+            "maintenance"
+        )
+        if incident is None and down:
+            title, body = maintenance_alert(source, self.rules)
+            repo.open_incident(
+                session,
+                source=source,
+                target=SOURCE_WIDE,
+                kind="maintenance",
+                opened_at=now,
+                title=title,
+                detail=body,
+            )
+            log.warning("health: %s", title)
+        elif incident is not None and not down:
+            incident.resolved_at = now
+            log.info("health: %s is back from maintenance", source)
 
     def _review(self, session: Session, source: str, target: str, *, now: datetime) -> None:
         rules = self.rules

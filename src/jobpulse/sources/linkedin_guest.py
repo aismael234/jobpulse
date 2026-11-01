@@ -7,9 +7,12 @@ applicants") is read from the page's text, not from a DOM path; the description 
 description section, its criteria list (seniority, employment type, ...) included.
 
 Pages are read only for LinkedIn postings that pass the prescreen, one at a time through the
-shared ``LinkedInGate``, with no retries. A 429 (or LinkedIn's 999, a 403, or a redirect to the
-sign-in wall) starts the cool-down, which also ends job pages for the rest of the cycle; the
-postings are then judged without their page. At most ``max_per_hour`` pages are read.
+shared ``LinkedInGate``, with no retries within a cycle. A 429 (or LinkedIn's 999, a 403, or a
+redirect to the sign-in wall) starts the cool-down, which also ends job pages for the rest of
+the cycle. At most ``max_per_hour`` pages are read. A page that couldn't be read (the cap, the
+cool-down, a block, a network error, a 5xx) raises ``EnrichmentDeferred``: the poller keeps
+the posting pending and tries again in a later cycle, up to ``linkedin.job_page_wait_hours``,
+then judges it without its page.
 """
 
 import dataclasses
@@ -25,7 +28,7 @@ from jobpulse.core.applicants import ApplicantCount, parse_applicants
 from jobpulse.core.models import FetchResult, Posting, Target
 from jobpulse.core.text import html_to_text, texts_by_class
 from jobpulse.httpclient import HttpClient
-from jobpulse.sources.base import SourceAdapter
+from jobpulse.sources.base import EnrichmentDeferred, SourceAdapter
 from jobpulse.sources.linkedin_gate import LinkedInGate
 
 log = logging.getLogger(__name__)
@@ -81,14 +84,19 @@ class LinkedInJobPages:
         self._read: deque[float] = deque()  # when each page of the last hour was read
 
     async def enrich(self, posting: Posting) -> Posting:
-        """``posting`` with its page's description and applicant count, or unchanged."""
+        """``posting`` with its page's description and applicant count, or unchanged when the
+        page has nothing to add (gone, not a job page). Raises ``EnrichmentDeferred`` when
+        the page couldn't be read now: the hourly cap, a cool-down, a block, a network error
+        or a 5xx."""
         if posting.source != "linkedin" or not posting.external_id.isdigit():
             return posting
         if not self._can_read():
-            return posting
-        async with self._gate.turn():
-            if not self._can_read():  # a page read while this one waited may have been refused
-                return posting
+            raise EnrichmentDeferred(self._why_not())
+        # Checked again when the turn comes, before its pause: a page read while this one
+        # waited may have been refused or used up the hour.
+        async with self._gate.turn(when=self._can_read) as allowed:
+            if not allowed:
+                raise EnrichmentDeferred(self._why_not())
             self._read.append(self._monotonic())
             page = await self._fetch(posting.external_id)
         if page is None:
@@ -107,15 +115,22 @@ class LinkedInJobPages:
             self._read.popleft()
         return len(self._read) < self._max_per_hour
 
+    def _why_not(self) -> str:
+        until = self._gate.blocked_until()
+        if until is not None:
+            return f"LinkedIn cool-down until {until:%H:%M} UTC"
+        return f"{self._max_per_hour} job pages read in the last hour"
+
     async def _fetch(self, job_id: str) -> JobPage | None:
-        """One GET, never retried; ``None`` when the page couldn't be read."""
+        """One GET, never retried; ``None`` when the page has nothing to add. A page that
+        couldn't be read now raises ``EnrichmentDeferred``."""
         try:
             response = await self._http.get_limited(
                 JOB_PAGE_URL.format(job_id=job_id), max_bytes=MAX_PAGE_BYTES
             )
         except httpx.HTTPError as exc:
             log.warning("linkedin job page %s: %s", job_id, type(exc).__name__)
-            return None
+            raise EnrichmentDeferred(f"job page {job_id}: {type(exc).__name__}") from exc
         signed_out = response.request.url.path.startswith(_SIGN_IN_PATHS)
         if response.status_code in _BLOCK_STATUSES or signed_out:
             until = self._gate.back_off()
@@ -124,7 +139,10 @@ class LinkedInJobPages:
                 "LinkedIn refused job page %s (%s); no LinkedIn requests until %s UTC",
                 job_id, reason, f"{until:%H:%M}",
             )  # fmt: skip
-            return None
+            raise EnrichmentDeferred(f"job page {job_id}: {reason}")
+        if response.status_code >= 500:
+            log.info("linkedin job page %s: HTTP %d", job_id, response.status_code)
+            raise EnrichmentDeferred(f"job page {job_id}: HTTP {response.status_code}")
         if response.status_code != 200 or not response.request.url.path.startswith("/jobs-guest/"):
             log.info("linkedin job page %s: HTTP %d", job_id, response.status_code)
             return None

@@ -1,6 +1,10 @@
 """One poll cycle: fetch, diff, dedupe, prescreen, enrich, decide (with the LLM layer's second
 opinion near the threshold, when it's on), notify, check health, discover new boards.
 
+A posting whose detail couldn't be read (``EnrichmentDeferred``: LinkedIn's hourly page cap or
+cool-down) stays pending, undecided, and the next cycle of its source tries again, until it
+has waited ``linkedin.job_page_wait_hours``; then it's judged without the detail.
+
 The network phases run concurrently; every database phase is a synchronous block with no
 ``await`` inside. Live runs commit between phases, so no transaction is held across network
 I/O. A dry run flushes instead and rolls the whole cycle back at the end.
@@ -46,8 +50,8 @@ from jobpulse.discovery import Discoverer, Sighting
 from jobpulse.health import HealthMonitor, HealthRules
 from jobpulse.llm.scorer import Ask, LlmScorer
 from jobpulse.notify.base import Notifier, NotifierError
-from jobpulse.notify.format import PushContent, instant_notification
-from jobpulse.sources.base import SourceAdapter
+from jobpulse.notify.format import PushContent, batch_notification, category_label, title_line
+from jobpulse.sources.base import EnrichmentDeferred, SourceAdapter
 
 log = logging.getLogger(__name__)
 
@@ -72,6 +76,7 @@ class TargetReport:
     reopened: int = 0
     filtered: int = 0
     stale: int = 0
+    waiting: int = 0  # left pending for a later cycle to read their detail
     instant: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     run_id: int | None = None
@@ -88,6 +93,7 @@ class TargetReport:
             "reopened": self.reopened,
             "filtered": self.filtered,
             "stale": self.stale,
+            "waiting": self.waiting,
             "instant": len(self.instant),
         }
 
@@ -97,7 +103,8 @@ class CycleReport:
     dry_run: bool
     targets: list[TargetReport] = field(default_factory=list)
     pushes: list[str] = field(default_factory=list)  # title lines sent (or, in a dry run, due)
-    failed_pushes: int = 0
+    push_summary: str | None = None  # the one message they went out in
+    failed_pushes: int = 0  # matches whose push failed
     discovered: list[str] = field(default_factory=list)  # boards added (or that would be)
     discovery_deferred: int = 0
     discovery_skipped: list[str] = field(default_factory=list)  # valid, but over a limit
@@ -167,7 +174,9 @@ class Poller:
         self._discoverer = discoverer
         self._llm = llm
         self._health = (
-            HealthMonitor(HealthRules.from_config(config.health)) if config.health.enabled else None
+            HealthMonitor(HealthRules.from_config(config.health, config.maintenance))
+            if config.health.enabled
+            else None
         )
         self._rules = filter_rules(config)
         self._config_blocklist = self._rules.blocklist
@@ -176,6 +185,7 @@ class Poller:
         self._short_labels = short_labels(config)
         self._freshness = timedelta(hours=config.detection.freshness_hours)
         self._fingerprint_window = timedelta(days=config.detection.fingerprint_window_days)
+        self._detail_wait = timedelta(hours=config.linkedin.job_page_wait_hours)
         self._next_prune: datetime | None = None  # run history is pruned at most once a day
 
     async def run_cycle(
@@ -202,14 +212,18 @@ class Poller:
             results = await asyncio.gather(*(self._fetch(target) for target in targets))
             survivors: list[_Survivor] = []
             sightings: list[Sighting] = []
+            claimed: set[int] = set()  # rows already headed for a decision this cycle
             for target, result in zip(targets, results, strict=True):
-                target_report, target_survivors = self._ingest(session, target, result, started_at)
+                target_report, target_survivors = self._ingest(
+                    session, target, result, started_at, claimed
+                )
                 report.targets.append(target_report)
                 survivors.extend(target_survivors)
                 sightings.extend(self._sightings(result))
                 unit.checkpoint()
 
-            enriched = await asyncio.gather(*(self._enrich(survivor) for survivor in survivors))
+            details = await asyncio.gather(*(self._enrich(survivor) for survivor in survivors))
+            survivors, enriched = self._hold_deferred(survivors, details)
             decisions = [
                 evaluate(posting, self._context(survivor))
                 for survivor, posting in zip(survivors, enriched, strict=True)
@@ -230,7 +244,7 @@ class Poller:
                     )
             unit.checkpoint()
 
-            await self._notify(unit, report)
+            await self._notify(unit, report, sources)
             await self._check_health(unit, report)
             await self._discover(unit, report, sightings)
             self._prune_runs(unit, report)
@@ -279,11 +293,17 @@ class Poller:
             )
 
     def _ingest(
-        self, session: Session, target: Target, result: FetchResult, started_at: datetime
+        self,
+        session: Session,
+        target: Target,
+        result: FetchResult,
+        started_at: datetime,
+        claimed: set[int],
     ) -> tuple[TargetReport, list[_Survivor]]:
         """Phase A for one target: record the run, apply presence and closures, insert new
         postings, link ATS rows to earlier copies, store a baseline silently, dedupe, and
-        prescreen."""
+        prescreen. ``claimed`` holds the rows earlier targets of this cycle took on; pending
+        rows aren't tied to one search, so the first search of their source takes them."""
         report = TargetReport(source=target.source, key=target.key)
         if result.skipped:  # never attempted, so there is no run to record
             report.ok = False
@@ -316,7 +336,8 @@ class Poller:
             # Nothing changed at the source; only rows an interrupted cycle left are open.
             if not target.baseline_done:
                 return report, []
-            pending = self._pending(session, target, company_id, report, now=now, exclude=())
+            pending = self._pending(session, target, company_id, report, now=now, exclude=claimed)
+            claimed.update(candidate.row_id for candidate in pending)
             return report, self._prescreen(session, pending)
 
         inserted = self._store(session, target, result, company_id, report, now=now)
@@ -344,14 +365,9 @@ class Poller:
         report.new = len(inserted)
 
         candidates = self._dedupe(session, target, inserted, report, now=now)
-        candidates += self._pending(
-            session,
-            target,
-            company_id,
-            report,
-            now=now,
-            exclude=[candidate.row_id for candidate in candidates],
-        )
+        claimed.update(candidate.row_id for candidate in candidates)
+        candidates += self._pending(session, target, company_id, report, now=now, exclude=claimed)
+        claimed.update(candidate.row_id for candidate in candidates)
         return report, self._prescreen(session, candidates)
 
     def _store(
@@ -461,7 +477,8 @@ class Poller:
         now: datetime,
         exclude: Collection[int],
     ) -> list[_Survivor]:
-        """Rows an interrupted cycle inserted but never decided."""
+        """Rows an interrupted cycle inserted but never decided, and rows waiting for their
+        detail."""
         token = target.token if isinstance(target, CompanyTarget) else None
         return [
             _Survivor(
@@ -517,17 +534,42 @@ class Poller:
                 )
         return sightings
 
-    async def _enrich(self, survivor: _Survivor) -> Posting:
+    async def _enrich(self, survivor: _Survivor) -> tuple[Posting, str | None]:
+        """The enriched posting, and why its detail couldn't be read now (else ``None``)."""
         adapter = self._adapters.get(survivor.posting.source)
         if adapter is None:
-            return survivor.posting
+            return survivor.posting, None
         try:
-            return await adapter.enrich(survivor.posting)
+            return await adapter.enrich(survivor.posting), None
+        except EnrichmentDeferred as exc:
+            return survivor.posting, str(exc)
         except Exception:
             log.exception(
                 "enrichment of %s/%s failed", survivor.posting.source, survivor.posting.external_id
             )
-            return survivor.posting
+            return survivor.posting, None
+
+    def _hold_deferred(
+        self, survivors: list[_Survivor], details: list[tuple[Posting, str | None]]
+    ) -> tuple[list[_Survivor], list[Posting]]:
+        """The survivors to decide now, with their postings. One whose detail couldn't be read
+        stays pending for a later cycle while it has waited less than
+        ``linkedin.job_page_wait_hours``; after that it's decided without the detail."""
+        now = self._clock()
+        kept: list[_Survivor] = []
+        postings: list[Posting] = []
+        for survivor, (posting, deferred) in zip(survivors, details, strict=True):
+            if deferred is not None:
+                waited = now - survivor.first_seen_at
+                label = f"{posting.source}/{posting.external_id}"
+                if waited < self._detail_wait:
+                    survivor.report.waiting += 1
+                    log.info("%s waits for a later cycle: %s", label, deferred)
+                    continue
+                log.info("%s judged without its detail after %s: %s", label, waited, deferred)
+            kept.append(survivor)
+            postings.append(posting)
+        return kept, postings
 
     async def _review(
         self,
@@ -590,12 +632,14 @@ class Poller:
         report.llm_stopped = llm.stopped
         return decided
 
-    async def _notify(self, unit: _UnitOfWork, report: CycleReport) -> None:
-        """Push every match not yet sent (so failed sends retry), best first, whatever its
-        score."""
+    async def _notify(
+        self, unit: _UnitOfWork, report: CycleReport, sources: Collection[str] | None
+    ) -> None:
+        """Push every match from this cycle's sources not yet sent (so a failed push is
+        retried by the same job's next cycle), whatever its score, as one message."""
         session = unit.session
         now = self._clock()
-        due = repo.instant_unnotified(session, since=now - self._freshness)
+        due = repo.instant_unnotified(session, since=now - self._freshness, sources=sources)
         # Rows decided before their company joined the blocklist are dropped, not pushed.
         blocked = {row.id for row in due if self._blocklist.blocks_company(row.company_name)}
         for row_id in blocked:
@@ -609,35 +653,45 @@ class Poller:
             if due:
                 log.warning("no notification channel configured; %d matches not pushed", len(due))
             return
-        for row in due:
-            message = instant_notification(
-                self._push_content(row),
-                now=now,
-                priority=self._config.notify.ntfy.priority,
-                tags=self._config.notify.ntfy.tags,
-                short_labels=self._short_labels,
-            )
-            if report.dry_run or self._notifier is None:
-                report.pushes.append(message.title)
-                continue
+        if not due:
+            return
+        contents = [self._push_content(row) for row in due]
+        message = batch_notification(
+            contents,
+            category=category_label(sources),
+            priority=self._config.notify.ntfy.priority,
+            tags=self._config.notify.ntfy.tags,
+        )
+        lines = [
+            title_line(content, now=now, short_labels=self._short_labels) for content in contents
+        ]
+        if self._notifier is not None and not report.dry_run:
             try:
                 await self._notifier.send(message)
             except NotifierError as exc:
-                report.failed_pushes += 1
-                log.warning("push for posting %d failed (retrying next cycle): %s", row.id, exc)
-                continue
-            repo.mark_notified(session, row.id, now=self._clock())
+                report.failed_pushes = len(due)
+                log.warning("push of %d matches failed (retrying next cycle): %s", len(due), exc)
+                return
+            repo.mark_notified(session, [row.id for row in due], now=self._clock())
             unit.checkpoint()
-            report.pushes.append(message.title)
+        report.push_summary = message.body
+        report.pushes = lines
 
     async def _check_health(self, unit: _UnitOfWork, report: CycleReport) -> None:
         """Open and resolve incidents for the targets that just ran, then send what's due:
-        one alert per incident and one recovery message. A failed send is retried next
-        cycle."""
+        one alert per incident and one recovery message, those of one source together. A
+        source that landed on its maintenance page has one incident for all its targets. A
+        failed send is retried next cycle."""
         if self._health is None:
             return
-        keys = {(target.source, target.key) for target in report.targets if target.run_id}
-        due = self._health.review(unit.session, keys, now=self._clock())
+        ran = [target for target in report.targets if target.run_id]
+        due = self._health.review(
+            unit.session,
+            {(target.source, target.key) for target in ran},
+            now=self._clock(),
+            maintenance={target.source for target in ran if target.error_kind == "maintenance"},
+            answered={target.source for target in ran if target.ok},
+        )
         unit.checkpoint()
         for message in due:
             title = message.notification.title
@@ -764,9 +818,7 @@ class Poller:
                 score=decision.score,
                 breakdown=decision.breakdown,
             )
-            line = instant_notification(
-                content, now=self._clock(), short_labels=self._short_labels
-            ).title
+            line = title_line(content, now=self._clock(), short_labels=self._short_labels)
             score = f" (score {decision.score:.2f})" if decision.score is not None else ""
             report.instant.append(line + score)
 

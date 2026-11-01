@@ -1,7 +1,9 @@
 """The SourceAdapter protocol and the shared base for HTTP adapters.
 
 Adapters never raise for HTTP problems: a non-2xx response, a timeout or a parse error
-becomes ``FetchResult(ok=False)``, never an empty success.
+becomes ``FetchResult(ok=False)``, never an empty success. A redirect to a maintenance page
+is a ``maintenance`` failure, which the adapter's ``MaintenanceGate`` retries and then turns
+into a pause of the whole source.
 """
 
 from collections.abc import Callable, Collection, Mapping
@@ -22,8 +24,10 @@ from jobpulse.core.models import (
 )
 from jobpulse.core.timeparse import parse_iso, utcnow
 from jobpulse.httpclient import HttpClient
+from jobpulse.sources.maintenance import MaintenanceGate
 
 _BODY_SNIPPET = 200
+_MAINTENANCE_PATH = "maintenance"  # Workday: community.workday.com/maintenance-page
 
 
 class SourceAdapter(Protocol):
@@ -32,6 +36,12 @@ class SourceAdapter(Protocol):
     async def fetch(self, target: Target) -> FetchResult: ...
 
     async def enrich(self, posting: Posting) -> Posting: ...
+
+
+class EnrichmentDeferred(Exception):
+    """Raised by ``enrich`` when its detail couldn't be read now but may be later (a cap, a
+    cool-down, a block). The poller keeps the posting pending and tries again next cycle,
+    up to ``linkedin.job_page_wait_hours``."""
 
 
 class FetchError(Exception):
@@ -93,12 +103,19 @@ class HttpAdapter:
         *,
         aliases: Mapping[str, str] | None = None,
         clock: Callable[[], datetime] = utcnow,
+        maintenance: MaintenanceGate | None = None,
     ) -> None:
         self.http = http
         self.aliases = aliases if aliases is not None else DEFAULT_ALIASES
         self.clock = clock
+        self.maintenance = maintenance
 
     async def fetch(self, target: Target) -> FetchResult:
+        if self.maintenance is None:
+            return await self._attempt(target)
+        return await self.maintenance.run(lambda: self._attempt(target))
+
+    async def _attempt(self, target: Target) -> FetchResult:
         fetched_at = self.clock()
         try:
             return await self._fetch(target, fetched_at)
@@ -144,6 +161,13 @@ class HttpAdapter:
             raise FetchError(
                 "other", f"network error after retries ({type(exc).__name__})"
             ) from None
+        if response.history and _MAINTENANCE_PATH in response.url.path.lower():
+            raise FetchError(
+                "maintenance",
+                f"{httpx.URL(url).host} is under maintenance "
+                f"(redirected to {response.url.host}{response.url.path})",
+                status=response.status_code,
+            )
         if response.status_code not in accept:
             snippet = " ".join(response.text[:_BODY_SNIPPET].split())
             message = f"HTTP {response.status_code} from {response.url.host}"

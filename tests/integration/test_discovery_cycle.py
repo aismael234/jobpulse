@@ -70,9 +70,7 @@ async def test_a_board_seen_in_the_feed_is_validated_once_and_added(
         ],
     )
     await env.poll(sources=["lever"], target_key="delta")
-    assert [message.title for message in env.notifier.sent] == [
-        "Delta · Backend Engineer · SF · posted 25 min ago"
-    ]
+    assert env.pushed == ["Delta · Backend Engineer · SF · posted 25 min ago"]
 
 
 async def test_known_and_removed_companies_are_never_added_again(

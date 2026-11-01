@@ -6,8 +6,9 @@ import pytest
 from jobpulse.core.timeparse import start_of_day
 from jobpulse.notify.format import (
     PushContent,
+    batch_notification,
+    category_label,
     humanize_age,
-    instant_notification,
     title_line,
     when_label,
 )
@@ -86,12 +87,52 @@ def test_no_source_timestamp_uses_first_seen() -> None:
     assert when_label(None, "none", NOW - timedelta(minutes=5), NOW) == "first seen 5 min ago"
 
 
-def test_instant_notification() -> None:
-    notification = instant_notification(content(), now=NOW, priority=4, tags=("briefcase",))
-    assert notification.title == "Stripe · Backend Engineer · SF / Remote · posted 25 min ago"
-    assert notification.click_url == "https://stripe.com/jobs/search?gh_jid=8172487"
+def test_a_batch_is_one_push_naming_the_count_the_job_and_the_top_score() -> None:
+    matches = [
+        content(company="Acme", score=0.61),
+        content(company="Stripe", score=0.82, click_url="https://stripe.example/apply"),
+        content(company="Initech", score=None),
+    ]
+    notification = batch_notification(
+        matches, category="watchlist", priority=4, tags=("briefcase",)
+    )
+    assert notification.title == "3 new job postings · watchlist"
+    assert notification.body == (
+        "3 new job postings were found via watchlist. Top score: Stripe - 0.82"
+    )
+    assert notification.click_url == "https://stripe.example/apply"  # the top posting
     assert notification.priority == 4
-    assert notification.tags == ("briefcase", "greenhouse")
-    assert "Backend Engineer" in notification.body
-    assert "San Francisco, CA" in notification.body
-    assert "0.82" in notification.body
+    assert notification.tags == ("briefcase",)
+
+
+def test_a_batch_of_one_is_singular() -> None:
+    notification = batch_notification([content()], category="Simplify")
+    assert notification.title == "1 new job posting · Simplify"
+    assert notification.body == "1 new job posting was found via Simplify. Top score: Stripe - 0.82"
+
+
+def test_a_batch_without_scores_or_a_company() -> None:
+    notification = batch_notification([content(company="", score=None)], category="job boards")
+    assert notification.body == "1 new job posting was found via job boards."
+    assert notification.click_url == "https://stripe.com/jobs/search?gh_jid=8172487"
+
+
+def test_an_empty_batch_is_refused() -> None:
+    with pytest.raises(ValueError, match="at least one match"):
+        batch_notification([], category="watchlist")
+
+
+@pytest.mark.parametrize(
+    ("sources", "label"),
+    [
+        (("greenhouse", "lever", "ashby", "workday"), "watchlist"),
+        (["greenhouse"], "watchlist"),
+        (("simplify",), "Simplify"),
+        (("indeed", "linkedin"), "job boards"),
+        (["lever", "linkedin"], "watchlist and job boards"),
+        (["lever", "simplify", "indeed"], "watchlist, Simplify and job boards"),
+        (None, "all sources"),
+    ],
+)
+def test_category_label(sources: tuple[str, ...] | list[str] | None, label: str) -> None:
+    assert category_label(sources) == label

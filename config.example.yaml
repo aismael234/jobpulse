@@ -124,6 +124,9 @@ linkedin:
   cooldown_minutes: 30          # after a 429, LinkedIn searches and job pages wait this long
   job_pages: true               # read each new LinkedIn match's public page: description, applicant count
   max_job_pages_per_hour: 40
+  job_page_wait_hours: 12       # a match whose page couldn't be read (cap, cool-down) stays undecided
+                                # and is tried again next cycle, for up to this long; then it's judged
+                                # without the page. 0 judges it at once; must be under freshness_hours
 
 # Workday boards: a search reads pages of 20 jobs (Workday's own limit), at most this many pages.
 workday:
@@ -163,6 +166,14 @@ health:
   busy_min: 5                   # "busy": a 7-day median of at least this many postings per run
   busy_window_days: 7
   zero_hours: 24                # only empty successful runs for this long: suspicious
+
+# A source whose API redirects to a maintenance page (Workday does, for every tenant at once) is
+# retried this many times, this far apart, and then paused as a whole: its boards are skipped
+# until the cool-down ends. One health message says it's down, and one says when it's back.
+maintenance:
+  retries: 2
+  retry_delay_seconds: 30
+  cooldown_minutes: 30
 
 # How long the run history (one row per fetch of a board, feed or search) is kept for the Health
 # page and the health rules. Pruned once a day; must cover health.busy_window_days.

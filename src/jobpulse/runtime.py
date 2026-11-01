@@ -36,6 +36,7 @@ from jobpulse.sources.jobspy_boards import JobSpyAdapter, Scrape
 from jobpulse.sources.lever import LeverAdapter
 from jobpulse.sources.linkedin_gate import LinkedInGate, Pacing
 from jobpulse.sources.linkedin_guest import LinkedInJobPages, LinkedInSource
+from jobpulse.sources.maintenance import MaintenanceGate, Sleep
 from jobpulse.sources.simplify import SimplifyAdapter
 from jobpulse.sources.workday import WorkdayAdapter
 
@@ -96,12 +97,28 @@ def build_http(
 
 
 def build_adapters(
-    http: HttpClient, config: AppConfig, *, scrape: Scrape | None = None
+    http: HttpClient,
+    config: AppConfig,
+    *,
+    scrape: Scrape | None = None,
+    sleep: Sleep = asyncio.sleep,
 ) -> dict[str, SourceAdapter]:
     """Every source's adapter. ``scrape`` replaces JobSpy's ``scrape_jobs`` (fixture mode).
     LinkedIn's searches and job pages share one gate, so all LinkedIn requests are paced and
-    cooled down together."""
+    cooled down together. Each HTTP source has its own maintenance gate, which ``sleep``
+    paces."""
     aliases = location_aliases(config)
+
+    def maintenance(name: str) -> MaintenanceGate:
+        settings = config.maintenance
+        return MaintenanceGate(
+            name,
+            retries=settings.retries,
+            retry_delay=timedelta(seconds=settings.retry_delay_seconds),
+            cooldown=timedelta(minutes=settings.cooldown_minutes),
+            sleep=sleep,
+        )
+
     linkedin = config.linkedin
     gate = LinkedInGate(
         Pacing(
@@ -113,11 +130,18 @@ def build_adapters(
     boards = JobSpyAdapter(scrape=scrape, aliases=aliases, gate=gate)
     pages = LinkedInJobPages(http, gate, max_per_hour=linkedin.max_job_pages_per_hour)
     return {
-        "greenhouse": GreenhouseAdapter(http, aliases=aliases),
-        "lever": LeverAdapter(http, aliases=aliases),
-        "ashby": AshbyAdapter(http, aliases=aliases),
-        "workday": WorkdayAdapter(http, aliases=aliases, max_pages=config.workday.max_pages),
-        "simplify": SimplifyAdapter(http, aliases=aliases),
+        "greenhouse": GreenhouseAdapter(
+            http, aliases=aliases, maintenance=maintenance("greenhouse")
+        ),
+        "lever": LeverAdapter(http, aliases=aliases, maintenance=maintenance("lever")),
+        "ashby": AshbyAdapter(http, aliases=aliases, maintenance=maintenance("ashby")),
+        "workday": WorkdayAdapter(
+            http,
+            aliases=aliases,
+            max_pages=config.workday.max_pages,
+            maintenance=maintenance("workday"),
+        ),
+        "simplify": SimplifyAdapter(http, aliases=aliases, maintenance=maintenance("simplify")),
         "indeed": boards,
         "linkedin": LinkedInSource(boards, pages) if linkedin.job_pages else boards,
     }
@@ -248,6 +272,7 @@ def render_report(report: CycleReport) -> list[str]:
             (target.reopened, "reopened"),
             (target.filtered, "filtered"),
             (target.stale, "stale"),
+            (target.waiting, "waiting for their job page"),
         ):
             if number:
                 counts.append(f"{number} {label}")
@@ -255,11 +280,14 @@ def render_report(report: CycleReport) -> list[str]:
         lines.extend(f"  merged: {line}" for line in target.merges)
         lines.extend(f"  warning: {warning}" for warning in target.warnings)
     verb = "would notify" if report.dry_run else "notified"
+    if report.push_summary:
+        lines.append(f"{'push (would send)' if report.dry_run else 'push'}: {report.push_summary}")
     lines.extend(f"{verb}: {title}" for title in report.pushes)
     if not report.pushes:
         lines.append(f"{verb}: nothing")
     if report.failed_pushes:
-        lines.append(f"failed pushes (retried next cycle): {report.failed_pushes}")
+        matches = _count(report.failed_pushes, "match", "matches")
+        lines.append(f"push failed (retried next cycle): {matches}")
     health = "health (would send)" if report.dry_run else "health"
     lines.extend(f"{health}: {title}" for title in report.health)
     added = "would add" if report.dry_run else "added"

@@ -8,6 +8,7 @@ from jobpulse.health import (
     RunSample,
     assess,
     failing_alert,
+    maintenance_alert,
     recovery_text,
     silent_alert,
 )
@@ -68,6 +69,19 @@ def test_a_success_on_top_recovers() -> None:
     result = assess([ok(0), failed(30), failed(60), failed(90)], now=NOW, rules=RULES)
     assert result.failing_streak == 0
     assert result.recovered_from_failing
+
+
+def test_maintenance_runs_count_for_no_streak() -> None:
+    """The source-wide maintenance incident covers them: neither a failure nor a recovery."""
+    maintenance = "maintenance"
+    runs = [failed(0, maintenance), failed(30, maintenance), failed(60), failed(90), ok(120)]
+    result = assess(runs, now=NOW, rules=RULES)
+    assert result.failing_streak == 2
+    assert result.last_error_kind == "http_5xx"
+    assert not result.recovered_from_failing
+
+    only_maintenance = [failed(minutes, maintenance) for minutes in (0, 30, 60, 90)]
+    assert assess(only_maintenance, now=NOW, rules=RULES) == Assessment()
 
 
 def test_no_runs_no_verdict() -> None:
@@ -145,3 +159,24 @@ def test_recovery_texts() -> None:
     assert "5 h" in body
     title, body = recovery_text("silent", "greenhouse", "stripe", opened_at=opened, now=NOW)
     assert title == "jobpulse: greenhouse/stripe is returning postings again"
+
+
+def test_maintenance_alert_says_the_source_is_paused() -> None:
+    title, body = maintenance_alert("workday", RULES)
+    assert title == "jobpulse: workday is down for maintenance; pausing it for 30 min"
+    assert body == (
+        "Its API redirects to its maintenance page, also after 2 retries. workday is paused "
+        "for 30 min at a time until it answers again. Nothing is closed meanwhile; you'll get "
+        "one message when it's back."
+    )
+    _, body = maintenance_alert("workday", HealthRules(maintenance_retries=1))
+    assert "also after 1 retry." in body
+
+
+def test_maintenance_recovery_text() -> None:
+    opened = NOW - timedelta(minutes=95)
+    title, body = recovery_text("maintenance", "workday", "*", opened_at=opened, now=NOW)
+    assert title == "jobpulse: workday is back from maintenance"
+    assert body == "It answers again after 2 h of maintenance."
+    _, body = recovery_text("maintenance", "workday", "*", opened_at=NOW - HALF_HOUR, now=NOW)
+    assert body == "It answers again after 30 min of maintenance."

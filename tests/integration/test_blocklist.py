@@ -61,13 +61,11 @@ async def test_a_dashboard_block_applies_from_the_next_cycle_of_a_running_worker
     )
     await poller.run_cycle(sources=["linkedin"])
     dashboard_block(env, "JOBOT")
-    await poller.run_cycle(sources=["linkedin"])
+    report = await poller.run_cycle(sources=["linkedin"])
 
     blocked = env.posting("linkedin", "4101000041")
     assert (blocked.tier, blocked.tier_reason) == ("filtered", BLOCKED)
-    assert [message.title for message in env.notifier.sent] == [
-        "Northwind · Backend Engineer · Seattle · posted today"
-    ]
+    assert report.pushes == ["Northwind · Backend Engineer · Seattle · posted today"]
 
 
 async def test_a_waiting_push_is_dropped_after_a_dashboard_block(
@@ -129,9 +127,7 @@ async def test_a_blocked_company_is_stored_but_never_pushed(
 
     blocked = env.posting("linkedin", "4101000021")
     assert (blocked.tier, blocked.tier_reason) == ("filtered", BLOCKED)
-    assert [message.title for message in env.notifier.sent] == [
-        "Northwind · Backend Engineer · Seattle · posted today"
-    ]
+    assert env.pushed == ["Northwind · Backend Engineer · Seattle · posted today"]
     assert report.targets[0].filtered == 1
 
 

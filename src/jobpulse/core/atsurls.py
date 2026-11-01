@@ -174,6 +174,13 @@ def workday_board(token: str) -> WorkdayBoard | None:
     return WorkdayBoard(match["tenant"].lower(), match["host"].lower(), match["site"])
 
 
+def default_board_name(ref: AtsRef) -> str:
+    """What to call a board whose API gives no company name: a Workday tenant, else the
+    token."""
+    board = workday_board(ref.token) if ref.ats == "workday" else None
+    return board.tenant if board is not None else ref.token
+
+
 def _workday_job(segments: list[str]) -> str | None:
     """The job id in what follows the site: ``job/{location}/{id}``, ``job/{id}`` or
     ``details/{id}`` (anything after the id, such as ``/apply``, is ignored)."""

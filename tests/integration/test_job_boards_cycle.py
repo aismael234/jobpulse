@@ -90,7 +90,9 @@ async def test_overlapping_windows_create_no_duplicates_or_second_alerts(
         ("linkedin", "4101000001"),
         ("linkedin", "4101000002"),
     ]
-    assert len(env.notifier.sent) == 2
+    assert len(env.pushed) == 2
+    [push] = env.notifier.sent  # both in one message
+    assert push.body.startswith("2 new job postings were found via job boards.")
 
 
 async def test_a_linkedin_429_fails_only_the_linkedin_run(env: Env, boards: ScriptedScrape) -> None:

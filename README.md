@@ -22,10 +22,10 @@ It **detects and notifies**. It never applies, fills in forms or submits anythin
 4. **Freshness.** Only postings younger than 48 h (by the source's own timestamp when there is one) can alert, so reopened listings and old reposts stay quiet.
 5. **Dedupe.** A LinkedIn, Indeed or SimplifyJobs copy of a job you already have from its ATS board (same canonical URL, a `gh_jid` link, or the same company, title and city within 30 days) is merged onto the ATS posting instead of alerting twice.
 6. **Details.** New postings that pass the title and location rules get one detail call: a Greenhouse or Workday job's description, and a LinkedIn job's public page, which also gives its applicant count ("Be among the first 25 applicants").
-7. **Filters and score.** Title, level, years-of-experience, stack and location rules from `config.yaml`, plus the applicant count when LinkedIn gave one. Every posting that passes is pushed right away, whatever its score; the score orders the pushes and shows in each one.
+7. **Filters and score.** Title, level, years-of-experience, stack and location rules from `config.yaml`, plus the applicant count when LinkedIn gave one. Every posting that passes is pushed right away, whatever its score; each scheduled job sends its matches as one push naming the best score.
 8. **A second opinion (optional).** With the LLM layer on, postings that score close to the threshold are read by Claude against your resume, and its answer moves the score a little up or down (see "The LLM layer").
 9. **Closures.** A job missing from two complete, successful polls of its board is marked closed (and reopened if it comes back). Job-board results, and Workday boards searched by keyword, never close anything.
-10. **Health.** One alert when a target fails 3 runs in a row or a normally busy one returns nothing for 24 h, and one message when it recovers.
+10. **Health.** One alert when a target fails 3 runs in a row or a normally busy one returns nothing for 24 h, and one message when it recovers. Targets of one source that fail or recover together share one message. A source that redirects to its maintenance page (Workday does, for every board at once) is retried twice and then paused for 30 minutes at a time, with one message saying it's down and one when it's back.
 11. **Discovery.** Greenhouse, Lever and Ashby boards linked from the feed and from job-board postings are added to the watchlist automatically when one of their postings passes your filters. Workday boards are only added by you.
 
 ## Quick start (uv)
@@ -92,7 +92,7 @@ python3 -c "import secrets; print('jobpulse-' + secrets.token_urlsafe(24))"
 2. Install the ntfy app, tap **+**, and subscribe to that exact topic on `https://ntfy.sh`.
 3. Run `uv run jobpulse notify test` (or `docker compose run --rm worker jobpulse notify test`).
 
-A push looks like `Stripe · Backend Engineer · SF / Remote · posted 25 min ago`; tapping it opens the apply page. Every match is pushed, with no per-cycle cap, best score first; a failed push is retried next cycle while the posting is still fresh, open and untriaged.
+Each scheduled job (watchlist, Simplify, job boards) sends one push per run for all its new matches, such as `3 new job postings were found via watchlist. Top score: Stripe - 0.87`; tapping it opens the top posting's apply page, and the dashboard has them all. Every match counts, with no per-cycle cap. A failed push is retried by the same job's next run while its postings are still fresh, open and untriaged. `poll --once` and the worker log list each match's title line, like `Stripe · Backend Engineer · SF / Remote · posted 25 min ago`.
 
 **Self-hosting ntfy:** set `notify.ntfy.base_url` to your server, and `NTFY_TOKEN` in `.env` if it uses access control. Subscribe the app to your server instead of ntfy.sh.
 
@@ -140,6 +140,7 @@ Never use `tailscale funnel` for this: it would put the dashboard on the public 
 - **In `config.yaml`:** add `{name, ats, token, priority}` under `watchlist:`. The token is the board name in the URL: `job-boards.greenhouse.io/<token>`, `jobs.lever.co/<token>` (add `region: eu` for `jobs.eu.lever.co`), `jobs.ashbyhq.com/<token>`. Every poll applies the list; removing an entry deactivates the company and keeps its history.
 - **Workday** boards are `{name, ats: workday, token: <tenant>.wd<N>/<site>, keywords: [...]}`: for `https://nvidia.wd5.myworkdayjobs.com/en-US/NVIDIAExternalCareerSite` the token is `nvidia.wd5/NVIDIAExternalCareerSite` (pasting the URL as the token works too). Big tenants have thousands of jobs, so give them `keywords`: each one is a search on the board, and only its matches are polled. A board searched by keyword never closes postings (it never sees the whole board); one without keywords is paged through, at most `workday.max_pages` (25) pages of 20 jobs, and closes jobs only after a full read. Changing the keywords starts a new silent baseline.
 - **From the dashboard:** paste a board, job or careers-page URL on the Watchlist page. jobpulse recognizes the board from the URL, or reads the page once to find a Greenhouse, Lever, Ashby or Workday link or embed. It checks the board with one API call, shows the company and its open jobs, and adds it with the priority (and, for Workday, the keywords) you choose.
+- **From a file:** `uv run jobpulse companies import FILE --workday-keywords "software engineer, full stack"` adds the boards behind a file's links, for example an export from another job service. In JSON, every value that is a URL counts, with the company name beside it; in any other text, every URL. Each board is checked like a pasted URL (blocklist, one validation call, `discovery.max_board_jobs`), and `--dry-run` shows what would be added. Workday boards are searched for the keywords; a keyword is dropped for a board when it finds more jobs than a poll reads (`workday.max_pages` pages of 20), or when it costs more than one page and nothing on its first page passes your title rules (Workday's search is fuzzy: "full stack" finds a bank's "Full Time" jobs). Imported companies show as `import`.
 - **Automatically:** discovery adds boards linked from the SimplifyJobs feed and job-board postings when one of their postings passes your title and location filters. It adds at most `discovery.max_auto_companies` (50) and skips boards with more than `max_board_jobs` (1,000) open jobs. `uv run jobpulse companies list` shows where each company came from.
 
 Every new company's first poll is a silent baseline. Workday boards are never added by discovery. To never hear about a company again, add it to `blocklist.companies` (or a board to `blocklist.boards`): its postings are kept but never pushed, and discovery leaves it alone.
@@ -184,12 +185,13 @@ Cost guards: at most `llm.max_calls_per_day` (25) calls in any 24 hours, failed 
 | `notify` | `channels`, ntfy server, priority and tags. |
 | `watchlist` | Companies on Greenhouse, Lever, Ashby and Workday (with `keywords`). |
 | `searches` | Indeed and LinkedIn searches through JobSpy. |
-| `linkedin` | Pause between LinkedIn requests, the cool-down after a 429, and the job pages (`job_pages`, `max_job_pages_per_hour`). |
+| `linkedin` | Pause between LinkedIn requests, the cool-down after a 429, and the job pages (`job_pages`, `max_job_pages_per_hour`, and `job_page_wait_hours`: how long a match whose page couldn't be read waits for a later cycle). |
 | `workday` | `max_pages`: how many pages of 20 jobs one search may read. |
 | `simplify` | The SimplifyJobs New-Grad feed on or off. |
 | `discovery` | Automatic board discovery and its limits. |
 | `blocklist` | Companies and boards to stay away from. |
 | `health` | When a source counts as failing or silent. |
+| `maintenance` | Retries and cool-down for a source on its maintenance page (2 retries 30 s apart, then 30 minutes). |
 | `retention` | How long the run history behind the Health page is kept (30 days). |
 | `dashboard` | Address and port of `jobpulse web`. |
 | `llm` | The optional LLM layer: on/off, model, effort, resume, band, wanted levels, daily call cap. |
@@ -220,6 +222,7 @@ Empty values count as unset. Only commands that send (`worker`, a non-dry `poll`
 | `jobpulse worker` | The scheduler: every source on its own cadence. |
 | `jobpulse web [--host H] [--port P]` | The dashboard. |
 | `jobpulse companies list` / `sync` | The watchlist with origin and baseline state / apply `config.yaml` now. |
+| `jobpulse companies import FILE [--workday-keywords K] [--priority N] [--dry-run]` | Add the boards behind a file's links (see Adding companies). |
 | `jobpulse notify test` | One test push through every channel. |
 | `jobpulse db upgrade` / `current` | Apply migrations / show the revision. The other commands refuse a database that is behind. |
 | `jobpulse config check` | Validate `config.yaml` and the secrets your channels need. |

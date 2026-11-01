@@ -89,7 +89,11 @@ async def test_new_matching_job_sends_exactly_one_push_with_the_title_line(
     report = await env.poll(sources=["greenhouse"])
 
     assert ntfy.call_count == 1
-    assert ntfy.calls.last.request.headers["Title"] == TITLE_LINE
+    assert ntfy.calls.last.request.headers["Title"] == "1 new job posting · watchlist"
+    assert ntfy.calls.last.request.content.decode() == (
+        "1 new job posting was found via watchlist. Top score: Acme - "
+        f"{env.posting('greenhouse', '102').score:.2f}"
+    )
     assert (
         ntfy.calls.last.request.headers["Click"] == "https://job-boards.greenhouse.io/acme/jobs/102"
     )
@@ -330,7 +334,7 @@ async def test_a_failed_push_is_retried_next_cycle_without_duplicates(
     second = await env.poll(sources=["greenhouse"])
     assert second.pushes == [TITLE_LINE]
     await env.poll(sources=["greenhouse"])
-    assert [message.title for message in env.notifier.sent] == [TITLE_LINE]
+    assert env.pushed == [TITLE_LINE]
 
 
 async def test_every_match_is_pushed_best_first_with_no_cap(env: Env, gh: GreenhouseMock) -> None:
@@ -345,9 +349,9 @@ async def test_every_match_is_pushed_best_first_with_no_cap(env: Env, gh: Greenh
     report = await env.poll(sources=["greenhouse"])
 
     assert len(report.pushes) == 3
-    titles = [message.title for message in env.notifier.sent]
-    assert len(titles) == 3
-    assert "Backend Engineer, Search" in titles[-1]  # the lowest score goes last
+    assert "Backend Engineer, Search" in report.pushes[-1]  # the lowest score goes last
+    [push] = env.notifier.sent  # all three in one message
+    assert push.body.startswith("3 new job postings were found via watchlist. Top score: Acme")
     rows = [env.posting("greenhouse", str(i)) for i in (102, 103, 104)]
     assert [row.tier for row in rows] == ["instant"] * 3
     assert all(row.notified_at is not None for row in rows)
@@ -368,7 +372,7 @@ async def test_a_too_senior_description_is_still_pushed_with_a_lower_score(
     assert row.score_breakdown is not None
     assert row.score_breakdown["level_mismatch"] == -0.5
     assert row.years_required == 8  # for the dashboard's experience filter
-    assert [message.title for message in env.notifier.sent] == [TITLE_LINE]
+    assert env.pushed == [TITLE_LINE]
 
 
 @pytest.mark.parametrize("change", [{"status": "Dismissed"}, {"closed_at": NOW}])
@@ -385,6 +389,28 @@ async def test_a_failed_push_isnt_retried_once_triaged_or_closed(
         gh.respond(gh_job(101, published=OLD))
     await env.poll(sources=["greenhouse"])
     assert env.notifier.sent == []
+
+
+async def test_each_job_pushes_only_its_own_sources_matches(env: Env, gh: GreenhouseMock) -> None:
+    await baseline(env, gh, 101)
+    env.add_search()
+    northwind = board_posting("9001", company="Northwind", location="Seattle, WA")
+    env.board.results = [[], [northwind], [northwind]]
+    await env.poll(sources=["linkedin"])
+    env.notifier.failures_left = 1
+    assert (await env.poll(sources=["linkedin"])).failed_pushes == 1
+
+    gh.respond(gh_job(101, published=OLD), gh_job(102, published=FRESH))
+    watchlist = await env.poll(sources=["greenhouse"])
+    assert watchlist.pushes == [TITLE_LINE]  # the waiting LinkedIn match isn't in it
+
+    boards = await env.poll(sources=["linkedin"])
+    [line] = boards.pushes
+    assert line.startswith("Northwind · Backend Engineer")
+    assert [push.body.split(".")[0] for push in env.notifier.sent] == [
+        "1 new job posting was found via watchlist",
+        "1 new job posting was found via job boards",
+    ]
 
 
 async def test_filtered_titles_are_stored_with_a_reason(env: Env, gh: GreenhouseMock) -> None:
@@ -413,7 +439,7 @@ async def test_dry_run_sends_nothing_and_rolls_everything_back(
     assert len(env.runs()) == runs_before
 
     await env.poll(sources=["greenhouse"])
-    assert [message.title for message in env.notifier.sent] == [TITLE_LINE]
+    assert env.pushed == [TITLE_LINE]
 
 
 async def test_a_pending_posting_from_an_interrupted_cycle_is_finished(
@@ -443,4 +469,4 @@ async def test_a_pending_posting_from_an_interrupted_cycle_is_finished(
     await env.poll(sources=["greenhouse"])
 
     assert env.posting("greenhouse", "102").tier == "instant"
-    assert [message.title for message in env.notifier.sent] == [TITLE_LINE]
+    assert env.pushed == [TITLE_LINE]
