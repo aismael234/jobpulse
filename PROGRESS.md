@@ -219,7 +219,7 @@ The full plan, with decisions, code facts and a data snapshot, is in `/Users/ala
   - [x] `docs/DECISIONS.md`, CLAUDE.md generalized, `.gitattributes` export-ignore (PROGRESS.md, `.claude/`), `devtools.export_public` with its scan and the gitignored `.export-private-patterns`; `devtools.seed_check`;
   - [x] beyond the plan: an "Also search LinkedIn and Indeed" wizard checkbox (default on); onnxruntime and Hugging Face telemetry turned off;
   - [x] container test in OrbStack (your OK): fresh volume → wizard → seed (362 boards) → one watchlist cycle; restart; 0005 → 0011 with a backup; compose healthy;
-  - [x] committed as `1b10e35` (your OK, 2026-11-02);
+  - [x] committed as `5311b8d` (your OK, 2026-11-02);
   - [ ] publish: `brew install gh` and your `gh auth login`; create `aismael234/jobpulse` (public), export, push, tag `v1.0.0`, make the GHCR package public; then `seed.remote` on. Each with your OK at the time.
 
 ## Log
@@ -455,4 +455,4 @@ The full plan, with decisions, code facts and a data snapshot, is in `/Users/ala
   - **Open:** the first watchlist cycle after finishing the wizard ran 5 s before the seed's boards were added, so a new install's first baseline waits for the next cycle (up to 30 min). Every container start logs the "listens on 0.0.0.0 with no password" warning, even when the port is published on 127.0.0.1 only.
   - **Privacy scan** of what the export would publish: 0 findings (secret shapes, non-example emails, home paths, your patterns file, the secrets in `.env`).
   - **Tests:** 1,821 passed, 17 skipped (from 1,794). Changed on purpose: the compose tests (one service), the User-Agent version, the golden test's name and fixture, the wizard test posts `job_boards`.
-  - Committed at your go-ahead ("Commit M9") as `1b10e35`. Live DB untouched (0011); no migration.
+  - Committed at your go-ahead ("Commit M9") as `5311b8d`. Live DB untouched (0011); no migration.
