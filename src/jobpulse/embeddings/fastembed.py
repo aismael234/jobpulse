@@ -1,8 +1,13 @@
 """fastembed (ONNX) embeddings. The model is read from a local cache and never downloaded at
 runtime: ``download_model`` (``jobpulse embeddings download``) is the only path that
-downloads."""
+downloads.
+
+onnxruntime (1.31 and later) uploads usage events to Microsoft unless ``ORT_DISABLE_TELEMETRY``
+is set, and huggingface_hub reports downloads unless ``HF_HUB_DISABLE_TELEMETRY`` is; both are
+turned off before fastembed is imported, unless you set them yourself."""
 
 import math
+import os
 from array import array
 from collections.abc import Sequence
 from importlib import metadata
@@ -15,6 +20,11 @@ from jobpulse.embeddings.base import EmbedderUnavailable
 DEFAULT_MODEL = "BAAI/bge-small-en-v1.5"
 DEFAULT_CACHE_DIR = Path("data/models")
 _BATCH_SIZE = 32
+
+
+def _no_telemetry() -> None:
+    os.environ.setdefault("ORT_DISABLE_TELEMETRY", "1")
+    os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 
 
 def model_id(model: str = DEFAULT_MODEL) -> str:
@@ -34,6 +44,7 @@ def _normalized(values: Sequence[float]) -> Vector:
 
 class FastEmbedEmbedder:
     def __init__(self, model: str = DEFAULT_MODEL, cache_dir: Path = DEFAULT_CACHE_DIR) -> None:
+        _no_telemetry()
         try:
             from fastembed import TextEmbedding
         except ImportError as exc:
@@ -59,6 +70,7 @@ class FastEmbedEmbedder:
 def download_model(model: str = DEFAULT_MODEL, cache_dir: Path = DEFAULT_CACHE_DIR) -> str:
     """Download ``model`` into ``cache_dir`` (Hugging Face), then load it offline to prove the
     cache works. Returns the model id with its version."""
+    _no_telemetry()
     from fastembed import TextEmbedding
 
     cache_dir.mkdir(parents=True, exist_ok=True)

@@ -9,6 +9,7 @@ quick to find.
 
 import hashlib
 import json
+import os
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
@@ -48,6 +49,7 @@ from jobpulse.data import agency_names
 DEFAULT_CONFIG_PATH = Path("config.yaml")
 DEFAULT_ENV_FILE = Path(".env")
 DEFAULT_DATABASE_URL = "sqlite:///data/jobpulse.db"
+DEFAULT_MODELS_DIR = Path("data/models")
 SIMPLIFY_NEW_GRAD_URL = (
     "https://raw.githubusercontent.com/SimplifyJobs/New-Grad-Positions/dev/.github/scripts/"
     "listings.json"
@@ -470,11 +472,18 @@ class LlmConfig(_Model):
     max_calls_per_day: int = Field(default=25, ge=1, le=1000)
 
 
+def default_models_dir() -> Path:
+    """``JOBPULSE_MODELS_DIR``, else ``data/models``."""
+    return Path(os.environ.get("JOBPULSE_MODELS_DIR") or DEFAULT_MODELS_DIR)
+
+
 class EmbeddingsConfig(_Model):
     """The local embedding model behind resume similarity (M5b)."""
 
     enabled: bool = True  # false on small hosts: the model takes about 200 MB of memory
-    cache_dir: Path = Path("data/models")  # where `jobpulse embeddings download` puts it
+    # Where `jobpulse embeddings download` puts it; JOBPULSE_MODELS_DIR moves the default (the
+    # Docker image bakes the model outside the data volume).
+    cache_dir: Path = Field(default_factory=default_models_dir)
 
 
 class DiscoveryConfig(_Model):
@@ -541,6 +550,7 @@ class SetupAnswers(_Model):
     avoid: list[CompanyName] = []
     hide_agencies: bool = True
     channel: Literal["ntfy", "discord", "none"] = "ntfy"
+    job_boards: bool = True  # LinkedIn and Indeed searches
     custom: list[str] = []  # core.profile_builder.SECTIONS edited in Advanced
 
     def to_core(self) -> Answers:
@@ -557,6 +567,7 @@ class SetupAnswers(_Model):
             avoid=tuple(self.avoid),
             hide_agencies=self.hide_agencies,
             channel=self.channel,
+            job_boards=self.job_boards,
         )
 
     @field_validator("roles")
@@ -617,7 +628,7 @@ class InfraConfig(_Model):
     maintenance: MaintenanceConfig = MaintenanceConfig()
     retention: RetentionConfig = RetentionConfig()
     dashboard: DashboardConfig = DashboardConfig()
-    embeddings: EmbeddingsConfig = EmbeddingsConfig()
+    embeddings: EmbeddingsConfig = Field(default_factory=EmbeddingsConfig)
     seed: SeedConfig = SeedConfig()
 
     @model_validator(mode="after")

@@ -1,10 +1,21 @@
 [project]
 name = "jobpulse"
-version = "0.1.0"
-description = "Personal job-posting watcher: polls ATS boards and job feeds, finds fresh backend roles, and pushes them to your phone."
+version = "1.0.0"
+description = "Self-hosted job-posting watcher: polls company job boards and feeds, scores fresh postings against your roles and resume, and pushes them to your phone."
 readme = "README.md"
 requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
 authors = [{ name = "aismael234" }]
+keywords = ["jobs", "job-search", "greenhouse", "lever", "ashby", "workday", "ntfy", "self-hosted"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Web Environment",
+    "Framework :: FastAPI",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Office/Business",
+]
 dependencies = [
     "alembic>=1.14",
     "anthropic>=1.15,<2",
@@ -25,6 +36,10 @@ dependencies = [
     "tzdata>=2024.1",
     "uvicorn>=0.30",
 ]
+
+[project.urls]
+Homepage = "https://github.com/aismael234/jobpulse"
+Issues = "https://github.com/aismael234/jobpulse/issues"
 
 [project.optional-dependencies]
 postgres = ["psycopg[binary]>=3.2"]

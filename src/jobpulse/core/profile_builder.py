@@ -80,6 +80,7 @@ class Answers:
     avoid: tuple[str, ...] = ()
     hide_agencies: bool = True
     channel: str = "ntfy"  # "ntfy", "discord" or "none"
+    job_boards: bool = True  # LinkedIn and Indeed searches
 
 
 def _families(answers: Answers) -> list[RoleFamily]:
@@ -188,7 +189,10 @@ def searches(answers: Answers) -> list[dict[str, Any]]:
     """LinkedIn and Indeed searches: each term in each location, at most
     ``MAX_LINKEDIN_SEARCHES`` and ``MAX_INDEED_SEARCHES``. Terms and locations interleave
     (the strongest term in the first location, then the next term there, then the first term
-    in the next location…), so a cap keeps both kinds of variety."""
+    in the next location…), so a cap keeps both kinds of variety. None with ``job_boards``
+    off."""
+    if not answers.job_boards:
+        return []
     terms = _terms(_families(answers))
     places = search_locations(answers)
     ranked = sorted(

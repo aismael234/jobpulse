@@ -33,9 +33,9 @@ def client(sleep: FakeSleep, **kwargs: object) -> HttpClient:
 def test_user_agent() -> None:
     assert (
         build_user_agent("dev@example.com")
-        == "jobpulse/0.1.0 (+personal job alerts; contact: dev@example.com)"
+        == "jobpulse/1.0.0 (+personal job alerts; contact: dev@example.com)"
     )
-    assert build_user_agent(None) == "jobpulse/0.1.0 (+personal job alerts)"
+    assert build_user_agent(None) == "jobpulse/1.0.0 (+personal job alerts)"
 
 
 @pytest.mark.parametrize("retry_number", range(8))

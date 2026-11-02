@@ -18,7 +18,7 @@
     {% for search in planned_searches %}
     <li>{{ search.site|capitalize }}: “{{ search.search_term }}”{% if search.location %} in {{ search.location }}{% endif %}</li>
     {% else %}
-    <li>No LinkedIn or Indeed searches yet.</li>
+    <li>{% if answers.job_boards is defined and not answers.job_boards %}Off: LinkedIn and Indeed aren't searched.{% else %}No LinkedIn or Indeed searches yet.{% endif %}</li>
     {% endfor %}
   </ul>
   {% if keywords %}<p class="hint">Workday boards are searched for: {{ keywords|join(", ") }}.</p>{% endif %}

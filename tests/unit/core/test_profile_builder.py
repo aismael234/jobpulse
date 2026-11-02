@@ -1,5 +1,5 @@
 """M8: the wizard's answers become profile sections, deterministically and within the caps,
-and picking every role family at the mid level reproduces the first install's tuned rules."""
+and picking every role family at the mid level reproduces a reference snapshot of the rules."""
 
 import re
 from pathlib import Path
@@ -22,18 +22,18 @@ from jobpulse.core.profile_builder import (
 from jobpulse.core.roles import LEVELS, ROLE_FAMILIES, level_for_years, suggest_families
 from jobpulse.core.skills import SKILLS, find_skills
 
-GOLDEN = Path(__file__).parents[2] / "fixtures" / "profile" / "golden_rules.yaml"
+REFERENCE = Path(__file__).parents[2] / "fixtures" / "profile" / "mid_level_all_families.yaml"
 EVERY_FAMILY = tuple(family.key for family in ROLE_FAMILIES)
 
 
-def golden() -> dict[str, object]:
-    data = yaml.safe_load(GOLDEN.read_text(encoding="utf-8"))
+def reference_rules() -> dict[str, object]:
+    data = yaml.safe_load(REFERENCE.read_text(encoding="utf-8"))
     assert isinstance(data, dict)
     return data
 
 
-def test_every_family_at_mid_level_reproduces_the_tuned_rules() -> None:
-    reference = golden()
+def test_every_family_at_mid_level_reproduces_the_reference_rules() -> None:
+    reference = reference_rules()
     rules = build_rules(Answers(roles=EVERY_FAMILY, level="mid", max_years=5))
 
     assert rules["filters.title"] == reference["title"]
@@ -102,6 +102,13 @@ def test_title_weights_scale_so_the_strongest_family_weighs_one() -> None:
     rules = build_rules(Answers(roles=("frontend", "mobile")))
     weights = [rule["weight"] for rule in rules["filters.title"]["include"]]
     assert weights == [1.0, 0.75]
+
+
+def test_no_job_board_searches_when_they_are_turned_off() -> None:
+    answers = Answers(roles=("backend", "ml"), job_boards=False)
+    assert searches(answers) == []
+    assert build_rules(answers)["searches"] == []
+    assert workday_keywords(answers)  # company boards are searched either way
 
 
 def test_searches_respect_the_caps_and_have_stable_names() -> None:

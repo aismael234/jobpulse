@@ -332,6 +332,7 @@ def _parse(step: str, form: FormData, answers: SetupAnswers) -> dict[str, Any]:
             "dream": _lines(text("dream"), field="dream"),
             "avoid": _lines(text("avoid"), field="avoid"),
             "hide_agencies": text("hide_agencies") == "1",
+            "job_boards": text("job_boards") == "1",
         }
     raise HTTPException(status_code=404, detail="no such setup step")
 

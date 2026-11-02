@@ -1,6 +1,26 @@
 # jobpulse
 
-A personal job-posting watcher for one person on one always-on machine. It polls public applicant-tracking-system boards (Greenhouse, Lever, Ashby, Workday), the SimplifyJobs New-Grad list and a few Indeed/LinkedIn searches, finds postings it hasn't seen, filters and scores them, and pushes every match to your phone within minutes, best first. A small dashboard keeps them for triage.
+A self-hosted job-posting watcher for software engineers who want to apply early. It polls public applicant-tracking-system boards (Greenhouse, Lever, Ashby, Workday; about 360 company boards out of the box), the SimplifyJobs New-Grad list and a few Indeed/LinkedIn searches, finds postings it hasn't seen, filters and scores them against your roles, level, locations and resume, and pushes every match to your phone within minutes, best first. A small dashboard keeps them for triage.
+
+One install serves one person. It runs on any always-on machine (a home server, a NAS, a small VPS) and keeps everything, your resume included, in its own database.
+
+## Quick start (Docker)
+
+```bash
+docker run -d --name jobpulse --restart unless-stopped \
+  -p 127.0.0.1:8000:8000 -v jobpulse-data:/app/data \
+  ghcr.io/aismael234/jobpulse:latest
+```
+
+Open http://127.0.0.1:8000/ and follow the setup wizard (below). The image runs on amd64 and arm64 and has the resume-similarity model built in, so nothing else is downloaded. Everything you enter, the postings and the database backups live in the `jobpulse-data` volume. To upgrade, pull the new image and start the container again: the database is backed up and migrated on startup. With Docker Compose, `docker compose up -d` in a checkout of this repository does the same (see "Run it with Docker").
+
+## Privacy and the sites it reads
+
+- **Nothing leaves your machine except the requests it needs.** Postings come from the public APIs of the boards and feeds you watch; pushes go to the ntfy server or Discord webhook you choose. There is no telemetry and no account.
+- **Your resume** is read on your machine, embedded by a local model and stored in the database. It is sent nowhere unless you turn on the optional LLM layer, which sends it to Anthropic's API with the postings it reviews.
+- **Secrets** (ntfy topic, Discord webhook, API key, dashboard password) are stored in the database in plain text, so protect the volume and its backups like the secrets themselves, or put them in environment variables instead.
+- **The board seed sync** fetches this repository's `boards.json` once a day (when `seed.remote` is on) to add boards other people contributed; it sends nothing about you.
+- **LinkedIn and Indeed:** jobpulse reads their public search results and LinkedIn's public job pages as a guest, slowly and one request at a time. Their terms of service restrict automated access, and they may rate-limit or block your IP address. That risk is yours: if you'd rather not take it, untick "Also search LinkedIn and Indeed" in the wizard (or on Settings → Setup answers later) and jobpulse uses only the company boards and the SimplifyJobs feed.
 
 ## What it does, and what it never does
 
@@ -11,7 +31,7 @@ It **detects and notifies**. It never applies, fills in forms or submits anythin
 - LinkedIn (searches and job pages alike) is asked one request at a time with a random 4–8 s pause, and backs off for 30 minutes after a 429.
 - A failed, blocked, empty or errored response is recorded as a failure. It never closes a posting or counts as "no new jobs".
 - Every ATS request carries a descriptive User-Agent with your contact email.
-- Secrets (ntfy topic, Discord webhook, LLM API key, dashboard password) come only from `.env`. They are never committed, logged or rendered in a page.
+- Secrets (ntfy topic, Discord webhook, LLM API key, dashboard password) come from Settings or `.env` (which wins). They are never logged or rendered in a page after they're saved.
 - The optional LLM layer is off unless you turn it on. When it's on, the postings close to your threshold, and your resume, are sent to Anthropic's API; nothing else is.
 
 ## How it works
@@ -28,7 +48,7 @@ It **detects and notifies**. It never applies, fills in forms or submits anythin
 10. **Health.** One alert when a target fails 3 runs in a row or a normally busy one returns nothing for 24 h, and one message when it recovers. Targets of one source that fail or recover together share one message. A source that redirects to its maintenance page (Workday does, for every board at once) is retried twice and then paused for 30 minutes at a time, with one message saying it's down and one when it's back.
 11. **Discovery.** Greenhouse, Lever and Ashby boards linked from the feed and from job-board postings are added to the watchlist automatically when one of their postings passes your filters. Workday boards are only added by you.
 
-## Quick start (uv)
+## Run it from a checkout (uv)
 
 You need [uv](https://docs.astral.sh/uv/). It installs Python 3.12 for you.
 
@@ -43,7 +63,7 @@ uv run jobpulse up                        # http://127.0.0.1:8000
 2. **Roles and skills**: the kinds of roles you want (back end, full stack, ML…) and your main skills.
 3. **Level**: entry, mid, senior or staff, and the most years of experience a posting may ask for.
 4. **Locations**: countries, optionally metro areas or states, and whether remote is fine.
-5. **Pay and companies**: a pay floor, dream companies (scored as your top priority), companies to avoid, and whether to hide staffing agencies.
+5. **Pay and companies**: a pay floor, dream companies (scored as your top priority), companies to avoid, whether to hide staffing agencies, and whether to search LinkedIn and Indeed too (see "Privacy and the sites it reads").
 6. **Notifications**: a generated ntfy topic to subscribe to, or a Discord webhook, with a test push.
 7. **Review**: the searches and rules your answers make. Finishing starts watching about 360 company boards from the built-in seed.
 
@@ -68,21 +88,20 @@ It stores the profile, makes the watchlist ordinary Watchlist-page rows and turn
 
 ## Run it with Docker
 
-The image holds the worker, the dashboard and the migrations. `config.yaml` and `.env` stay on your machine: compose mounts the first read-only and passes the second as environment variables.
+The image runs `jobpulse up`: it backs up and migrates the database, then serves the dashboard with the scheduler in the same process. The Quick start's `docker run` is all it needs. With Compose, from a checkout:
 
 ```bash
-cp config.example.yaml config.yaml        # edit it
-cp .env.example .env                      # set NTFY_TOPIC
-docker compose up -d                      # migrate, then worker + web
-docker compose logs -f worker             # scheduled jobs and every poll
+cp .env.example .env                      # optional: secrets, a dashboard password, Postgres
+docker compose up -d                      # pulls ghcr.io/aismael234/jobpulse, or builds it
+docker compose logs -f jobpulse
 ```
 
-- `migrate` applies migrations and exits; `worker` and `web` start after it succeeds.
-- The dashboard is published on `127.0.0.1:8000` only.
-- The SQLite database lives in the `jobpulse-data` volume.
-- If a source stops finishing runs (APScheduler can stop scheduling after an error), the worker's watchdog exits non-zero and Docker restarts it.
-- To upgrade: `git pull && docker compose up -d --build`. Migrations run first.
-- Your profile, resume and the secrets saved on Settings live in the database volume.
+- The dashboard is published on `127.0.0.1:8000` only. To reach it from other devices, use a VPN such as Tailscale (below), or set `DASHBOARD_USER` and `DASHBOARD_PASSWORD` before publishing the port more widely.
+- The SQLite database, its backups (`data/backups/`, three kept), your profile, resume and the secrets saved on Settings live in the `jobpulse-data` volume.
+- `config.yaml` is optional. To change infrastructure (schedules, pacing), copy `config.example.yaml` to `config.yaml` and mount it at `/app/config.yaml` (the compose file shows how).
+- If a source stops finishing runs, the scheduler's watchdog exits non-zero and Docker restarts the container.
+- To upgrade: `docker compose pull && docker compose up -d` (or `--build` from a checkout).
+- Small hosts: the resume model takes about 200 MB of memory once a resume is stored; set `embeddings.enabled: false` in config.yaml to turn it off.
 
 **Postgres instead of SQLite:** put a password in `.env` twice, then start the `postgres` profile:
 
@@ -96,7 +115,7 @@ DATABASE_URL=postgresql+psycopg://jobpulse:<the same password>@postgres:5432/job
 docker compose --profile postgres up -d
 ```
 
-Migrations wait for Postgres to be healthy and run on startup. Existing SQLite data isn't copied over.
+jobpulse waits for Postgres to be healthy and migrates it on startup. Existing SQLite data isn't copied over.
 
 ## Phone notifications with ntfy
 
@@ -108,7 +127,7 @@ python3 -c "import secrets; print('jobpulse-' + secrets.token_urlsafe(24))"
 
 1. Save the result on Settings → Notifications as the ntfy topic (or put it in `.env` as `NTFY_TOPIC=...`, which wins). jobpulse refuses topics shorter than 24 characters.
 2. Install the ntfy app, tap **+**, and subscribe to that exact topic on `https://ntfy.sh`.
-3. Press **Send a test push** on Settings, or run `uv run jobpulse notify test` (or `docker compose run --rm worker jobpulse notify test`).
+3. Press **Send a test push** on Settings, or run `uv run jobpulse notify test` (or `docker compose exec jobpulse jobpulse notify test`).
 
 Each scheduled job (watchlist, Simplify, job boards) sends one push per run for all its new matches, such as `3 new job postings were found via watchlist. Top score: Stripe - 0.87`; tapping it opens the top posting's apply page, and the dashboard has them all. Every match counts, with no per-cycle cap. That changes once you save a filter (below). A failed push is retried by the same job's next run while its postings are still fresh, open and untriaged. `poll --once` and the worker log list each match's title line, like `Stripe · Backend Engineer · SF / Remote · posted 25 min ago`.
 
@@ -168,7 +187,7 @@ Never use `tailscale funnel` for this: it would put the dashboard on the public 
 - **From the dashboard:** paste a board, job or careers-page URL on the Watchlist page. jobpulse recognizes the board from the URL, or reads the page once to find a Greenhouse, Lever, Ashby or Workday link or embed. It checks the board with one API call, shows the company and its open jobs, and adds it with the priority (and, for Workday, the keywords) you choose.
 - **From a file:** `uv run jobpulse companies import FILE --workday-keywords "software engineer, full stack"` adds the boards behind a file's links, for example an export from another job service. In JSON, every value that is a URL counts, with the company name beside it; in any other text, every URL. Each board is checked like a pasted URL (blocklist, one validation call, `discovery.max_board_jobs`), and `--dry-run` shows what would be added. Workday boards are searched for the keywords; a keyword is dropped for a board when it finds more jobs than a poll reads (`workday.max_pages` pages of 20), or when it costs more than one page and nothing on its first page passes your title rules (Workday's search is fuzzy: "full stack" finds a bank's "Full Time" jobs). Imported companies show as `import`.
 - **From the seed:** `uv run jobpulse companies seed apply` adds the boards that ship with jobpulse (`src/jobpulse/data/seed/boards.json`, built from a real watchlist less staffing agencies) that you don't have yet; `--dry-run` shows what would change. Known, blocked and paused boards are skipped, and Workday boards keep only the keywords that fit what a poll reads (software engineer, full stack, backend engineer, machine learning engineer). Seed companies show as `seed`. With `seed.remote` on (off until the repository is public), a watchlist cycle fetches the latest seed once a day and adds new boards the same way, each validated once.
-- **Back to the seed:** `uv run jobpulse companies contribute [--out FILE]` writes the boards you added that the seed lacks, in the seed's format, with the steps for a pull request.
+- **Back to the seed:** `uv run jobpulse companies contribute [--out FILE]` writes the boards you added that the seed lacks, in the seed's format, with the steps for a pull request. CI checks a pull request that changes the seed: every board it adds must answer on its ATS and must not be a staffing agency (`python -m jobpulse.devtools.seed_check`).
 - **Automatically:** discovery adds boards linked from the SimplifyJobs feed and job-board postings when one of their postings passes your title and location filters. It adds at most `discovery.max_auto_companies` (50) and skips boards with more than `max_board_jobs` (1,000) open jobs. `uv run jobpulse companies list` shows where each company came from.
 
 Every new company's first poll is a silent baseline. Workday boards are never added by discovery. To never hear about a company again, block it from one of its cards, or add it to `blocklist.companies` in your profile (a board to `blocklist.boards`): its postings are kept but never pushed, and discovery leaves it alone.
@@ -250,6 +269,7 @@ Level, location and stack values in the example are placeholders; set your own. 
 | `DATABASE_URL` | Overrides `database_url`, e.g. Postgres. |
 | `POSTGRES_PASSWORD` | The Docker `postgres` profile's password. |
 | `JOBPULSE_CONFIG` | Another `config.yaml` path (`--config` beats it). |
+| `JOBPULSE_MODELS_DIR` | Where the embedding model is looked for when `embeddings.cache_dir` isn't set (`data/models`; the Docker image sets `/opt/jobpulse/models`). |
 | `LOG_LEVEL` | `INFO` by default. |
 
 Empty values count as unset. The four secrets above (ntfy topic and token, Discord webhook, Anthropic key) can be saved on Settings instead; a value here wins. Only a non-dry `poll` and `notify test` refuse to start without the secrets their channels need; the worker reads them at each push, so a channel set up later works without a restart.
@@ -338,11 +358,11 @@ uv run jobpulse --config tests/fixtures/scenarios/config.yaml poll --once --fixt
 uv run jobpulse --config tests/fixtures/scenarios/config.yaml web
 ```
 
-`CLAUDE.md` lists conventions and gotchas; `PROGRESS.md` records what was built, the decisions behind it and what is left.
+`CLAUDE.md` lists conventions and gotchas; `docs/DECISIONS.md` records how it was built and why.
 
 ## Troubleshooting
 
-- **`run jobpulse db upgrade first`:** the database is new or behind the code. Run `jobpulse db upgrade` (Docker does it in `migrate`).
+- **`run jobpulse db upgrade first`:** the database is new or behind the code. Run `jobpulse db upgrade` (`jobpulse up` and the Docker image do it on startup).
 - **No pushes after starting:** expected until something new is posted; the first poll of every source is silent. `jobpulse poll --once --dry-run` shows what each source returns.
 - **`missing or invalid secrets`:** a command that sends needs `NTFY_TOPIC` (or `DISCORD_WEBHOOK_URL`) for the channels in `notify.channels`.
 - **A source keeps failing:** the Health page shows the last error. Lever boards on `jobs.eu.lever.co` need `region: eu`.
@@ -366,3 +386,7 @@ src/jobpulse/
   cli.py       the jobpulse command
 tests/         unit, integration, live
 ```
+
+## License
+
+MIT (see `LICENSE`). The vendored htmx is 0BSD; see `THIRD_PARTY_NOTICES.md`.

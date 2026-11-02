@@ -8,6 +8,8 @@
 *.db
 *.db-wal
 *.db-shm
+.export-private-patterns
+.claude/settings.local.json
 
 # Python
 .venv/

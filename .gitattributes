@@ -1,0 +1,4 @@
+# Kept out of the public repository by `python -m jobpulse.devtools.export_public` (git archive).
+PROGRESS.md export-ignore
+.claude/ export-ignore
+.gitattributes export-ignore

@@ -28,6 +28,7 @@ from jobpulse.config import (
     compose,
     config_warnings,
     dashboard_credentials,
+    default_models_dir,
     filter_rules,
     load_config,
     load_legacy_config,
@@ -49,7 +50,7 @@ from jobpulse.db.lease import LeaseHeld
 from jobpulse.db.session import display_url, resolve_database_url, session_scope
 from jobpulse.devtools.fixtures import FixtureScraper, FixtureTransport
 from jobpulse.embeddings.base import EmbedderUnavailable
-from jobpulse.embeddings.fastembed import DEFAULT_CACHE_DIR, DEFAULT_MODEL, download_model
+from jobpulse.embeddings.fastembed import DEFAULT_MODEL, download_model
 from jobpulse.logging_setup import SecretRegistry, configure_logging
 from jobpulse.poller import NOT_ONBOARDED
 from jobpulse.resume_files import ResumeFileError, read_resume_file
@@ -670,10 +671,15 @@ def notify_test(ctx: typer.Context) -> None:
 @embeddings_app.command("download")
 def embeddings_download(
     cache_dir: Annotated[
-        Path, typer.Option("--cache-dir", help="Where to keep the model.")
-    ] = DEFAULT_CACHE_DIR,
+        Path | None,
+        typer.Option(
+            "--cache-dir",
+            help="Where to keep the model (default: JOBPULSE_MODELS_DIR, data/models).",
+        ),
+    ] = None,
 ) -> None:
     """Download the embedding model from Hugging Face (the only command that downloads it)."""
+    cache_dir = cache_dir or default_models_dir()
     typer.echo(f"Downloading {DEFAULT_MODEL} into {cache_dir} ...")
     try:
         model = download_model(DEFAULT_MODEL, cache_dir)

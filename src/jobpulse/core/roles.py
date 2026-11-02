@@ -1,8 +1,8 @@
 """Role families, the wizard's first question (M8): each with weighted title patterns, job-board
 search terms, Workday keywords and a description.
 
-The patterns and weights are the rules tuned on the first install, word for word, so picking
-every family reproduces them (a golden test checks). Title excludes and level presets live
+Picking every family at the mid level reproduces a reference snapshot of the rules
+(``tests/fixtures/profile/mid_level_all_families.yaml``), so a change here is deliberate. Title excludes and level presets live
 here too: ``DEFAULT_TITLE_EXCLUDES`` and ``LEVELS``.
 """
 

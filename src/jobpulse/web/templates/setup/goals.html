@@ -18,6 +18,8 @@
   <p class="hint">Never shown or pushed. You can block more from any posting later.</p>
   <label class="check"><input type="checkbox" name="hide_agencies" value="1"{% if answers.hide_agencies %} checked{% endif %}> Hide staffing and recruiting agencies</label>
   <p class="hint">{{ agencies|join(", ") }}, and any company you mark as an agency when you block it.</p>
+  <label class="check"><input type="checkbox" name="job_boards" value="1"{% if answers.job_boards is not defined or answers.job_boards %} checked{% endif %}> Also search LinkedIn and Indeed</label>
+  <p class="hint">Their public results, read slowly as a guest. Their terms restrict automated access and they may rate-limit your IP address; without them jobpulse watches company boards and the SimplifyJobs feed only.</p>
   <div class="wizard-buttons"><button type="submit">Continue</button></div>
 </form>
 {% endblock %}

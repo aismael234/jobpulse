@@ -54,3 +54,58 @@ def test_embeddings_download_failure_exits_2(
     result = runner.invoke(cli.app, ["embeddings", "download", "--cache-dir", str(tmp_path)])
     assert result.exit_code == 2
     assert "download failed" in result.output
+
+
+def test_jobpulse_models_dir_moves_the_default_model_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The image bakes the model outside the data volume and points this variable at it."""
+    from jobpulse.config import EmbeddingsConfig, InfraConfig
+
+    assert EmbeddingsConfig().cache_dir == Path("data/models")
+    monkeypatch.setenv("JOBPULSE_MODELS_DIR", str(tmp_path / "baked"))
+    assert InfraConfig().embeddings.cache_dir == tmp_path / "baked"
+    # config.yaml still wins.
+    explicit = InfraConfig.model_validate({"embeddings": {"cache_dir": "elsewhere"}})
+    assert explicit.embeddings.cache_dir == Path("elsewhere")
+
+
+def test_embeddings_download_defaults_to_jobpulse_models_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[Path] = []
+
+    def fake_download(model: str, cache_dir: Path) -> str:
+        calls.append(cache_dir)
+        return model
+
+    monkeypatch.setattr(cli, "download_model", fake_download)
+    monkeypatch.setenv("JOBPULSE_MODELS_DIR", str(tmp_path / "baked"))
+    result = runner.invoke(cli.app, ["embeddings", "download"])
+    assert result.exit_code == 0, result.output
+    assert calls == [tmp_path / "baked"]
+
+
+def test_onnxruntime_and_hugging_face_telemetry_are_off_before_fastembed_loads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """onnxruntime 1.31 uploads usage events to Microsoft unless ORT_DISABLE_TELEMETRY is set."""
+    import os
+
+    monkeypatch.delenv("ORT_DISABLE_TELEMETRY", raising=False)
+    monkeypatch.delenv("HF_HUB_DISABLE_TELEMETRY", raising=False)
+    with pytest.raises(EmbedderUnavailable):
+        FastEmbedEmbedder(cache_dir=tmp_path / "models")
+    assert os.environ["ORT_DISABLE_TELEMETRY"] == "1"
+    assert os.environ["HF_HUB_DISABLE_TELEMETRY"] == "1"
+
+
+def test_an_explicit_telemetry_setting_is_left_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+
+    monkeypatch.setenv("ORT_DISABLE_TELEMETRY", "0")
+    with pytest.raises(EmbedderUnavailable):
+        FastEmbedEmbedder(cache_dir=tmp_path / "models")
+    assert os.environ["ORT_DISABLE_TELEMETRY"] == "0"

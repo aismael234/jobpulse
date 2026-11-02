@@ -132,6 +132,7 @@ def test_the_whole_wizard(fresh: Web, respx_mock: respx.MockRouter) -> None:
             "dream": "Stripe\nLinear",
             "avoid": "Acme Staffing",
             "hide_agencies": "1",
+            "job_boards": "1",
         },
     )
     assert goals.headers["location"] == "/setup/notifications"
@@ -176,6 +177,22 @@ def test_the_whole_wizard(fresh: Web, respx_mock: respx.MockRouter) -> None:
     assert {search.site for search in profile.searches} == {"linkedin", "indeed"}
     assert len(fresh.seeded) == 1  # type: ignore[attr-defined]
     assert fresh.client.get("/", follow_redirects=False).status_code == 200
+
+
+def test_job_board_searches_can_be_left_out(fresh: Web) -> None:
+    """LinkedIn and Indeed restrict automated access: the wizard lets you skip them."""
+    goals_page = page_text(fresh, "/setup/goals")
+    assert re.search(r'name="job_boards" value="1" checked', goals_page)  # on by default
+    post_form(fresh, "/setup/roles", {"roles": ["backend"]})
+    post_form(fresh, "/setup/goals", {"min_pay": "", "dream": "", "avoid": ""})
+    answers = stored(fresh).profile.answers  # type: ignore[union-attr]
+    assert answers is not None
+    assert answers.job_boards is False
+    assert "LinkedIn and Indeed aren't searched" in page_text(fresh, "/setup/review")
+    post_form(fresh, "/setup/review", {})
+    profile = stored(fresh).profile
+    assert profile is not None
+    assert profile.searches == []
 
 
 def test_a_step_with_an_error_says_so_and_keeps_nothing(fresh: Web) -> None:

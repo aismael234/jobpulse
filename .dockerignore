@@ -11,6 +11,8 @@ data/
 .git
 .venv
 .claude/
+.github/
+docs/
 tests/
 scripts/
 dist/
