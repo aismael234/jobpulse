@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 import respx
+from sqlalchemy import update
 
 from jobpulse.db import repo
 from jobpulse.db.tables import Company
@@ -140,7 +141,7 @@ def test_an_unreadable_page_is_reported(web: Web, respx_mock: respx.MockRouter) 
 
 
 def test_a_board_already_on_the_watchlist_is_not_validated_again(web: Web) -> None:
-    web.sync_watchlist()  # Acme (greenhouse/acme) from config
+    web.watch()  # Acme (greenhouse/acme) and Beta
     with respx.mock(assert_all_called=False) as router:
         page = detect(web, "https://job-boards.greenhouse.io/acme")
         assert router.calls.call_count == 0
@@ -151,7 +152,6 @@ def test_a_board_already_on_the_watchlist_is_not_validated_again(web: Web) -> No
 def test_blocked_boards_and_companies_are_not_offered(
     make_web: Callable[..., Web], respx_mock: respx.MockRouter
 ) -> None:
-    # (blocking "Acme Corp" would block the config's active Acme entry, a config error)
     web = make_web(
         config=make_config(blocklist={"boards": ["greenhouse/badco"], "companies": ["Initech"]})
     )
@@ -267,28 +267,29 @@ def test_priority_and_pause_for_companies_not_in_config(web: Web) -> None:
     assert web.companies()[0].active is True
 
 
-def test_config_companies_are_edited_in_config_yaml(web: Web) -> None:
-    web.sync_watchlist()
+def test_imported_companies_are_edited_here_too(web: Web) -> None:
+    """From M6 the dashboard owns every company, config.yaml's former watchlist included."""
+    web.watch()
+    with web.sessions() as session:
+        session.execute(update(Company).values(source_of_discovery="config"))  # pre-import rows
+        session.commit()
     acme = next(c for c in web.companies() if c.token == "acme")
 
-    response = web.post(f"/watchlist/{acme.id}/priority", {"priority": "9"})
-    assert response.status_code == 400
-    assert "config.yaml" in html.unescape(response.text)
-    response = web.post(f"/watchlist/{acme.id}/active", {"active": "0"})
-    assert response.status_code == 400
+    assert web.post(f"/watchlist/{acme.id}/priority", {"priority": "9"}).status_code == 200
+    assert web.post(f"/watchlist/{acme.id}/active", {"active": "0"}).status_code == 200
     acme_after = next(c for c in web.companies() if c.token == "acme")
-    assert (acme_after.priority, acme_after.active) == (5, True)
+    assert (acme_after.priority, acme_after.active) == (9, False)
 
     assert web.post("/watchlist/999999/priority", {"priority": "1"}).status_code == 404
 
 
 def test_the_watchlist_page_lists_every_company(web: Web) -> None:
-    web.sync_watchlist()
+    web.watch()
     add_company(web, discovered_from="https://jobs.lever.co/delta/abc/apply")
 
     page = web.page("/watchlist")
 
-    for text in ("Acme", "Beta", "Delta", "config", "auto", "baseline pending"):
+    for text in ("Acme", "Beta", "Delta", "dashboard", "auto", "baseline pending"):
         assert text in page
     assert 'href="https://job-boards.greenhouse.io/acme"' in page
     assert 'href="https://jobs.lever.co/delta"' in page
@@ -369,11 +370,8 @@ def test_a_careers_page_that_links_a_workday_board(web: Web, respx_mock: respx.M
 
 
 def test_a_watched_workday_board_is_not_validated_again(make_web: Callable[..., Web]) -> None:
-    config = make_config(
-        watchlist=[{"name": "Omega", "ats": "workday", "token": "omega.wd5/External"}]
-    )
-    web = make_web(config=config)
-    web.sync_watchlist()
+    web = make_web()
+    web.watch({"name": "Omega", "ats_type": "workday", "token": "omega.wd5/External"})
     with respx.mock(assert_all_called=False) as router:
         page = detect(web, WD_JOB_URL)
         assert router.calls.call_count == 0

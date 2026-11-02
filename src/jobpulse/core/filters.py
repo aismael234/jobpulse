@@ -113,16 +113,25 @@ def check_title(title: str, rules: FilterRules) -> TitleVerdict:
     for pattern in rules.level_exclude:
         if pattern.search(title):
             return TitleVerdict(False, f"title matches level exclude rule {pattern.pattern!r}")
+    match = title_match(title, rules)
+    if match is None:
+        return TitleVerdict(False, "title matches no include rule")
+    return TitleVerdict(True, "title matches", match)
+
+
+def title_match(title: str, rules: FilterRules) -> float | None:
+    """The title score, excludes aside: the best include weight (1.0 when there are no
+    includes) plus the level bonus, or ``None`` when includes exist and none matches."""
     if rules.title_include:
         weights = [rule.weight for rule in rules.title_include if rule.pattern.search(title)]
         if not weights:
-            return TitleVerdict(False, "title matches no include rule")
+            return None
         match = max(weights)
     else:
         match = 1.0
     if any(pattern.search(title) for pattern in rules.level_include):
         match = min(1.0, match + rules.level_include_bonus)
-    return TitleVerdict(True, "title matches", match)
+    return match
 
 
 def extract_years_required(text: str | None) -> int | None:

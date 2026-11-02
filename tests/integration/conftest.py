@@ -7,7 +7,7 @@ import random
 import re
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import ExitStack
-from dataclasses import dataclass, field
+from dataclasses import InitVar, dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -20,14 +20,16 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session, sessionmaker
 
-from jobpulse.config import SIMPLIFY_NEW_GRAD_URL, AppConfig, SearchEntry
+from jobpulse.config import SIMPLIFY_NEW_GRAD_URL, AppConfig, SearchEntry, split
 from jobpulse.core.dedupe import canonicalize_url
-from jobpulse.core.locations import normalize_locations
+from jobpulse.core.locations import merge_aliases, normalize_locations
 from jobpulse.core.models import FetchResult, Posting, Target
 from jobpulse.core.similarity import resume_lines
 from jobpulse.core.timeparse import utcnow
-from jobpulse.db import repo, saved_filters
+from jobpulse.credentials import SecretStore
+from jobpulse.db import profile as profile_db
 from jobpulse.db import resume as resume_db
+from jobpulse.db import saved_filters
 from jobpulse.db.query_params import filter_params, parse_query
 from jobpulse.db.session import create_engine_for, make_session_factory
 from jobpulse.db.tables import (
@@ -42,9 +44,10 @@ from jobpulse.db.tables import (
 from jobpulse.discovery import Discoverer
 from jobpulse.httpclient import HttpClient
 from jobpulse.llm.scorer import LlmScorer
+from jobpulse.logging_setup import SecretRegistry
 from jobpulse.notify.base import Notification, NotifierError
 from jobpulse.poller import CycleReport, Poller
-from jobpulse.runtime import build_adapters, build_discoverer
+from jobpulse.runtime import build_adapters, build_discoverer, follow_profile
 from jobpulse.sources.jobspy_boards import JobSpyAdapter
 from jobpulse.web.app import create_app
 from jobpulse.web.security import CSRF_COOKIE
@@ -72,11 +75,12 @@ BASE_CONFIG: dict[str, Any] = {
         "description": {"max_years_experience": 6, "stack_keywords": {r"\bpython\b": 1.0}},
     },
     "scoring": {"instant_threshold": 0.5},
-    "watchlist": [
-        {"name": "Acme", "ats": "greenhouse", "token": "acme", "priority": 5},
-        {"name": "Beta", "ats": "lever", "token": "beta", "priority": 3},
-    ],
 }
+# The companies every integration test starts with, as Watchlist page rows (baseline pending).
+WATCHLIST: tuple[dict[str, Any], ...] = (
+    {"name": "Acme", "ats_type": "greenhouse", "token": "acme", "priority": 5},
+    {"name": "Beta", "ats_type": "lever", "token": "beta", "priority": 3},
+)
 
 
 def _merge(base: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:
@@ -91,6 +95,28 @@ def _merge(base: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:
 
 def make_config(**overrides: Any) -> AppConfig:
     return AppConfig.model_validate(_merge(BASE_CONFIG, overrides))
+
+
+def save_profile(sessions: sessionmaker[Session], config: AppConfig) -> None:
+    """Store ``config``'s profile half, onboarded, as Settings or `profile import` would."""
+    with sessions() as session:
+        profile_db.save(session, split(config)[1], now=NOW - timedelta(hours=1))
+        session.commit()
+
+
+def add_watchlist(sessions: sessionmaker[Session], *entries: dict[str, Any]) -> None:
+    """Watchlist rows the dashboard owns, baseline pending, as the Watchlist page adds them."""
+    with sessions() as session:
+        for entry in entries:
+            session.add(
+                Company(
+                    source_of_discovery="dashboard",
+                    created_at=NOW - timedelta(days=3),
+                    updated_at=NOW - timedelta(days=3),
+                    **entry,
+                )
+            )
+        session.commit()
 
 
 def gh_job(
@@ -306,9 +332,10 @@ class ScriptedScrape:
 class Env:
     sessions: sessionmaker[Session]
     http: HttpClient
-    config: AppConfig
+    initial_config: InitVar[AppConfig]
     notifier: Any
     adapters: dict[str, Any]
+    aliases: dict[str, str] = field(default_factory=dict)  # shared with the adapters
     discoverer: Discoverer | None = None
     llm: LlmScorer | None = None
     embedder: Any = None  # resume similarity (M5b): a tests.factories.FakeEmbedder
@@ -316,9 +343,23 @@ class Env:
     pushed: list[str] = field(default_factory=list)
     sleep: FakeSleep = field(default_factory=FakeSleep)  # spacing between saved-filter pushes
 
+    def __post_init__(self, initial_config: AppConfig) -> None:
+        self.config = initial_config
+
+    @property
+    def config(self) -> AppConfig:
+        return self._config
+
+    @config.setter
+    def config(self, value: AppConfig) -> None:
+        """Infrastructure for the next poller, and the profile saved as a new revision: the
+        next cycle picks it up the way the worker picks up a Settings change."""
+        self._config = value
+        save_profile(self.sessions, value)
+
     def poller(self) -> Poller:
         return Poller(
-            config=self.config,
+            infra=self.config,
             sessions=self.sessions,
             adapters=self.adapters,
             notifier=self.notifier,
@@ -326,6 +367,7 @@ class Env:
             llm=self.llm,
             sleep=self.sleep,
             embedder=self.embedder,
+            on_profile=follow_profile(self.http, self.aliases),
         )
 
     def set_resume(self, text: str, *, filename: str = "resume.txt") -> None:
@@ -394,14 +436,15 @@ class Env:
             return list(session.scalars(select(Run).order_by(Run.id)))
 
     def add_search(self, name: str = "backend-sf", site: str = "linkedin", **fields: Any) -> None:
-        """Configure a search; the next poll syncs it into the database."""
+        """Add a search to the profile; the next poll syncs it into the database."""
         entry = SearchEntry.model_validate(
             {"name": name, "site": site, "search_term": "backend engineer", **fields}
         )
         self.reconfigure(searches=[*self.config.searches, entry])
 
     def reconfigure(self, **sections: Any) -> None:
-        """Swap whole config sections (validated, so cross-section rules still apply)."""
+        """Swap whole config sections (validated, so cross-section rules still apply); the
+        profile's go to the database as a new revision."""
         data = self.config.model_dump()
         data.update(
             {
@@ -415,8 +458,31 @@ class Env:
         """A discoverer built from the current config (its miss cache starts empty)."""
         self.discoverer = build_discoverer(self.http, self.config)
 
+    def watch(self, name: str, ats: str, token: str, **fields: Any) -> None:
+        """A board added on the Watchlist page: baseline pending until its first poll."""
+        add_watchlist(self.sessions, {"name": name, "ats_type": ats, "token": token, **fields})
+
+    def pause(self, *tokens: str, paused: bool = True) -> None:
+        """Pause watched boards (or, with ``paused=False``, switch them back on)."""
+        with self.sessions() as session:
+            session.execute(
+                update(Company).where(Company.token.in_(tokens)).values(active=not paused)
+            )
+            session.commit()
+
+    def set_keywords(self, token: str, keywords: Sequence[str]) -> None:
+        """New Workday keywords find other jobs, so the board starts a new silent baseline
+        when they change (as `profile import` does)."""
+        with self.sessions() as session:
+            company = session.scalars(select(Company).where(Company.token == token)).one()
+            params = {"keywords": list(keywords)} if keywords else None
+            if company.params != params:
+                company.params = params
+                company.baseline_done_at = None
+            session.commit()
+
     def add_company(self, name: str, ats: str, token: str, **fields: Any) -> None:
-        """A company that discovery (or the dashboard) added, not config."""
+        """A company that discovery added, baseline done two days ago."""
         with self.sessions() as session:
             values: dict[str, Any] = {
                 "source_of_discovery": "auto",
@@ -483,10 +549,20 @@ def env(
 ) -> Env:
     time_machine.move_to(NOW, tick=False)
     config = make_config()
-    adapters: dict[str, Any] = dict(build_adapters(http, config, sleep=FakeSleep()))
+    aliases = merge_aliases({})
+    adapters: dict[str, Any] = dict(
+        build_adapters(http, config, aliases=aliases, sleep=FakeSleep())
+    )
     adapters["linkedin"] = FakeBoardAdapter("linkedin")
+    add_watchlist(database, *WATCHLIST)
     return Env(
-        database, http, config, RecordingNotifier(), adapters, build_discoverer(http, config)
+        database,
+        http,
+        config,
+        RecordingNotifier(),
+        adapters,
+        aliases,
+        build_discoverer(http, config),
     )
 
 
@@ -588,10 +664,9 @@ class Web:
         with self.sessions() as session:
             return list(session.scalars(select(Company).order_by(Company.id)))
 
-    def sync_watchlist(self) -> None:
-        with self.sessions() as session:
-            repo.sync_watchlist(session, self.config.watchlist, now=NOW)
-            session.commit()
+    def watch(self, *entries: dict[str, Any]) -> None:
+        """Watchlist rows (Acme and Beta by default), as the env fixture starts with."""
+        add_watchlist(self.sessions, *(entries or WATCHLIST))
 
 
 def dashboard_http_client() -> HttpClient:
@@ -611,13 +686,17 @@ def make_web(
             config: AppConfig | None = None,
             credentials: tuple[str, str] | None = None,
             secrets: Sequence[str] = (),
+            store: SecretStore | None = None,
         ) -> Web:
+            """``secrets``: values masked in every page, as if they were in .env."""
             config = config or make_config()
+            save_profile(database, config)
+            store = store or SecretStore(registry=SecretRegistry(secrets))
             app = create_app(
-                config=config,
+                infra=config,
                 sessions=database,
                 credentials=credentials,
-                secrets=secrets,
+                store=store,
                 http_factory=dashboard_http_client,
             )
             client = stack.enter_context(TestClient(app))

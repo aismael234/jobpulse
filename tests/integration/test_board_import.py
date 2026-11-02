@@ -356,7 +356,7 @@ def test_the_command_reports_each_board_and_a_summary(
     db_url = f"sqlite:///{tmp_path / 'jobpulse.db'}"
     monkeypatch.setenv("DATABASE_URL", db_url)
     config_path = tmp_path / "config.yaml"
-    config_path.write_text("contact_email: dev@example.com\n", encoding="utf-8")
+    config_path.write_text("", encoding="utf-8")  # no profile needed to import boards
     base = ["--config", str(config_path), "--env-file", str(tmp_path / ".env")]
     assert runner.invoke(app, [*base, "db", "upgrade"]).exit_code == 0
     respx_mock.get(GreenhouseAdapter.list_url("mixpanel")).respond(json=gh_board(120))
@@ -408,7 +408,7 @@ def test_bad_options_are_refused(tmp_path: Path, extra: list[str]) -> None:
     file = tmp_path / "links.txt"
     file.write_text(GH_MIXPANEL)
     config_path = tmp_path / "config.yaml"
-    config_path.write_text("contact_email: dev@example.com\n", encoding="utf-8")
+    config_path.write_text("", encoding="utf-8")  # no profile needed to import boards
     base = ["--config", str(config_path), "--env-file", str(tmp_path / ".env")]
     result = runner.invoke(app, [*base, "companies", "import", str(file), *extra])
     assert result.exit_code == 2

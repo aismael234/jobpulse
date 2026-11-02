@@ -2,11 +2,9 @@
 
 from collections.abc import AsyncIterator, Callable, Iterable
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
 
 import jinja2
 from fastapi import FastAPI, Request
@@ -17,11 +15,11 @@ from markupsafe import Markup, escape
 from sqlalchemy.orm import Session, sessionmaker
 from starlette.exceptions import HTTPException
 
-from jobpulse.config import AppConfig, company_blocklist, short_labels
-from jobpulse.core.filters import Blocklist
+from jobpulse.config import InfraConfig
 from jobpulse.core.timeparse import utcnow
+from jobpulse.credentials import SecretStore
 from jobpulse.httpclient import HttpClient
-from jobpulse.logging_setup import REDACTED
+from jobpulse.logging_setup import SecretRegistry
 from jobpulse.runtime import build_http
 from jobpulse.sources.ats_detect import AtsDetector
 from jobpulse.web import routes
@@ -30,54 +28,37 @@ from jobpulse.web.security import (
     CsrfCookieMiddleware,
     SecurityHeadersMiddleware,
 )
+from jobpulse.web.state import WebState
 from jobpulse.web.views import FILTERS
 
 HERE = Path(__file__).parent
 TEMPLATES_DIR = HERE / "templates"
 STATIC_DIR = HERE / "static"
-MIN_SECRET_LENGTH = 4
 
 
-@dataclass
-class WebState:
-    """Everything the routes need, kept on ``app.state.web``."""
-
-    config: AppConfig
-    sessions: sessionmaker[Session]
-    templates: Jinja2Templates
-    clock: Callable[[], datetime]
-    blocklist: Blocklist  # config.yaml's; routes add the dashboard's blocks per request
-    short_labels: dict[str, str]
-    zone: ZoneInfo
-    detector: AtsDetector | None = None
-    feeds: list[tuple[str, str]] = field(default_factory=list)
-
-
-def _redactor(secrets: Iterable[str]) -> Callable[[Any], Any]:
-    """Jinja ``finalize``: every rendered value loses any secret it contains."""
-    values = sorted(
-        {secret for secret in secrets if len(secret) >= MIN_SECRET_LENGTH}, key=len, reverse=True
-    )
+def _redactor(registry: SecretRegistry) -> Callable[[Any], Any]:
+    """Jinja ``finalize``: every rendered value loses any secret it contains, including those
+    saved on Settings after the dashboard started."""
 
     def finalize(value: Any) -> Any:
         if value is None:
             return ""
-        if not values or not isinstance(value, str):
+        if not isinstance(value, str) or not registry.values():
             return value
-        text = str(value)
-        for secret in values:
-            text = text.replace(secret, REDACTED)
+        text = registry.redact(str(value))
         return Markup(text) if isinstance(value, Markup) else text
 
     return finalize
 
 
-def build_templates(secrets: Iterable[str]) -> Jinja2Templates:
+def build_templates(secrets: Iterable[str] | SecretRegistry) -> Jinja2Templates:
     environment = jinja2.Environment(
         loader=jinja2.FileSystemLoader(TEMPLATES_DIR),
         autoescape=True,
         undefined=jinja2.StrictUndefined,
-        finalize=_redactor(secrets),
+        finalize=_redactor(
+            secrets if isinstance(secrets, SecretRegistry) else SecretRegistry(secrets)
+        ),
         trim_blocks=True,
         lstrip_blocks=True,
     )
@@ -87,31 +68,34 @@ def build_templates(secrets: Iterable[str]) -> Jinja2Templates:
 
 def create_app(
     *,
-    config: AppConfig,
+    infra: InfraConfig,
     sessions: sessionmaker[Session],
     credentials: tuple[str, str] | None = None,
-    secrets: Iterable[str] = (),
+    store: SecretStore | None = None,
     http_factory: Callable[[], HttpClient] | None = None,
     clock: Callable[[], datetime] = utcnow,
 ) -> FastAPI:
-    """The dashboard. ``credentials`` (user, password) turn on basic auth; ``secrets`` are
-    masked in every rendered value; ``http_factory`` builds the client the watchlist page
-    detects boards with (default: the same client the poller uses)."""
+    """The dashboard. ``credentials`` (user, password) turn on basic auth; ``store`` resolves
+    the secrets Settings shows and saves, and its registry's values are masked in every
+    rendered value; ``http_factory`` builds the client the watchlist page detects boards
+    with and test pushes go through (default: the same client the poller uses)."""
+    store = store if store is not None else SecretStore()
+    store.registry.add(credentials[1:] if credentials else ())
     state = WebState(
-        config=config,
+        infra=infra,
         sessions=sessions,
-        templates=build_templates([*secrets, *(credentials[1:] if credentials else ())]),
+        templates=build_templates(store.registry),
         clock=clock,
-        blocklist=company_blocklist(config),
-        short_labels=short_labels(config),
-        zone=ZoneInfo(config.timezone),
-        feeds=[("simplify", config.simplify.name)] if config.simplify.enabled else [],
+        store=store,
+        feeds=[("simplify", infra.simplify.name)] if infra.simplify.enabled else [],
     )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        http = http_factory() if http_factory is not None else build_http(config)
+        http = http_factory() if http_factory is not None else build_http(infra)
+        state.http = http
         state.detector = AtsDetector(http)
+        state._snapshot = None  # the first page sets the User-Agent from the profile
         try:
             yield
         finally:

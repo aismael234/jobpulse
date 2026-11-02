@@ -1,0 +1,105 @@
+# jobpulse preferences: what the dashboard's Settings page edits under Profile, kept in the
+# database. Paste this into the editor there and adjust it, or bring an old config.yaml's in
+# with `jobpulse profile import`. The watchlist is on the Watchlist page.
+
+# Sent in the User-Agent to the ATS APIs so their operators can reach you.
+contact_email: you@example.com
+
+# Used for display. Storage is always UTC.
+timezone: America/Los_Angeles
+
+filters:
+  title:
+    include:                    # at least one must match; the weight feeds the title score
+      - {pattern: '\bback[- ]?end\b', weight: 1.0}
+      - {pattern: '\bplatform\b', weight: 0.8}
+      - {pattern: '\binfrastructure\b', weight: 0.8}
+      - {pattern: '\bapi\b', weight: 0.7}
+      - {pattern: '\bsoftware engineer\b', weight: 0.6}
+    exclude:                    # any match rejects the posting
+      - '\bmanager\b'
+      - '\bintern(ship)?\b'
+      - '\bfront[- ]?end\b'
+      - '\bsales\b'
+      - '\brecruit'
+  level:
+    include: ["<SET ME>"]       # level words you want, e.g. 'senior' or '\bii\b'; a title match adds a bonus
+    exclude: ['\bstaff\b', '\bprincipal\b']   # EXAMPLE ONLY; a title match rejects the posting
+  description:
+    max_years_experience: null  # e.g. 5; null turns the check off
+    years_mode: penalize        # penalize (lowers the score) or exclude
+    level_phrases_exclude: []   # e.g. 'staff-level'
+    stack_keywords:             # regex: weight, matched against the description
+      '\bpython\b': 1.0
+      '\bgo(lang)?\b': 1.0
+      '\bpostgres(ql)?\b': 0.5
+      '\bkubernetes\b': 0.5
+  locations:
+    countries: []               # ISO codes or names, e.g. [US, CA]: keep postings with a location
+                                # there. Remote (Global) counts everywhere; a posting none of whose
+                                # locations has a known country follows unknown_location_passes
+    include: []                 # regexes over normalized labels, e.g. '^Remote \(US\)$'; empty = anywhere
+    exclude: []
+    aliases:                    # your abbreviations, on top of the built-in table
+      SF: San Francisco, CA
+      NYC: New York, NY
+    unknown_location_passes: true
+
+scoring:
+  weights:
+    freshness: 0.25
+    company_priority: 0.20
+    title: 0.30
+    stack: 0.25
+    level_mismatch: 0.50        # subtracted
+    applicants: 0.10            # only when known (a LinkedIn job page's applicant count)
+    resume: 0.25                # replaces stack for postings with a description once a resume is set
+    llm: 0.15                   # only with the LLM layer on: the most it adds or subtracts
+  priority_cap: 10              # watchlist priority is scaled to 0..1 against this
+  applicant_cap: 200            # applicants scale against this: none scores 1, this many or more 0
+  instant_threshold: 0.55       # every match is pushed; the LLM layer double-checks scores near this
+
+notify:
+  channels: [ntfy]              # ntfy and/or discord; their secrets go on Settings (or in .env)
+  ntfy:
+    base_url: https://ntfy.sh   # or your self-hosted server
+    priority: 4
+    tags: [briefcase]
+  # Once a saved filter exists (dashboard Settings), each fitting match is its own push. ntfy.sh
+  # allows a burst of 60, then one per 5 s, and 250 messages a day; the rest of a cycle go out
+  # as one summary.
+  # saved_filters: {max_per_cycle: 10, max_per_day: 200, spacing_seconds: 5}
+
+# Indeed and LinkedIn searches through JobSpy. Each asks for jobs posted in the last
+# hours_old (3) hours on every run, so a late or failed run leaves no gap. The first run of a
+# new (or changed) search is a silent baseline. LinkedIn ignores is_remote and reads a
+# location of "Remote" as anywhere in the world: search a country ("United States") and let
+# filters.locations.countries keep the postings there. Keep LinkedIn searches few and
+# results_wanted low.
+searches: []
+#  - {name: backend-us-remote, site: indeed, search_term: "backend engineer", location: "United States", is_remote: true}
+#  - {name: backend-sf, site: linkedin, search_term: "backend engineer", location: "San Francisco, CA", results_wanted: 25}
+
+# Companies and boards to stay away from. A blocked company's postings (from any source) are
+# stored but never pushed, discovery never adds its boards, and a board it
+# added earlier is no longer polled. Names match whole, ignoring case, punctuation and
+# Inc/LLC/Ltd: "Acme, Inc." blocks "ACME" but not "Acme Widgets". Blocked boards (ats/token)
+# are never added or polled, though their jobs can still reach you through the feed or a
+# search. To stop polling a watched company, pause it on the Watchlist page instead.
+blocklist:
+  companies: []                 # e.g. [Jobot, Revature]
+  boards: []                    # e.g. [greenhouse/spacex]
+
+# An optional second opinion from Claude on postings whose score is within `band` of
+# instant_threshold: the level the role hires for, its backend focus and your resume's fit move
+# the score by up to scoring.weights.llm. The postings and your resume (the one uploaded on
+# Settings) go to Anthropic's API, so it stays off until you turn it on. Needs an Anthropic API
+# key, on Settings or as LLM_API_KEY in .env.
+llm:
+  enabled: false
+  model: claude-opus-5-5
+  effort: low                   # low, medium, high, xhigh or max: more thinking costs more
+  role: backend software engineer  # who you are, as the prompt describes you
+  band: 0.10                    # ask about matches scoring within this of scoring.instant_threshold
+  wanted_levels: []             # e.g. [entry, mid]; from intern, entry, mid, senior, staff, principal, manager
+  max_calls_per_day: 25         # in any 24 hours, failed calls included; answers are cached per posting

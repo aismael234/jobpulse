@@ -1,6 +1,10 @@
-"""One poll cycle: fetch, diff, dedupe, prescreen, enrich, decide (with resume similarity in
-place of the stack keywords when a resume is stored, and the LLM layer's second opinion near
-the threshold, when it's on), notify, check health, discover new boards.
+"""One poll cycle: read the profile, fetch, diff, dedupe, prescreen, enrich, decide (with
+resume similarity in place of the stack keywords when a resume is stored, and the LLM layer's
+second opinion near the threshold, when it's on), notify, check health, discover new boards.
+
+Preferences come from the database profile, read at the start of every cycle: a change on
+Settings applies from the next cycle, with no restart. Until a profile is onboarded, cycles
+do nothing. When the profile's filters or scoring change, open matches are re-scored.
 
 A posting whose detail couldn't be read (``EnrichmentDeferred``: LinkedIn's hourly page cap or
 cool-down) stays pending, undecided, and the next cycle of its source tries again, until it
@@ -23,7 +27,11 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from jobpulse.config import (
     AppConfig,
+    InfraConfig,
+    Profile,
+    compose,
     filter_rules,
+    scoring_hash,
     scoring_weights,
     short_labels,
 )
@@ -48,14 +56,17 @@ from jobpulse.core.reposts import REPOST_AFTER, repost_reason
 from jobpulse.core.scoring import priority_component
 from jobpulse.core.similarity import ResumeMatch, Vector
 from jobpulse.core.timeparse import utcnow
+from jobpulse.db import profile as profile_db
 from jobpulse.db import repo, saved_filters
 from jobpulse.db import resume as resume_db
+from jobpulse.db.profile import ProfileReader
 from jobpulse.db.saved_filters import Saved
 from jobpulse.db.tables import PostingRow
 from jobpulse.discovery import Discoverer, Sighting
 from jobpulse.embeddings.base import Embedder
 from jobpulse.health import HealthMonitor, HealthRules
 from jobpulse.llm.scorer import Ask, LlmScorer
+from jobpulse.llm.source import LlmSource
 from jobpulse.notify.base import Notification, Notifier, NotifierError
 from jobpulse.notify.format import (
     PushContent,
@@ -65,6 +76,7 @@ from jobpulse.notify.format import (
     saved_filter_summary,
     title_line,
 )
+from jobpulse.rescoring import rescore_matches
 from jobpulse.resume_scoring import (
     embed_resume,
     input_hash,
@@ -79,6 +91,7 @@ from jobpulse.sources.maintenance import Sleep
 log = logging.getLogger(__name__)
 
 Inserted = tuple[int, Posting, str]  # (row id, posting, fingerprint)
+NOT_ONBOARDED = "no profile yet: run `jobpulse profile import`, or save one on Settings"
 LLM_CAP_WINDOW = timedelta(hours=24)  # llm.max_calls_per_day counts calls in this window
 PUSH_CAP_WINDOW = timedelta(hours=24)  # notify.saved_filters.max_per_day counts this window
 
@@ -125,6 +138,8 @@ class TargetReport:
 @dataclass
 class CycleReport:
     dry_run: bool
+    idle: str | None = None  # why nothing ran (no onboarded profile)
+    profile_problem: str | None = None  # the stored profile is invalid: the last good one ran
     targets: list[TargetReport] = field(default_factory=list)
     pushes: list[str] = field(default_factory=list)  # title lines sent (or, in a dry run, due)
     push_summary: str | None = None  # the batch, or the saved-filter summary, they went in
@@ -146,6 +161,7 @@ class CycleReport:
     resume_embedded: int = 0  # descriptions embedded this cycle (the rest from the cache)
     resume_rescored: int = 0  # open matches re-scored at cycle start (the resume changed)
     resume_failed: str | None = None  # why the embedder couldn't be used: stack keywords instead
+    rescored: int = 0  # open matches whose score changed with the profile's filters or scoring
 
 
 @dataclass
@@ -186,17 +202,20 @@ class Poller:
     def __init__(
         self,
         *,
-        config: AppConfig,
+        infra: InfraConfig,
         sessions: sessionmaker[Session],
         adapters: Mapping[str, SourceAdapter],
         notifier: Notifier | None = None,
         clock: Callable[[], datetime] = utcnow,
         discoverer: Discoverer | None = None,
-        llm: LlmScorer | None = None,
+        llm: LlmScorer | LlmSource | None = None,
         sleep: Sleep = asyncio.sleep,
         embedder: Embedder | None = None,
+        on_profile: Callable[[AppConfig], None] | None = None,
     ) -> None:
-        self._config = config
+        """``on_profile`` is called with the composed config whenever a new profile revision
+        is loaded (the runtime updates the adapters' location aliases and the User-Agent)."""
+        self._infra = infra
         self._sessions = sessions
         self._adapters = dict(adapters)
         self._notifier = notifier
@@ -206,20 +225,27 @@ class Poller:
         self._sleep = sleep  # spaces saved-filter pushes out
         self._embedder = embedder
         self._resume_lock = asyncio.Lock()  # one re-score at a time across concurrent cycles
+        self._on_profile = on_profile
         self._health = (
-            HealthMonitor(HealthRules.from_config(config.health, config.maintenance))
-            if config.health.enabled
+            HealthMonitor(HealthRules.from_config(infra.health, infra.maintenance))
+            if infra.health.enabled
             else None
         )
+        self._freshness = timedelta(hours=infra.detection.freshness_hours)
+        self._fingerprint_window = timedelta(days=infra.detection.fingerprint_window_days)
+        self._detail_wait = timedelta(hours=infra.linkedin.job_page_wait_hours)
+        self._next_prune: datetime | None = None  # run history is pruned at most once a day
+        self._profiles = ProfileReader()
+        self._revision: int | None = None  # the profile revision compiled below
+        self._compile(compose(infra, Profile()))
+
+    def _compile(self, config: AppConfig) -> None:
+        self._config = config
         self._rules = filter_rules(config)
         self._config_blocklist = self._rules.blocklist
         self._blocklist = self._config_blocklist  # with the dashboard's blocks, per cycle
         self._weights = scoring_weights(config)
         self._short_labels = short_labels(config)
-        self._freshness = timedelta(hours=config.detection.freshness_hours)
-        self._fingerprint_window = timedelta(days=config.detection.fingerprint_window_days)
-        self._detail_wait = timedelta(hours=config.linkedin.job_page_wait_hours)
-        self._next_prune: datetime | None = None  # run history is pruned at most once a day
 
     async def run_cycle(
         self,
@@ -233,13 +259,15 @@ class Poller:
         session = unit.session
         try:
             now = self._clock()
-            repo.sync_watchlist(session, self._config.watchlist, now=now)
+            if not self._load_profile(session, report):
+                return report
             repo.sync_searches(session, self._config.searches, now=now)
             # Companies blocked from the dashboard count from the next cycle, without a restart.
             self._blocklist = repo.blocklist(session, self._config_blocklist)
             self._rules = replace(self._rules, blocklist=self._blocklist)
             targets = self._targets(session, sources, target_key)
             unit.checkpoint()
+            self._rescore_profile(unit, report)
             await self._rescore_resume(unit, report)
 
             started_at = self._clock()
@@ -296,6 +324,45 @@ class Poller:
 
     # --- phases -----------------------------------------------------------------------
 
+    def _load_profile(self, session: Session, report: CycleReport) -> bool:
+        """Compile the stored profile when its revision moved; whether the cycle can run (a
+        profile is onboarded). An invalid stored profile keeps the last good one."""
+        stored = self._profiles.read(session)
+        report.profile_problem = stored.problem
+        if stored.problem is not None:
+            log.warning("profile: %s", stored.problem)
+        if stored.profile is None or not stored.onboarded:
+            report.idle = stored.problem or NOT_ONBOARDED
+            return False
+        if stored.revision != self._revision:
+            self._compile(compose(self._infra, stored.profile))
+            self._revision = stored.revision
+            if self._on_profile is not None:
+                self._on_profile(self._config)
+        return True
+
+    def _rescore_profile(self, unit: _UnitOfWork, report: CycleReport) -> None:
+        """Re-score open matches when the profile's filters or scoring differ from those they
+        were last scored with. A profile seen for the first time (just imported or saved)
+        is taken as what they were scored with."""
+        session = unit.session
+        digest = scoring_hash(self._config)
+        stored = profile_db.scored_hash(session)
+        if stored == digest:
+            return
+        if stored is not None:
+            report.rescored = rescore_matches(
+                session,
+                rules=self._rules,
+                weights=self._weights,
+                freshness=self._freshness,
+                priority_cap=self._config.scoring.priority_cap,
+                applicant_cap=self._config.scoring.applicant_cap,
+            )
+            log.info("profile: re-scored %d open matches", report.rescored)
+        profile_db.mark_scored(session, digest)
+        unit.checkpoint()
+
     def _targets(
         self, session: Session, sources: Collection[str] | None, target_key: str | None
     ) -> list[Target]:
@@ -306,8 +373,8 @@ class Poller:
         if wanted is None or wanted & ATS_SOURCES:
             ats = None if wanted is None else wanted & ATS_SOURCES
             targets.extend(repo.company_targets(session, ats=ats, token=target_key))
-        if (wanted is None or wanted & FEED_SOURCES) and self._config.simplify.enabled:
-            targets.extend(repo.feed_targets(session, self._config.simplify, name=target_key))
+        if (wanted is None or wanted & FEED_SOURCES) and self._infra.simplify.enabled:
+            targets.extend(repo.feed_targets(session, self._infra.simplify, name=target_key))
         if wanted is None or wanted & JOB_BOARD_SOURCES:
             sites = None if wanted is None else wanted & JOB_BOARD_SOURCES
             targets.extend(repo.search_targets(session, sites=sites, name=target_key))
@@ -434,7 +501,7 @@ class Poller:
                 external_ids=[posting.external_id for posting in result.postings],
             )
         plan = plan_presence(
-            result, existing, close_after=self._config.detection.closure_missing_polls
+            result, existing, close_after=self._infra.detection.closure_missing_polls
         )
         repo.apply_presence(session, plan, now=now)
         reported = (
@@ -721,11 +788,14 @@ class Poller:
         """The LLM layer's second opinion on the matches within ``llm.band`` of
         ``scoring.instant_threshold``: the answer cached for that exact question, else a call while
         ``llm.max_calls_per_day`` allows. A dry run never calls."""
+        session = unit.session
         llm = self._llm
+        if isinstance(llm, LlmSource):
+            llm = await llm.current(session, self._config)
+            report.llm_stopped = self._llm.problem if isinstance(self._llm, LlmSource) else None
         asks = llm.candidates(postings, decisions) if llm is not None else []
         if llm is None or not asks:
             return decisions
-        session = unit.session
         cached = repo.cached_assessments(
             session, {survivors[ask.index].row_id: ask.request.input_hash for ask in asks}
         )
@@ -943,7 +1013,7 @@ class Poller:
         # Blocked boards are as good as known: never validated, never added.
         known = repo.known_companies(session) | self._blocklist.boards
         hosts = repo.greenhouse_hosts(session)
-        limit = self._config.discovery.max_auto_companies
+        limit = self._infra.discovery.max_auto_companies
         room = (
             None
             if limit is None
@@ -960,7 +1030,7 @@ class Poller:
             name = found.candidate.company_name or found.validation.name or ref.token
             report.discovery_skipped.append(
                 f"{ref.ats}/{ref.token} ({name}, {found.validation.job_count} jobs): more than "
-                f"discovery.max_board_jobs ({self._config.discovery.max_board_jobs})"
+                f"discovery.max_board_jobs ({self._infra.discovery.max_board_jobs})"
             )
         now = self._clock()
         for found in outcome.valid:
@@ -999,7 +1069,7 @@ class Poller:
     def _prune_runs(self, unit: _UnitOfWork, report: CycleReport) -> None:
         """Delete runs older than ``retention.runs_days``, at most once a day, never in a
         dry run. The retention window always covers what the health rules read."""
-        days = self._config.retention.runs_days
+        days = self._infra.retention.runs_days
         now = self._clock()
         if report.dry_run or days is None:
             return

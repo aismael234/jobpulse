@@ -14,7 +14,6 @@ from tests.integration.conftest import (
     SimplifyMock,
     gh_job,
     lever_posting,
-    make_config,
     simplify_listing,
 )
 
@@ -148,7 +147,7 @@ async def test_a_new_board_baseline_takes_over_a_pushed_feed_listing(
 async def test_without_a_match_the_baseline_stays_silent(
     env: Env, gh: GreenhouseMock, boards: ScriptedScrape
 ) -> None:
-    env.config = make_config(watchlist=[])
+    env.pause("acme", "beta")
     env.add_search()
     boards.queue(
         "linkedin",
@@ -159,8 +158,7 @@ async def test_without_a_match_the_baseline_stays_silent(
     await env.poll(sources=["linkedin"])
     assert len(env.notifier.sent) == 1
 
-    env.config = make_config()
-    env.add_search()
+    env.pause("acme", "beta", paused=False)
     gh.respond(
         gh_job(101, "Backend Engineer, Payroll", published=FRESH, location="San Francisco, CA")
     )

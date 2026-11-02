@@ -8,12 +8,14 @@ from jobpulse.core.models import Posting
 from jobpulse.llm.base import AssessmentRequest
 
 # Bump when the instructions change, so cached answers to the old ones are asked again.
-PROMPT_VERSION = "1"
+# 2: the job seeker's role comes from the profile (llm.role).
+PROMPT_VERSION = "2"
+DEFAULT_ROLE = "backend software engineer"
 # A cost guard: longer descriptions are cut here, with a note saying so.
 MAX_DESCRIPTION_CHARS = 16_000
 
 SYSTEM_PROMPT = """\
-You help one job seeker, a backend software engineer, triage job postings. You get their \
+You help one job seeker, a {role}, triage job postings. You get their \
 resume and one posting, and you answer with four fields:
 
 - level: the seniority the role actually hires for, judged from its responsibilities and \
@@ -57,14 +59,22 @@ def posting_text(posting: Posting) -> str:
     return "\n".join(lines)
 
 
-def build_request(posting: Posting, *, resume: str, model: str, effort: str) -> AssessmentRequest:
+def system_prompt(role: str) -> str:
+    return SYSTEM_PROMPT.format(role=" ".join(role.split()))
+
+
+def build_request(
+    posting: Posting, *, resume: str, model: str, effort: str, role: str = DEFAULT_ROLE
+) -> AssessmentRequest:
     text = posting_text(posting)
+    system = system_prompt(role)
     question = {
         "prompt": PROMPT_VERSION,
         "model": model,
         "effort": effort,
+        "system": system,
         "resume": resume,
         "posting": text,
     }
     digest = hashlib.sha256(json.dumps(question, sort_keys=True).encode("utf-8")).hexdigest()
-    return AssessmentRequest(system=SYSTEM_PROMPT, resume=resume, posting=text, input_hash=digest)
+    return AssessmentRequest(system=system, resume=resume, posting=text, input_hash=digest)

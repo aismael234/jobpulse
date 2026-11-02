@@ -9,12 +9,12 @@ from sqlalchemy import Engine, create_engine, event
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session, sessionmaker
 
-from jobpulse.config import DEFAULT_DATABASE_URL, AppConfig, Settings
+from jobpulse.config import DEFAULT_DATABASE_URL, InfraConfig, Settings
 
 SQLITE_BUSY_TIMEOUT_MS = 30_000
 
 
-def resolve_database_url(settings: Settings, config: AppConfig | None) -> str:
+def resolve_database_url(settings: Settings, config: InfraConfig | None) -> str:
     """``DATABASE_URL`` beats ``database_url`` in config.yaml, which beats the default."""
     if settings.database_url:
         return settings.database_url

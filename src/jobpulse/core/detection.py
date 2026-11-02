@@ -5,7 +5,14 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
-from jobpulse.core.filters import FilterRules, check_description, check_locations, check_title
+from jobpulse.core.filters import (
+    DescriptionVerdict,
+    FilterRules,
+    check_description,
+    check_locations,
+    check_title,
+    title_match,
+)
 from jobpulse.core.models import Decision, FetchResult, Posting, Precision
 from jobpulse.core.scoring import (
     ScoreInputs,
@@ -166,25 +173,9 @@ def evaluate(posting: Posting, ctx: EvaluationContext) -> Decision:
             tier="filtered", reason=description.reason, years_required=description.years_required
         )
     title = check_title(posting.title, ctx.rules)
-    age = posting_age(posting, first_seen_at=ctx.first_seen_at, now=ctx.now)
     has_description = bool(posting.description_text and posting.description_text.strip())
     resume = ctx.resume if has_description else None
-    total, breakdown = score(
-        ScoreInputs(
-            freshness=freshness_component(age, ctx.freshness),
-            company_priority=ctx.company_priority,
-            title=title.match,
-            stack=description.stack_match,
-            level_mismatch=description.level_mismatch,
-            applicants=(
-                applicant_component(posting.applicants, ctx.applicant_cap)
-                if posting.applicants is not None
-                else None
-            ),
-            resume=resume.score if resume is not None else None,
-        ),
-        ctx.weights,
-    )
+    total, breakdown = _score(posting, ctx, title.match, description, resume)
     reason = f"score {total:.2f}"
     if description.level_mismatch:
         reason += f"; {description.reason}"
@@ -196,4 +187,41 @@ def evaluate(posting: Posting, ctx: EvaluationContext) -> Decision:
         years_required=description.years_required,
         resume_score=resume.score if resume is not None else None,
         resume_line=resume.line if resume is not None else None,
+    )
+
+
+def match_score(posting: Posting, ctx: EvaluationContext) -> tuple[float, dict[str, float | None]]:
+    """The score ``evaluate`` would give a match, whatever the filters say now: open matches
+    are re-scored this way after the weights or the rules change. ``ctx.now`` is when it
+    was decided, so its freshness part stays what it was."""
+    description = check_description(posting.description_text, ctx.rules)
+    has_description = bool(posting.description_text and posting.description_text.strip())
+    resume = ctx.resume if has_description else None
+    title = title_match(posting.title, ctx.rules) or 0.0
+    return _score(posting, ctx, title, description, resume)
+
+
+def _score(
+    posting: Posting,
+    ctx: EvaluationContext,
+    title: float,
+    description: DescriptionVerdict,
+    resume: ResumeMatch | None,
+) -> tuple[float, dict[str, float | None]]:
+    age = posting_age(posting, first_seen_at=ctx.first_seen_at, now=ctx.now)
+    return score(
+        ScoreInputs(
+            freshness=freshness_component(age, ctx.freshness),
+            company_priority=ctx.company_priority,
+            title=title,
+            stack=description.stack_match,
+            level_mismatch=description.level_mismatch,
+            applicants=(
+                applicant_component(posting.applicants, ctx.applicant_cap)
+                if posting.applicants is not None
+                else None
+            ),
+            resume=resume.score if resume is not None else None,
+        ),
+        ctx.weights,
     )

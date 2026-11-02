@@ -4,21 +4,34 @@ Every action works as a plain form post (it redirects back) and through HTMX (it
 the HTML fragment that replaces the one you clicked in).
 """
 
+import asyncio
 import json
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime
+from pathlib import Path
 from typing import Annotated, Any, Literal
 from urllib.parse import parse_qsl, urlsplit
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Request
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.types import DecoratedCallable
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from jobpulse.config import SLUG_PATTERN, AppConfig, clean_keywords
+from jobpulse.config import (
+    SLUG_PATTERN,
+    FieldError,
+    InfraConfig,
+    ProfileError,
+    clean_keywords,
+    filter_rules,
+    parse_profile_yaml,
+    profile_yaml,
+    scoring_weights,
+    split,
+)
 from jobpulse.core.atsurls import (
     AtsRef,
     default_board_name,
@@ -30,7 +43,11 @@ from jobpulse.core.atsurls import (
 from jobpulse.core.dedupe import normalize_company
 from jobpulse.core.filters import Blocklist
 from jobpulse.core.palette import SWATCHES
+from jobpulse.core.similarity import resume_lines
+from jobpulse.credentials import SECRET_LABELS, SECRET_NAMES, SecretError
 from jobpulse.db import dashboard, repo, saved_filters
+from jobpulse.db import profile as profile_db
+from jobpulse.db import resume as resume_db
 from jobpulse.db.dashboard import (
     CONTRACT_CHOICES,
     EXPERIENCE_CHOICES,
@@ -40,14 +57,21 @@ from jobpulse.db.dashboard import (
     STATUSES,
     PostingQuery,
 )
+from jobpulse.db.profile import StaleProfile
 from jobpulse.db.query_params import VIEWS, filter_params, filter_summary, parse_query
 from jobpulse.db.saved_filters import Saved, SavedFilterError
 from jobpulse.db.session import session_scope
 from jobpulse.db.tables import Company, PostingRow, SavedFilter
+from jobpulse.notify.base import NotifierError
+from jobpulse.notify.live import NO_CHANNEL, LiveNotifier, send_test
+from jobpulse.resume_files import MAX_BYTES as MAX_RESUME_BYTES
+from jobpulse.resume_files import ResumeFileError, read_resume_bytes
+from jobpulse.resume_scoring import restore_stack
 from jobpulse.runtime import KNOWN_SOURCES
 from jobpulse.sources.ats_detect import Validation, is_fetchable_url
 from jobpulse.sources.workday import PAGE_LIMIT
 from jobpulse.web.security import verify_csrf
+from jobpulse.web.state import Snapshot
 from jobpulse.web.views import company_key, export_url, link, postings_csv
 
 pages = APIRouter()
@@ -101,14 +125,16 @@ def render(
 ) -> HTMLResponse:
     """A page or fragment. With ``session``, the navigation counts are added (full pages)."""
     state = _state(request)
+    snapshot = state.current()
     values: dict[str, Any] = {
         "now": state.clock(),
-        "short_labels": state.short_labels,
-        "zone": state.zone,
+        "short_labels": snapshot.short_labels,
+        "zone": snapshot.zone,
         "csrf_token": request.state.csrf_token,
         "statuses": STATUSES,
         "view": None,
-        "priority_cap": state.config.scoring.priority_cap,
+        "priority_cap": snapshot.config.scoring.priority_cap,
+        "profile_notice": _profile_notice(snapshot),
         **context,
     }
     if session is not None:
@@ -117,9 +143,21 @@ def render(
     return state.templates.TemplateResponse(request, template, values, status_code=status_code)
 
 
+def _profile_notice(snapshot: Snapshot) -> str | None:
+    """The banner every page shows while the worker can't use the profile."""
+    if snapshot.problem is not None:
+        return f"{snapshot.problem}. The last good profile is in use; fix it on Settings."
+    if not snapshot.onboarded:
+        return (
+            "No profile yet, so the worker waits: run `jobpulse profile import` to bring in "
+            "config.yaml's preferences, or save one on Settings (Advanced)."
+        )
+    return None
+
+
 def _blocklist(request: Request, session: Session) -> Blocklist:
-    """config.yaml's blocklist with the companies blocked from the dashboard."""
-    return repo.blocklist(session, _state(request).blocklist)
+    """The profile's blocklist with the companies blocked from the dashboard."""
+    return repo.blocklist(session, _state(request).current().blocklist)
 
 
 def _hidden(request: Request, session: Session) -> frozenset[str]:
@@ -221,8 +259,9 @@ def export_csv(request: Request) -> Response:
     with state.sessions() as session:
         ids = dashboard.matching_ids(session, query, now=now, hidden=_hidden(request, session))
         rows = dashboard.load_postings(session, ids)
-        text = postings_csv(rows, zone=state.zone, redact=state.templates.env.finalize)
-    name = f"jobpulse-{query.status.lower()}-{now.astimezone(state.zone):%Y-%m-%d}.csv"
+        zone = state.current().zone
+        text = postings_csv(rows, zone=zone, redact=state.templates.env.finalize)
+    name = f"jobpulse-{query.status.lower()}-{now.astimezone(zone):%Y-%m-%d}.csv"
     return Response(
         text,
         media_type="text/csv; charset=utf-8",
@@ -352,8 +391,8 @@ def health_page(request: Request) -> HTMLResponse:
                 "view": "health",
                 "targets": dashboard.health_overview(session, now=state.clock(), targets=targets),
                 "incidents": dashboard.open_incidents(session),
-                "failures_needed": state.config.health.consecutive_failures,
-                "quiet_hours": f"{state.config.health.zero_hours:g}",
+                "failures_needed": state.infra.health.consecutive_failures,
+                "quiet_hours": f"{state.infra.health.zero_hours:g}",
             },
             session=session,
         )
@@ -415,7 +454,7 @@ def _watchlist_page(
                 "companies": _companies(request, session),
                 "detection": detection,
                 "added": _blank(request.query_params.get("added")),
-                "config_blocked": _state(request).config.blocklist.companies,
+                "config_blocked": _state(request).current().config.blocklist.companies,
                 "dashboard_blocked": repo.blocked_companies(session),
             },
             session=session,
@@ -448,20 +487,21 @@ async def _detect(request: Request, url: str) -> Detection:
             )
         ref = next((r for r in refs if r.ats == "greenhouse"), refs[0]) if gh_jid(url) else refs[0]
     board = f"{ref.ats}/{ref.token}"
+    profile_blocks = state.current().blocklist
     with state.sessions() as session:
         known = (ref.ats, ref.token.lower()) in repo.known_companies(session)
         blocklist = _blocklist(request, session)
     if known:
         return Detection(url, f"{board} is already on your watchlist.", "info", ref)
-    if state.blocklist.blocks_board(ref.ats, ref.token):
-        return Detection(url, f"{board} is on your blocklist (blocklist.boards in config.yaml).")
+    if profile_blocks.blocks_board(ref.ats, ref.token):
+        return Detection(url, f"{board} is on your blocklist (blocklist.boards on Settings).")
     validation = await state.detector.validate(ref)
     if not validation.ok:
         return Detection(url, f"{board} couldn't be validated: {validation.error}", ref=ref)
     name = validation.name or default_board_name(ref)
-    if state.blocklist.blocks_company(name):
+    if profile_blocks.blocks_company(name):
         return Detection(
-            url, f"{name} is on your blocklist (blocklist.companies in config.yaml).", ref=ref
+            url, f"{name} is on your blocklist (blocklist.companies on Settings).", ref=ref
         )
     if blocklist.blocks_company(name):
         return Detection(
@@ -473,11 +513,11 @@ async def _detect(request: Request, url: str) -> Detection:
         validation=validation,
         name=name,
         tone="success",
-        warning=_size_warning(state.config, ref, validation.job_count),
+        warning=_size_warning(state.infra, ref, validation.job_count),
     )
 
 
-def _size_warning(config: AppConfig, ref: AtsRef, job_count: int) -> str | None:
+def _size_warning(config: InfraConfig, ref: AtsRef, job_count: int) -> str | None:
     if ref.ats == "workday":
         cap = config.workday.max_pages * PAGE_LIMIT
         if job_count <= cap:
@@ -550,9 +590,10 @@ def add_board(
     if not name or len(name) > 200:
         raise HTTPException(status_code=400, detail="the company needs a name")
     value = _read_priority(priority)
-    if state.blocklist.blocks_board(ats, token) or state.blocklist.blocks_company(name):
+    profile_blocks = state.current().blocklist
+    if profile_blocks.blocks_board(ats, token) or profile_blocks.blocks_company(name):
         raise HTTPException(
-            status_code=400, detail=f"{ats}/{token} ({name}) is on your blocklist in config.yaml"
+            status_code=400, detail=f"{ats}/{token} ({name}) is on your blocklist (Settings)"
         )
     source_url = url.strip() if url.strip().startswith(("https://", "http://")) else None
     with session_scope(state.sessions) as session:
@@ -598,12 +639,6 @@ def _editable_company(session: Session, company_id: int) -> Company:
     company = session.get(Company, company_id)
     if company is None:
         raise HTTPException(status_code=404, detail="no such company")
-    if company.source_of_discovery == "config":
-        raise HTTPException(
-            status_code=400,
-            detail=f"{company.name} comes from config.yaml; change it there (each poll applies "
-            "config.yaml again)",
-        )
     return company
 
 
@@ -638,14 +673,6 @@ def block_company(
     name = " ".join(company.split())
     if not normalize_company(name):
         raise HTTPException(status_code=400, detail="the posting has no company to block")
-    watched = Blocklist.build(companies=[name])
-    for entry in state.config.watchlist:
-        if entry.active and watched.blocks_company(entry.name):
-            raise HTTPException(
-                status_code=400,
-                detail=f"{entry.name} is on your watchlist in config.yaml; take it off there "
-                "before blocking it",
-            )
     with session_scope(state.sessions) as session:
         repo.block_company(session, name, now=state.clock())
         hidden = dashboard.company_postings(session, name)
@@ -703,8 +730,10 @@ def _settings_page(
     slot: int | None = None,
     error: str | None = None,
     status_code: int = 200,
+    extra: dict[str, Any] | None = None,
 ) -> HTMLResponse:
     state = _state(request)
+    snapshot = state.current()
     filters = saved_filters.list_filters(session)
     taken = {saved.row.slot for saved in filters if editing is None or saved.row.id != editing.id}
     free = [index for index in range(len(SWATCHES)) if index not in taken]
@@ -739,11 +768,39 @@ def _settings_page(
             "max_applicants_choices": MAX_APPLICANTS_CHOICES,
             "contract_choices": CONTRACT_CHOICES,
             "reposted_box": True,
-            "per_cycle": state.config.notify.saved_filters.max_per_cycle,
+            "per_cycle": snapshot.config.notify.saved_filters.max_per_cycle,
+            **_profile_sections(state, session, snapshot),
+            **(extra or {}),
         },
         session=session,
         status_code=status_code,
     )
+
+
+def _profile_sections(state: Any, session: Session, snapshot: Snapshot) -> dict[str, Any]:
+    """Notifications, resume and the profile editor (M6). Secret values never reach a page:
+    only where each one comes from."""
+    secrets = state.store.resolve(session)
+    return {
+        "secrets": [
+            {
+                "name": name,
+                "label": SECRET_LABELS[name],
+                "source": secrets.sources[name],
+                "state": SECRET_STATES[secrets.sources[name]],
+            }
+            for name in SECRET_NAMES
+        ],
+        "channels": snapshot.config.notify.channels,
+        "notice": None,
+        "notice_tone": "info",
+        "secret_error": None,
+        "resume": resume_db.get(session),
+        "resume_error": None,
+        "profile_text": profile_yaml(split(snapshot.config)[1]),
+        "profile_revision": snapshot.revision,
+        "profile_errors": [],
+    }
 
 
 def _readable_params(row: SavedFilter) -> dict[str, str]:
@@ -860,7 +917,129 @@ def saved_filter_viewed(request: Request, filter_id: int) -> Response:
     return Response(status_code=204)
 
 
-def _back_to_settings(request: Request) -> Response:
+def _back_to_settings(request: Request, fragment: str = "") -> Response:
     if _htmx(request):
-        return Response(headers={"HX-Redirect": "/settings"})
-    return RedirectResponse("/settings", status_code=303)
+        return Response(headers={"HX-Redirect": "/settings" + fragment})
+    return RedirectResponse("/settings" + fragment, status_code=303)
+
+
+# --- settings: secrets, test push, resume, profile (M6) ------------------------------------
+
+SECRET_STATES = {"env": "set in .env", "settings": "set here", "unset": "not set"}
+
+
+def _settings_with(
+    request: Request, session: Session, status_code: int, **extra: Any
+) -> HTMLResponse:
+    return _settings_page(
+        request, session, query=parse_query({}), status_code=status_code, extra=extra
+    )
+
+
+@actions.post("/settings/secrets/{name}", response_class=HTMLResponse)
+def save_secret(request: Request, name: str, value: Annotated[str, Form()] = "") -> Response:
+    state = _state(request)
+    with session_scope(state.sessions) as session:
+        try:
+            state.store.save(session, name, value, now=state.clock())
+        except SecretError as exc:
+            session.rollback()
+            return _settings_with(request, session, 400, secret_error=str(exc))
+    return _back_to_settings(request, "#notifications")
+
+
+@actions.post("/settings/secrets/{name}/clear")
+def clear_secret(request: Request, name: str) -> Response:
+    state = _state(request)
+    with session_scope(state.sessions) as session:
+        try:
+            state.store.clear(session, name)
+        except SecretError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+    return _back_to_settings(request, "#notifications")
+
+
+@actions.post("/settings/notify/test", response_class=HTMLResponse)
+async def test_push(request: Request) -> HTMLResponse:
+    """One test push through every channel that's set up, with today's secrets."""
+    state = _state(request)
+    status_code = 200
+    try:
+        names = await send_test(LiveNotifier(state.http, state.sessions, state.store))
+    except NotifierError as exc:
+        notice, tone, status_code = f"The test push failed: {exc}", "error", 502
+    else:
+        notice = f"Test push sent via {', '.join(names)}." if names else NO_CHANNEL
+        tone = "success" if names else "error"
+    with state.sessions() as session:
+        return _settings_with(request, session, status_code, notice=notice, notice_tone=tone)
+
+
+@actions.post("/settings/resume", response_class=HTMLResponse)
+async def upload_resume(request: Request, resume: Annotated[UploadFile, File()]) -> Response:
+    """Store an uploaded resume, as `jobpulse resume set` does: the worker embeds it and
+    re-scores open matches on its next cycle."""
+    state = _state(request)
+    filename = Path(resume.filename or "").name
+    data = await resume.read(MAX_RESUME_BYTES + 1)
+    try:
+        read = await asyncio.to_thread(read_resume_bytes, filename, data)
+        lines = resume_lines(read.text)
+        if not lines:
+            raise ResumeFileError(f"no content lines found in {filename}: use bullets or sentences")
+    except ResumeFileError as exc:
+        with state.sessions() as session:
+            return _settings_with(request, session, 400, resume_error=str(exc))
+    with session_scope(state.sessions) as session:
+        resume_db.put(
+            session,
+            filename=filename,
+            media_type=read.media_type,
+            text=read.text,
+            lines=lines,
+            now=state.clock(),
+        )
+    return _back_to_settings(request, "#resume")
+
+
+@actions.post("/settings/resume/clear")
+def clear_resume(request: Request) -> Response:
+    """Delete the resume; open matches go back to the stack keywords at once."""
+    state = _state(request)
+    config = state.current().config
+    with session_scope(state.sessions) as session:
+        if resume_db.clear(session):
+            restore_stack(session, rules=filter_rules(config), weights=scoring_weights(config))
+    return _back_to_settings(request, "#resume")
+
+
+@actions.post("/settings/profile", response_class=HTMLResponse)
+def save_profile(
+    request: Request,
+    profile: Annotated[str, Form()] = "",
+    revision: Annotated[str, Form()] = "",
+) -> Response:
+    """The Advanced editor: the whole profile as YAML. Errors are listed by path; a profile
+    that changed since the page was loaded answers 409, keeping the text you sent."""
+    state = _state(request)
+    with session_scope(state.sessions) as session:
+        try:
+            parsed = parse_profile_yaml(profile)
+            profile_db.save(
+                session,
+                parsed,
+                now=state.clock(),
+                expected_revision=int(revision) if revision.isdigit() else -1,
+            )
+        except ProfileError as exc:
+            session.rollback()
+            return _settings_with(
+                request, session, 400, profile_text=profile, profile_errors=exc.errors
+            )
+        except StaleProfile as exc:
+            session.rollback()
+            problem = FieldError("", f"{exc}. Copy your changes, reload, and make them again.")
+            return _settings_with(
+                request, session, 409, profile_text=profile, profile_errors=[problem]
+            )
+    return _back_to_settings(request, "#profile")

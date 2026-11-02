@@ -38,7 +38,7 @@ def order(page: str) -> list[str]:
 
 
 def test_each_target_shows_its_recent_runs_and_last_error(web: Web) -> None:
-    web.sync_watchlist()  # greenhouse/acme and lever/beta
+    web.watch()  # greenhouse/acme and lever/beta
     run(web, "greenhouse", "acme", NOW - timedelta(hours=30), fetched_count=10, new_count=1)
     run(web, "greenhouse", "acme", NOW - timedelta(hours=2), fetched_count=12, new_count=2)
     run(
@@ -88,7 +88,7 @@ def test_each_target_shows_its_recent_runs_and_last_error(web: Web) -> None:
 
 
 def test_open_incidents_are_listed(web: Web) -> None:
-    web.sync_watchlist()
+    web.watch()
     with web.sessions() as session:
         session.add(
             HealthIncident(

@@ -77,6 +77,85 @@
   {% endif %}
 </section>
 
+{% if profile_revision is defined %}
+<section class="settings-block" id="notifications">
+  <h2>Notifications</h2>
+  {% if notice %}<p class="notice {{ notice_tone }}" role="status">{{ notice }}</p>{% endif %}
+  {% if secret_error %}<p class="notice error">{{ secret_error }}</p>{% endif %}
+  <p class="hint">Channels in use: {{ channels|join(", ") if channels else "none" }} (<code>notify.channels</code>, under Profile below). A value in .env wins over one saved here. Saved values stay in the database in plain text, like .env, and never show on a page or in a log.</p>
+  <ul class="saved-list secret-list">
+    {% for secret in secrets %}
+    <li>
+      <span class="name">{{ secret.label }}</span>
+      <span class="badge{% if secret.source == "unset" %} warn{% endif %}">{{ secret.state }}</span>
+      {% if secret.source != "env" %}
+      <span class="controls">
+        <form method="post" action="/settings/secrets/{{ secret.name }}" class="inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="password" name="value" autocomplete="off" required aria-label="New {{ secret.label }}" placeholder="{{ "Replace" if secret.source == "settings" else "Set" }} it">
+          <button type="submit">Save</button>
+        </form>
+        {% if secret.source == "settings" %}
+        <form method="post" action="/settings/secrets/{{ secret.name }}/clear">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="link status-dismissed">Clear</button>
+        </form>
+        {% endif %}
+      </span>
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  <form method="post" action="/settings/notify/test" class="inline test-push">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button type="submit">Send a test push</button>
+  </form>
+</section>
+
+<section class="settings-block" id="resume">
+  <h2>Resume</h2>
+  {% if resume_error %}<p class="notice error">{{ resume_error }}</p>{% endif %}
+  {% if resume %}
+  <p>{{ resume.filename }}, uploaded {{ resume.uploaded_at|local }}: {{ resume.lines|length }} content lines. {% if resume.embed_model %}Embedded with {{ resume.embed_model }}.{% else %}The worker embeds it and re-scores open matches on its next cycle.{% endif %}</p>
+  <details class="resume-lines">
+    <summary>The lines postings are compared with</summary>
+    <ol>{% for line in resume.lines %}<li>{{ line }}</li>{% endfor %}</ol>
+  </details>
+  {% else %}
+  <p class="hint">No resume yet, so matches are scored on the stack keywords. Upload one and matches with a description are scored by how close they are to it.</p>
+  {% endif %}
+  <form method="post" action="/settings/resume" enctype="multipart/form-data" class="inline">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="file" name="resume" accept=".pdf,.docx,.txt,.md" required aria-label="Resume file">
+    <button type="submit">{{ "Replace" if resume else "Upload" }}</button>
+  </form>
+  {% if resume %}
+  <form method="post" action="/settings/resume/clear" class="inline">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button type="submit" class="link status-dismissed">Delete the resume</button>
+  </form>
+  {% endif %}
+  <p class="hint">PDF, DOCX, TXT or Markdown, at most 2 MB. Headings and contact details are left out of the comparison; the LLM layer, when it's on, reads the whole text.</p>
+</section>
+
+<section class="settings-block" id="profile">
+  <h2>Profile</h2>
+  {% if profile_errors %}
+  <div class="notice error">
+    <p>The profile wasn't saved:</p>
+    <ul>{% for error in profile_errors %}<li>{% if error.field %}<code>{{ error.field }}</code>: {% endif %}{{ error.message }}</li>{% endfor %}</ul>
+  </div>
+  {% endif %}
+  <p class="hint">Every preference as YAML: contact email, timezone, filters, scoring, notifications, searches, blocklist and the LLM layer. The worker applies a saved change at its next cycle, and new weights or rules re-score open matches. Infrastructure (schedules, pacing, the database) stays in config.yaml.</p>
+  <form method="post" action="/settings/profile" class="profile-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="revision" value="{{ profile_revision }}">
+    <textarea name="profile" rows="24" spellcheck="false" autocapitalize="off" aria-label="Profile as YAML">{{ profile_text }}</textarea>
+    <button type="submit">Save profile</button>
+  </form>
+</section>
+{% endif %}
+
 <section class="settings-block">
   <h2>Colors</h2>
   <form method="post" action="/settings/color-blind" class="inline">

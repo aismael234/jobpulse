@@ -10,19 +10,15 @@
     {% if company.region == "eu" %}<span class="badge">EU</span>{% endif %}
   </td>
   <td>
-    {% if company.source_of_discovery == "config" %}
-    <span title="Set in config.yaml">{{ company.priority }}</span>
-    {% else %}
     <form class="inline" method="post" action="/watchlist/{{ company.id }}/priority" hx-post="/watchlist/{{ company.id }}/priority" hx-target="#company-{{ company.id }}" hx-swap="outerHTML">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <input type="number" name="priority" value="{{ company.priority }}" min="0" max="1000" aria-label="Priority of {{ company.name }}">
       <button type="submit">Set</button>
     </form>
-    {% endif %}
   </td>
   <td>
-    {% if blocked %}blocked{% elif company.active %}active{% elif company.source_of_discovery == "config" %}inactive{% else %}paused{% endif %}
-    {% if company.source_of_discovery != "config" and not blocked %}
+    {% if blocked %}blocked{% elif company.active %}active{% else %}paused{% endif %}
+    {% if not blocked %}
     <form class="inline" method="post" action="/watchlist/{{ company.id }}/active" hx-post="/watchlist/{{ company.id }}/active" hx-target="#company-{{ company.id }}" hx-swap="outerHTML">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <input type="hidden" name="active" value="{{ '0' if company.active else '1' }}">

@@ -25,6 +25,7 @@
   </header>
   <div id="notice" aria-live="polite"></div>
   <main>
+{% if profile_notice is defined and profile_notice %}<p class="notice info" role="status">{{ profile_notice }}</p>{% endif %}
 {% block content %}{% endblock %}
   </main>
 </body>

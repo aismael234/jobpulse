@@ -1,21 +1,22 @@
-"""M4 wiring: the Workday adapter, LinkedIn job pages behind the shared gate, and the LLM
-layer, which exists only when it's switched on."""
+"""Wiring: the Workday adapter, LinkedIn job pages behind the shared gate, the embedder, and
+what a new profile revision changes outside the poller (M6). The LLM source is tested in
+tests/integration/test_llm_source.py."""
 
 from pathlib import Path
 
 import pytest
-from pydantic import SecretStr
 
-from jobpulse.config import AppConfig, Settings, scoring_weights
+from jobpulse.config import AppConfig, scoring_weights
+from jobpulse.core.locations import merge_aliases
 from jobpulse.embeddings.base import EmbedderUnavailable
 from jobpulse.httpclient import HttpClient
-from jobpulse.llm.claude import ClaudeClient
 from jobpulse.runtime import (
     KNOWN_SOURCES,
     WATCHLIST_SOURCES,
     build_adapters,
     build_embedder,
-    build_llm,
+    follow_profile,
+    scheduled_jobs,
 )
 from jobpulse.sources.jobspy_boards import JobSpyAdapter
 from jobpulse.sources.linkedin_guest import LinkedInSource
@@ -24,17 +25,6 @@ from jobpulse.sources.workday import WorkdayAdapter
 
 def config(tmp_path: Path, **sections: object) -> AppConfig:
     return AppConfig.model_validate({"contact_email": "dev@example.com", **sections})
-
-
-def settings(key: str | None = "sk-ant-test-0123456789") -> Settings:
-    """Settings from these values alone, never from the repository's own .env."""
-    return Settings(_env_file=None, llm_api_key=SecretStr(key) if key else None)
-
-
-def llm_on(tmp_path: Path, **llm: object) -> AppConfig:
-    resume = tmp_path / "resume.txt"
-    resume.write_text("Backend engineer: Python, Go.\n", encoding="utf-8")
-    return config(tmp_path, llm={"enabled": True, "resume_path": str(resume), **llm})
 
 
 def test_workday_is_a_watchlist_source() -> None:
@@ -57,35 +47,33 @@ def test_linkedin_job_pages_can_be_turned_off(tmp_path: Path, http: HttpClient) 
     assert adapters["linkedin"] is adapters["indeed"]
 
 
-def test_the_llm_layer_is_off_by_default(tmp_path: Path) -> None:
-    assert build_llm(config(tmp_path), settings()) is None
-
-
-async def test_the_llm_layer_when_it_is_on(tmp_path: Path) -> None:
-    scorer = build_llm(
-        llm_on(
-            tmp_path, model="claude-sonnet-5-5", effort="medium", band=0.2, wanted_levels=["mid"]
-        ),
-        settings(),
+def test_a_new_profile_updates_the_user_agent_and_the_shared_aliases(
+    tmp_path: Path, http: HttpClient
+) -> None:
+    aliases = merge_aliases({})
+    adapters = build_adapters(http, config(tmp_path), aliases=aliases)
+    apply = follow_profile(http, aliases)
+    apply(
+        config(
+            tmp_path,
+            contact_email="new@example.com",
+            filters={"locations": {"aliases": {"Bay": "San Francisco, CA"}}},
+        )
     )
-    assert scorer is not None
-    try:
-        assert scorer.can_ask
-        assert isinstance(scorer._client, ClaudeClient)
-        assert (scorer.model, scorer.effort, scorer.band) == ("claude-sonnet-5-5", "medium", 0.2)
-        assert scorer.resume == "Backend engineer: Python, Go.\n"
-        assert scorer.wanted_levels == {"mid"}
-        assert scorer.threshold == 0.55
-        assert scorer.weight == 0.15
-    finally:
-        await scorer.aclose()
+    assert "contact: new@example.com" in http.user_agent
+    assert aliases["bay"] == "San Francisco, CA"
+    assert getattr(adapters["greenhouse"], "aliases") is aliases  # noqa: B009 - all share it
 
 
-async def test_a_dry_run_gets_a_layer_that_only_reads_the_cache(tmp_path: Path) -> None:
-    scorer = build_llm(llm_on(tmp_path), settings(None), dry_run=True)
-    assert scorer is not None
-    assert not scorer.can_ask
-    await scorer.aclose()
+def test_the_job_board_job_is_scheduled_even_without_searches(tmp_path: Path) -> None:
+    """Searches live in the profile and can appear while the worker runs."""
+
+    async def run(job: str, sources: tuple[str, ...]) -> None:
+        return None
+
+    assert set(scheduled_jobs(config(tmp_path), run)) == {"watchlist", "simplify", "job_boards"}
+    off = config(tmp_path, simplify={"enabled": False})
+    assert set(scheduled_jobs(off, run)) == {"watchlist", "job_boards"}
 
 
 # --- M5b: the embedder --------------------------------------------------------------

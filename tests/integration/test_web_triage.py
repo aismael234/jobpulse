@@ -285,13 +285,19 @@ def test_blocking_twice_or_a_nameless_posting(web: Web) -> None:
     assert web.post("/companies/block", {"company": "  "}).status_code == 400
 
 
-def test_a_watched_company_from_config_cant_be_blocked_here(web: Web) -> None:
-    """Acme is on the test config's watchlist: blocking it there is a config error too."""
+def test_a_watched_company_can_be_blocked_here(web: Web) -> None:
+    """The watchlist is the dashboard's too (M6): blocking a watched company stops polling
+    its board from the next cycle, as for any other company."""
+    web.watch()
     response = web.post("/companies/block", {"company": "Acme, Inc."})
-    assert response.status_code == 400
-    assert "config.yaml" in html.unescape(response.text)
+    assert response.status_code == 200
     with web.sessions() as session:
-        assert list(session.scalars(select(BlockedCompany))) == []
+        assert [row.name for row in session.scalars(select(BlockedCompany))] == ["Acme, Inc."]
+    acme = re.search(
+        r'<tr id="company-\d+" class="muted">.*?Acme.*?</tr>', web.page("/watchlist"), re.S
+    )
+    assert acme is not None
+    assert "blocked" in acme.group(0)
 
 
 def test_the_watchlist_page_lists_blocked_companies(make_web: Callable[..., Web]) -> None:
@@ -301,7 +307,7 @@ def test_the_watchlist_page_lists_blocked_companies(make_web: Callable[..., Web]
     section = re.search(r'<section class="blocked".*?</section>', page, re.DOTALL)
     assert section is not None
     text = section.group(0)
-    assert 'Jobot <span class="muted small">in config.yaml' in text
+    assert 'Jobot <span class="muted small">in your profile (Settings)' in text
     assert "CyberCoders" in text
     assert text.count("Unblock") == 1  # only the dashboard's own entry
 

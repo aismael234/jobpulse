@@ -26,7 +26,7 @@
     {% for entry in companies %}
     {% with company = entry.company, blocked = entry.blocked %}{% include "_company.html" %}{% endwith %}
     {% else %}
-    <tr><td colspan="7" class="empty">No companies yet. Add some to <code>watchlist:</code> in config.yaml, paste a URL above, or let discovery find boards.</td></tr>
+    <tr><td colspan="7" class="empty">No companies yet. Paste a URL above, import an old config.yaml's watchlist with <code>jobpulse profile import</code>, or let discovery find boards.</td></tr>
     {% endfor %}
   </tbody>
 </table>
@@ -38,7 +38,7 @@
   {% if config_blocked or dashboard_blocked %}
   <ul>
     {% for name in config_blocked %}
-    <li>{{ name }} <span class="muted small">in config.yaml</span></li>
+    <li>{{ name }} <span class="muted small">in your profile (Settings)</span></li>
     {% endfor %}
     {% for blocked in dashboard_blocked %}
     <li>{{ blocked.name }} <span class="muted small">blocked {{ blocked.created_at|ago }}</span>

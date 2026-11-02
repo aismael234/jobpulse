@@ -10,18 +10,17 @@ import httpx
 from sqlalchemy import inspect
 from sqlalchemy.orm import Session, sessionmaker
 
-from jobpulse.config import AppConfig, Settings, location_aliases, read_resume
+from jobpulse.config import AppConfig, InfraConfig, location_aliases
+from jobpulse.core.locations import merge_aliases
+from jobpulse.credentials import SecretStore
 from jobpulse.db import migrate
 from jobpulse.db.session import create_engine_for, display_url, make_session_factory
 from jobpulse.discovery import Discoverer
 from jobpulse.embeddings.base import Embedder, EmbedderUnavailable, LazyEmbedder
 from jobpulse.embeddings.fastembed import DEFAULT_MODEL, FastEmbedEmbedder, model_id
 from jobpulse.httpclient import HttpClient, RetryPolicy, build_user_agent
-from jobpulse.llm.claude import ClaudeClient
-from jobpulse.llm.scorer import LlmScorer
-from jobpulse.notify.base import FanOutNotifier, Notification, Notifier
-from jobpulse.notify.discord import DiscordNotifier
-from jobpulse.notify.ntfy import NtfyNotifier
+from jobpulse.llm.source import LlmSource
+from jobpulse.notify.live import LiveNotifier, send_test
 from jobpulse.poller import CycleReport, Poller
 from jobpulse.scheduler import (
     WATCHDOG_FACTOR,
@@ -80,11 +79,16 @@ def open_database(url: str) -> sessionmaker[Session]:
 
 
 def build_http(
-    config: AppConfig, *, transport: httpx.AsyncBaseTransport | None = None
+    config: InfraConfig,
+    *,
+    contact_email: str | None = None,
+    transport: httpx.AsyncBaseTransport | None = None,
 ) -> HttpClient:
+    """The shared client. The contact email is the profile's, so ``follow_profile`` updates
+    the User-Agent when it changes."""
     http = config.http
     return HttpClient(
-        user_agent=build_user_agent(config.contact_email),
+        user_agent=build_user_agent(contact_email),
         timeout=http.timeout_seconds,
         retry=RetryPolicy(
             max_attempts=http.max_attempts,
@@ -100,16 +104,18 @@ def build_http(
 
 def build_adapters(
     http: HttpClient,
-    config: AppConfig,
+    config: InfraConfig,
     *,
+    aliases: dict[str, str] | None = None,
     scrape: Scrape | None = None,
     sleep: Sleep = asyncio.sleep,
 ) -> dict[str, SourceAdapter]:
     """Every source's adapter. ``scrape`` replaces JobSpy's ``scrape_jobs`` (fixture mode).
     LinkedIn's searches and job pages share one gate, so all LinkedIn requests are paced and
     cooled down together. Each HTTP source has its own maintenance gate, which ``sleep``
-    paces."""
-    aliases = location_aliases(config)
+    paces. ``aliases`` is shared with every adapter: ``follow_profile`` updates it in place
+    when the profile's location aliases change."""
+    aliases = aliases if aliases is not None else merge_aliases({})
 
     def maintenance(name: str) -> MaintenanceGate:
         settings = config.maintenance
@@ -149,7 +155,7 @@ def build_adapters(
     }
 
 
-def build_discoverer(http: HttpClient, config: AppConfig) -> Discoverer | None:
+def build_discoverer(http: HttpClient, config: InfraConfig) -> Discoverer | None:
     discovery = config.discovery
     if not discovery.enabled:
         return None
@@ -162,32 +168,7 @@ def build_discoverer(http: HttpClient, config: AppConfig) -> Discoverer | None:
     )
 
 
-def build_llm(config: AppConfig, settings: Settings, *, dry_run: bool = False) -> LlmScorer | None:
-    """The LLM layer when ``llm.enabled``; ``None`` otherwise. Dry runs get no client: they
-    only read answers already cached."""
-    llm = config.llm
-    if not llm.enabled:
-        return None
-    key = settings.llm_api_key.get_secret_value() if settings.llm_api_key else ""
-    client = (
-        ClaudeClient(api_key=key, model=llm.model, effort=llm.effort)
-        if key and not dry_run
-        else None
-    )
-    return LlmScorer(
-        client,
-        resume=read_resume(config),
-        model=llm.model,
-        effort=llm.effort,
-        band=llm.band,
-        threshold=config.scoring.instant_threshold,
-        weight=config.scoring.weights.llm,
-        wanted_levels=llm.wanted_levels,
-        max_calls_per_day=llm.max_calls_per_day,
-    )
-
-
-def build_embedder(config: AppConfig) -> Embedder | None:
+def build_embedder(config: InfraConfig) -> Embedder | None:
     """The embedding model behind resume similarity, loaded only when first used (a resume is
     stored). ``None`` when ``embeddings.enabled`` is false or fastembed isn't installed."""
     if not config.embeddings.enabled:
@@ -201,35 +182,47 @@ def build_embedder(config: AppConfig) -> Embedder | None:
     return LazyEmbedder(model, lambda: FastEmbedEmbedder(DEFAULT_MODEL, cache_dir))
 
 
-def build_notifier(http: HttpClient, config: AppConfig, settings: Settings) -> Notifier | None:
-    """The enabled channels whose secrets are set; ``None`` when there are none."""
-    channels: list[Notifier] = []
-    if "ntfy" in config.notify.channels and settings.ntfy_topic:
-        channels.append(
-            NtfyNotifier(
-                http,
-                base_url=config.notify.ntfy.base_url,
-                topic=settings.ntfy_topic.get_secret_value(),
-                token=settings.ntfy_token.get_secret_value() if settings.ntfy_token else None,
-            )
-        )
-    if "discord" in config.notify.channels and settings.discord_webhook_url:
-        channels.append(
-            DiscordNotifier(
-                http,
-                webhook_url=settings.discord_webhook_url.get_secret_value(),
-                username=config.notify.discord.username,
-            )
-        )
-    if not channels:
-        return None
-    return channels[0] if len(channels) == 1 else FanOutNotifier(channels)
+def follow_profile(http: HttpClient, aliases: dict[str, str]) -> Callable[[AppConfig], None]:
+    """What a new profile revision changes outside the poller: the User-Agent's contact
+    email, and the location aliases the adapters share."""
+
+    def apply(config: AppConfig) -> None:
+        http.set_user_agent(build_user_agent(config.contact_email))
+        fresh = location_aliases(config)
+        if fresh != aliases:
+            aliases.clear()
+            aliases.update(fresh)
+
+    return apply
+
+
+def build_poller(
+    http: HttpClient,
+    infra: InfraConfig,
+    sessions: sessionmaker[Session],
+    store: SecretStore,
+    *,
+    llm: LlmSource,
+    dry_run: bool = False,
+    scrape: Scrape | None = None,
+) -> Poller:
+    aliases = merge_aliases({})
+    return Poller(
+        infra=infra,
+        sessions=sessions,
+        adapters=build_adapters(http, infra, aliases=aliases, scrape=scrape),
+        notifier=None if dry_run else LiveNotifier(http, sessions, store),
+        discoverer=build_discoverer(http, infra),
+        llm=llm,
+        embedder=build_embedder(infra),
+        on_profile=follow_profile(http, aliases),
+    )
 
 
 async def poll_once(
     *,
-    config: AppConfig,
-    settings: Settings,
+    infra: InfraConfig,
+    store: SecretStore,
     database_url: str,
     dry_run: bool,
     sources: Collection[str] | None = None,
@@ -239,26 +232,27 @@ async def poll_once(
 ) -> CycleReport:
     """One cycle over ``sources`` (every source by default)."""
     sessions = open_database(database_url)
-    llm = build_llm(config, settings, dry_run=dry_run)
+    llm = LlmSource(store, dry_run=dry_run)
     try:
-        async with build_http(config, transport=transport) as http:
-            poller = Poller(
-                config=config,
-                sessions=sessions,
-                adapters=build_adapters(http, config, scrape=scrape),
-                notifier=None if dry_run else build_notifier(http, config, settings),
-                discoverer=build_discoverer(http, config),
-                llm=llm,
-                embedder=build_embedder(config),
+        async with build_http(infra, transport=transport) as http:
+            poller = build_poller(
+                http, infra, sessions, store, llm=llm, dry_run=dry_run, scrape=scrape
             )
             return await poller.run_cycle(sources=sources, target_key=target, dry_run=dry_run)
     finally:
-        if llm is not None:
-            await llm.aclose()
+        await llm.aclose()
 
 
 def render_report(report: CycleReport) -> list[str]:
     lines = ["dry run: nothing is sent and nothing is saved"] if report.dry_run else []
+    if report.profile_problem:
+        lines.append(f"profile: {report.profile_problem}")
+    if report.idle:
+        lines.append(f"idle: {report.idle}")
+        return lines
+    if report.rescored:
+        matches = _count(report.rescored, "open match", "open matches")
+        lines.append(f"profile: re-scored {matches} (filters or scoring changed)")
     for target in report.targets:
         head = f"{target.source}/{target.key}: "
         if target.skipped:
@@ -366,32 +360,25 @@ def _llm_lines(report: CycleReport) -> list[str]:
         asked = _count(report.llm_would_ask, "posting")
         lines.append(f"llm: would ask about {asked} (a dry run never calls it)")
     if report.llm_stopped:
-        lines.append(f"llm: stopped asking until a restart: {report.llm_stopped}")
+        lines.append(f"llm: stopped asking: {report.llm_stopped}")
     return lines
 
 
-async def run_worker(*, config: AppConfig, settings: Settings, database_url: str) -> None:
-    """Poll each source on its own jittered schedule until SIGINT or SIGTERM. Raises ``WorkerStalled`` when a source stops finishing runs."""
+async def run_worker(*, infra: InfraConfig, store: SecretStore, database_url: str) -> None:
+    """Poll each source on its own jittered schedule until SIGINT or SIGTERM. Raises
+    ``WorkerStalled`` when a source stops finishing runs. Cycles wait (and say so) until a
+    profile is onboarded; secrets are read at send time, so none is needed to start."""
     sessions = open_database(database_url)
-    llm = build_llm(config, settings)
-    async with build_http(config) as http:
-        notifier = build_notifier(http, config, settings)
-        poller = Poller(
-            config=config,
-            sessions=sessions,
-            adapters=build_adapters(http, config),
-            notifier=notifier,
-            discoverer=build_discoverer(http, config),
-            llm=llm,
-            embedder=build_embedder(config),
-        )
+    llm = LlmSource(store)
+    async with build_http(infra) as http:
+        poller = build_poller(http, infra, sessions, store, llm=llm)
 
         async def run(job: str, sources: tuple[str, ...]) -> None:
             report = await poller.run_cycle(sources=sources)
             for line in render_report(report):
                 log.info("%s: %s", job, line)
 
-        jobs = scheduled_jobs(config, run)
+        jobs = scheduled_jobs(infra, run)
         worker = Worker(jobs)
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
@@ -409,8 +396,7 @@ async def run_worker(*, config: AppConfig, settings: Settings, database_url: str
             worker.shutdown()
             for task in (watchdog, stopped):
                 task.cancel()
-            if llm is not None:
-                await llm.aclose()
+            await llm.aclose()
             log.info("worker stopped")
         if watchdog.done() and not watchdog.cancelled():
             limit = worker.watchdog_limit or 0
@@ -422,16 +408,17 @@ async def run_worker(*, config: AppConfig, settings: Settings, database_url: str
 
 
 def scheduled_jobs(
-    config: AppConfig, run: Callable[[str, tuple[str, ...]], Awaitable[None]]
+    config: InfraConfig, run: Callable[[str, tuple[str, ...]], Awaitable[None]]
 ) -> dict[str, tuple[Cadence, JobFunc]]:
-    """One job per source group, each on its own cadence: the watchlist boards always, the
-    Simplify feed when enabled, and the job-board searches when any is active."""
+    """One job per source group, each on its own cadence: the watchlist boards, the Simplify
+    feed when enabled, and the job-board searches. Searches live in the profile and can be
+    added while the worker runs, so their job is always scheduled (with none, its cycle
+    fetches nothing)."""
     cadences = cadences_from_config(config)
     groups: list[tuple[str, tuple[str, ...]]] = [("watchlist", WATCHLIST_SOURCES)]
     if config.simplify.enabled:
         groups.append(("simplify", FEED_SOURCES))
-    if any(search.active for search in config.searches):
-        groups.append(("job_boards", BOARD_SOURCES))
+    groups.append(("job_boards", BOARD_SOURCES))
 
     def job(name: str, sources: tuple[str, ...]) -> JobFunc:
         async def poll() -> None:
@@ -454,17 +441,10 @@ def _describe(name: str, schedule: Cadence) -> str:
     return f"{name} every {_interval(schedule.interval_seconds)} ± {schedule.jitter_seconds:.0f} s"
 
 
-async def send_test_notification(*, config: AppConfig, settings: Settings) -> list[str]:
-    async with build_http(config) as http:
-        notifier = build_notifier(http, config, settings)
-        if notifier is None:
-            return []
-        await notifier.send(
-            Notification(
-                title="jobpulse test · notifications work",
-                body="This is a test push from `jobpulse notify test`.",
-                priority=3,
-                tags=("white_check_mark",),
-            )
-        )
-        return [channel for channel in ("ntfy", "discord") if channel in config.notify.channels]
+async def send_test_notification(
+    *, infra: InfraConfig, store: SecretStore, database_url: str
+) -> list[str]:
+    """One test push through every channel that's set up; their names (none: nothing sent)."""
+    sessions = open_database(database_url)
+    async with build_http(infra) as http:
+        return await send_test(LiveNotifier(http, sessions, store))

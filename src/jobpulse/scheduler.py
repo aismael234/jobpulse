@@ -18,7 +18,7 @@ from typing import Any
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.date import DateTrigger
 
-from jobpulse.config import AppConfig
+from jobpulse.config import InfraConfig
 from jobpulse.core.timeparse import utcnow
 from jobpulse.httpclient import Sleep
 
@@ -44,7 +44,7 @@ def next_delay(cadence: Cadence, rng: random.Random) -> float:
     return max(MIN_DELAY_SECONDS, rng.uniform(low, high))
 
 
-def cadences_from_config(config: AppConfig) -> dict[str, Cadence]:
+def cadences_from_config(config: InfraConfig) -> dict[str, Cadence]:
     schedules = config.schedules
     sections = {
         "watchlist": schedules.watchlist,

@@ -10,10 +10,11 @@ Personal job-posting watcher. Read PROGRESS.md first: milestone checklists, deci
 - `uv run mypy src` — types (strict on `jobpulse.core`)
 - `scripts/check.sh` — all of the above in one go
 - `uv run jobpulse poll --once --dry-run` — one poll cycle over every source (`--source` narrows it); nothing sent, nothing saved, the LLM never called
-- `uv run jobpulse --config tests/fixtures/scenarios/config.yaml poll --once --dry-run --fixtures tests/fixtures/scenarios/first_poll` — the same over recorded responses, JobSpy rows included (set `DATABASE_URL` to a scratch DB and run `db upgrade` first; `second_poll` after a live `first_poll` shows a merge)
-- `uv run jobpulse worker` — the scheduler (needs `NTFY_TOPIC` when ntfy is enabled)
+- `uv run jobpulse --config tests/fixtures/scenarios/config.yaml poll --once --dry-run --fixtures tests/fixtures/scenarios/first_poll` — the same over recorded responses, JobSpy rows included (set `DATABASE_URL` to a scratch DB, run `db upgrade` and `profile import tests/fixtures/scenarios/import.yaml` first; `second_poll` after a live `first_poll` shows a merge)
+- `uv run jobpulse worker` — the scheduler; waits until a profile is onboarded, reads secrets at send time
+- `uv run jobpulse profile import [FILE] [--replace] [--write-infra PATH]` / `profile export` / `profile show` — the preferences in the database (M6); import reads an old config.yaml once
 - `uv run jobpulse web [--host] [--port]` — the dashboard on 127.0.0.1:8000
-- `uv run jobpulse companies list` / `companies sync`, `uv run jobpulse notify test`
+- `uv run jobpulse companies list`, `uv run jobpulse notify test`
 - `uv run jobpulse companies import FILE --workday-keywords "..." [--dry-run]` — add the boards behind a file's links (validated like the paste box)
 - `docker compose up -d` (`--profile postgres` for Postgres) — needs the Docker daemon: `orbctl start` (OrbStack) first. Test with `-p <name>` and an override file mounting a scratch config, so `./config.yaml` and its volumes stay untouched
 - `uv run jobpulse embeddings download` — fetch the embedding model (bge-small-en-v1.5, 64 MB) into `data/models`; nothing else ever downloads it
@@ -26,7 +27,8 @@ Personal job-posting watcher. Read PROGRESS.md first: milestone checklists, deci
 - Typed code everywhere. `core/` is pure (stdlib only, no I/O) and mypy-strict.
 - UTC everywhere: aware datetimes only. The DB layer rejects naive values.
 - Adapters return `FetchResult` and never raise for HTTP errors. A failure is `ok=False`, never an empty success.
-- Secrets come only from `.env` through `Settings`. Never log, commit or render them.
+- Secrets come from `.env` through `Settings`, or from Settings in the dashboard (`credentials.SecretStore`; `.env` wins). Never log, commit or render them.
+- Preferences are the database profile (`config.Profile`), infrastructure is config.yaml (`config.InfraConfig`); code takes the composite `AppConfig` (`config.compose`).
 - Tests: no network (pytest-socket plus respx `assert_all_mocked`); time through time-machine or an injected clock; sleeps injected.
 - Fix the code, not the tests. No test-specific branches in production code.
 - Every schema change gets a migration: `uv run alembic revision --autogenerate -m "..."`, then review it and replace TypeDecorators with their impl types.
@@ -49,7 +51,7 @@ Personal job-posting watcher. Read PROGRESS.md first: milestone checklists, deci
 - Protocol members such as `name` are plain class attributes (`name = "lever"`), not `ClassVar`, or mypy rejects the adapter.
 - The logging handler resolves `sys.stderr` when it writes, and `configure_logging` replaces only its own handler, so CliRunner and pytest capture keep working.
 - respx: to change a response between polls, set the route's `return_value` or `side_effect`. Don't register the same pattern again. Routes match in the order they were added, and a `url__regex` route passes its named groups to `side_effect` as keyword arguments.
-- Searches are synced from config at the start of every cycle, so a `searches` row added by hand is deactivated. Integration tests use `env.add_search()`, which edits the config.
+- Searches are synced from the profile at the start of every cycle, so a `searches` row added by hand is deactivated. Integration tests use `env.add_search()`, which edits the profile.
 - JobSpy frames under pandas 3 hold `nan` (a float) for missing text cells; `jobspy_boards._clean` turns them into None. LinkedIn's page delay is the class attribute `jobspy.linkedin.LinkedIn.delay`, set from config on first use.
 - Every LinkedIn request (JobSpy searches, job pages) goes through one `LinkedInGate` built in `runtime.build_adapters`. A `JobSpyAdapter` without a `gate` builds its own from `pacing`/`sleep`/`rng`/`monotonic`, which the M2 tests rely on.
 - An adapter's `enrich` raises `sources.base.EnrichmentDeferred` when its detail couldn't be read now (LinkedIn's hourly cap, cool-down, a block, a network error, a 5xx). The poller leaves the row `pending` (reported as `waiting`) and the next cycle of its source tries again, until `linkedin.job_page_wait_hours`; then it's decided without the detail. Pending rows of job-board searches aren't tied to one search, so the cycle's `claimed` set hands each to the first target of its source.
@@ -61,7 +63,12 @@ Personal job-posting watcher. Read PROGRESS.md first: milestone checklists, deci
 - The Simplify feed skips the in-memory ETag cache: its ETag lives in `source_state` and is saved in the same commit as that cycle's rows.
 - Two postings with the same company, title and city fingerprint-merge within 30 days, even inside one source. Fixtures need distinct titles.
 - Discovery's miss cache is in memory: each `poll --once` starts fresh, the worker keeps it. Integration tests build the discoverer from config; after changing `discovery` settings, call `env.rebuild_discoverer()`.
-- Blocking an active watchlist entry is a config error, so tests that block a watched company use a job-board or feed company, or `env.add_company()` for a discovered one.
+- Profile and secrets (M6): `db/profile.py` stores the profile (one row, `revision` bumped per save, `onboarded_at`, `scored_hash`); `ProfileReader` parses it again only when the revision moves and keeps the last good one when the stored data stops validating. The poller reads it at cycle start (`_load_profile`): no onboarded profile means the cycle idles (`report.idle`); a new revision recompiles rules and weights and calls `on_profile` (`runtime.follow_profile`: User-Agent contact email, and the location-alias dict every adapter shares, updated in place). The web's `WebState.current()` does the same per request. `config.yaml` may hold infrastructure only: `load_config` reports each moved key; `read_config_lenient` (db upgrade, alembic env) drops them; `load_legacy_config` (profile import) reads the whole old shape. The watchlist is DB rows only (`source_of_discovery` `dashboard`; old `config` rows become `dashboard` on import), so there's no config lock and no `companies sync`.
+- Integration tests: `env.config = ...` (and `reconfigure`, `add_search`) saves the profile as a new revision; Acme and Beta are `dashboard` rows from the fixture. Use `env.watch(name, ats, token)`, `env.pause(*tokens, paused=...)` and `env.set_keywords(token, words)` for the watchlist; `make_web(config=...)` saves the profile too, and `make_web(secrets=[...])` masks values as if from .env.
+- Re-scoring (M6): when `config.scoring_hash` (filters + scoring) differs from `profile.scored_hash`, the poller re-scores open New and Saved matches (`rescoring.rescore_matches`, through `core.detection.match_score`: filters aside, `now` = `decided_at`, the stored resume score, the stored LLM part kept); a `scored_hash` of NULL (fresh import) is just set. Tiers never change.
+- `notify/live.LiveNotifier` resolves the profile's channels and the secrets on every send; with none set it raises `NotifierError`, so the matches stay unpushed and are retried while fresh. `llm/source.LlmSource` rebuilds the scorer when the LLM settings, resume or key change; the LLM reads the stored resume (`llm.resume_path` is gone).
+- `logging_setup.SecretRegistry` holds every secret value the process knows; the log formatter and the templates' `finalize` read it on each use, and `SecretStore` adds Settings' values as they're read or saved.
+- Templates that use a value the old code doesn't pass guard it (`profile_notice is defined`), because the running dashboard reloads templates before it restarts on new code.
 - time-machine 3 doesn't patch `monotonic`, so asyncio runs in real time. Anything that sleeps takes an injected `sleep`.
 - FastAPI 0.150 keeps an included router whole (`_IncludedRouter` in `app.routes`), so look for routes on `web.routes.pages` / `web.routes.actions`. Every POST route goes on `actions`, whose dependency checks the CSRF token.
 - `anthropic` 1.x runs on `httpx2`, and installing it switched Starlette's TestClient to `httpx2` too (its responses are `httpx2.Response`). respx patches `httpx` only: it never sees the SDK's traffic, so `test_claude.py` gives the SDK an `httpx2.MockTransport`.
@@ -74,7 +81,7 @@ Personal job-posting watcher. Read PROGRESS.md first: milestone checklists, deci
 - `filters.locations.countries` places labels with the tables in `core/countries.py` (pure, no gazetteer). A label whose country is unknown sides with the posting's other labels. To fix a misplaced label, add the name to a table and a case to `test_countries.py`; leave out a name shared by places in different countries.
 - The dashboard's location and pay filters run in Python over the ids and labels the SQL filters leave (`dashboard._matches`); a new filter that SQL can express belongs in `_conditions`. Comparing `coalesce(...)` of timestamps with a bound time needs `type_=UTCDateTime()`, or SQLite compares the wrong format.
 - Place parsing below the country is `core/places.py` (tables of city states, areas, metro areas); fix a misplaced label there with a case in `test_places.py`.
-- The blocklist is config.yaml's plus `blocked_companies` rows: the dashboard merges them per request (`routes._blocklist`), the poller at the start of each cycle. `WebState.blocklist` is config.yaml's only.
+- The blocklist is the profile's plus `blocked_companies` rows: the dashboard merges them per request (`routes._blocklist`), the poller at the start of each cycle. `Snapshot.blocklist` (from `WebState.current()`) is the profile's only; `profile import` turns config.yaml's names into rows and keeps its boards in the profile.
 - `repo.set_status` takes `now` and sets `status_changed_at`; bulk moves use `repo.set_statuses`.
 - htmx logs a console error for an out-of-band swap whose target is missing; to change cards that may not be on the page, send an `HX-Trigger` event and handle it in `static/app.js`.
 - There is no digest and no per-cycle push cap: every match (tier `instant`) is pushed, whatever its score. `scoring.instant_threshold` only centers the LLM band. A push that failed is retried while the posting is fresh, open and still `New`.

@@ -1,14 +1,25 @@
 from pathlib import Path
 
-from jobpulse.config import AppConfig, filter_rules, load_config, location_aliases, scoring_weights
+from jobpulse.config import (
+    AppConfig,
+    Profile,
+    filter_rules,
+    location_aliases,
+    parse_profile_yaml,
+    scoring_weights,
+)
 from jobpulse.core.filters import check_title
 from jobpulse.core.scoring import Weights
 
-EXAMPLE_CONFIG = Path(__file__).resolve().parents[2] / "config.example.yaml"
+EXAMPLE_PROFILE = Path(__file__).resolve().parents[2] / "profile.example.yaml"
 
 
-def test_rules_compile_from_the_example_config() -> None:
-    rules = filter_rules(load_config(EXAMPLE_CONFIG))
+def example_profile() -> Profile:
+    return parse_profile_yaml(EXAMPLE_PROFILE.read_text(encoding="utf-8"))
+
+
+def test_rules_compile_from_the_example_profile() -> None:
+    rules = filter_rules(example_profile())
     assert check_title("Backend Engineer", rules).passed
     assert check_title("BACKEND ENGINEER", rules).passed
     assert not check_title("Staff Backend Engineer", rules).passed
@@ -16,7 +27,7 @@ def test_rules_compile_from_the_example_config() -> None:
 
 
 def test_placeholders_are_dropped_when_compiling() -> None:
-    rules = filter_rules(load_config(EXAMPLE_CONFIG))
+    rules = filter_rules(example_profile())
     assert rules.level_include == ()
 
 

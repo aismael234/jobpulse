@@ -4,7 +4,7 @@ from collections.abc import Iterator
 
 import pytest
 
-from jobpulse.logging_setup import configure_logging
+from jobpulse.logging_setup import SecretRegistry, configure_logging
 
 SECRET = "jobpulse-Zq3vX9kR2mT7wL4pB8nC1dF6"
 
@@ -47,3 +47,16 @@ def test_short_or_empty_secrets_are_ignored() -> None:
     configure_logging("INFO", secrets=["", "ab"], stream=stream)
     logging.getLogger("jobpulse.test").info("about absent")
     assert "about absent" in stream.getvalue()
+
+
+def test_the_registry_masks_secrets_added_later() -> None:
+    registry = SecretRegistry(["early-secret"])
+    stream = io.StringIO()
+    handler = configure_logging("INFO", secrets=registry, stream=stream)
+    try:
+        registry.add(["late-secret-value", "abc"])  # too short to mask: never matched
+        logging.getLogger("jobpulse.test").warning("early-secret late-secret-value abc")
+    finally:
+        logging.getLogger().removeHandler(handler)
+    assert stream.getvalue().rstrip().endswith("*** *** abc")
+    assert registry.values() == ("late-secret-value", "early-secret")

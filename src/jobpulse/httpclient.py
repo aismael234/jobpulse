@@ -122,6 +122,14 @@ class HttpClient:
         self._clock = clock
         self._etag_cache: dict[str, _CachedBody] = {}
 
+    @property
+    def user_agent(self) -> str:
+        return self._client.headers["User-Agent"]
+
+    def set_user_agent(self, user_agent: str) -> None:
+        """The contact email lives in the profile, so it can change while the client runs."""
+        self._client.headers["User-Agent"] = user_agent
+
     async def __aenter__(self) -> "HttpClient":
         return self
 

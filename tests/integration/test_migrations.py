@@ -402,6 +402,31 @@ def test_0008_adds_resume_tables_and_columns_in_place(db_url: str) -> None:
         assert connection.execute(text("SELECT count(*) FROM llm_assessments")).scalar() == 1
 
 
+def test_0009_adds_the_profile_and_secrets_tables(db_url: str) -> None:
+    config = alembic_config(db_url)
+    command.upgrade(config, "0008")
+    command.upgrade(config, "0009")
+    engine = create_engine(db_url)
+    tables = set(inspect(engine).get_table_names())
+    assert {"profile", "secrets"} <= tables
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO profile (id, data, revision, created_at, updated_at) "
+                "VALUES (1, '{}', 1, '2026-11-02 00:00:00', '2026-11-02 00:00:00')"
+            )
+        )
+    with pytest.raises(IntegrityError), engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO profile (id, data, revision, created_at, updated_at) "
+                "VALUES (2, '{}', 1, '2026-11-02 00:00:00', '2026-11-02 00:00:00')"
+            )
+        )
+    command.downgrade(config, "0008")
+    assert not {"profile", "secrets"} & set(inspect(engine).get_table_names())
+
+
 def test_cli_db_upgrade_uses_database_url(tmp_path: Path, db_url: str) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text("contact_email: dev@example.com\n", encoding="utf-8")

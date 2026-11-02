@@ -85,11 +85,7 @@ def _docx_text(data: bytes) -> str:
 
 def read_resume_file(path: Path) -> ResumeText:
     """The text of a .pdf, .docx, .txt or .md resume, or ``ResumeFileError``."""
-    media_type = _MEDIA_TYPES.get(path.suffix.lower())
-    if media_type is None:
-        raise ResumeFileError(
-            f"use a .pdf, .docx, .txt or .md file, not {path.suffix or path.name}"
-        )
+    _media_type(path.name)
     try:
         size = path.stat().st_size
         if size > MAX_BYTES:
@@ -99,6 +95,14 @@ def read_resume_file(path: Path) -> ResumeText:
         raise ResumeFileError(f"file not found: {path}") from None
     except OSError as exc:
         raise ResumeFileError(f"can't read {path} ({type(exc).__name__})") from None
+    return read_resume_bytes(path.name, data)
+
+
+def read_resume_bytes(filename: str, data: bytes) -> ResumeText:
+    """The text of an uploaded resume, its type taken from ``filename``'s extension."""
+    media_type = _media_type(filename)
+    if len(data) > MAX_BYTES:
+        raise ResumeFileError("the file is larger than 2 MB")
     if media_type == "application/pdf":
         text = _pdf_text(data)
     elif media_type == DOCX_MEDIA_TYPE:
@@ -112,3 +116,11 @@ def read_resume_file(path: Path) -> ResumeText:
     if not text:
         raise ResumeFileError("no text found in the file (a scanned PDF has none)")
     return ResumeText(text, media_type)
+
+
+def _media_type(filename: str) -> str:
+    suffix = Path(filename).suffix
+    media_type = _MEDIA_TYPES.get(suffix.lower())
+    if media_type is None:
+        raise ResumeFileError(f"use a .pdf, .docx, .txt or .md file, not {suffix or filename}")
+    return media_type

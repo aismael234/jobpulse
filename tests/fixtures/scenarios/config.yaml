@@ -1,18 +1,5 @@
-# Config for the recorded scenarios (first_poll, second_poll). Try it:
-#   DATABASE_URL=sqlite:////tmp/jobpulse-demo.db uv run jobpulse --config tests/fixtures/scenarios/config.yaml db upgrade
-#   DATABASE_URL=sqlite:////tmp/jobpulse-demo.db uv run jobpulse --config tests/fixtures/scenarios/config.yaml \
-#     poll --once --dry-run --fixtures tests/fixtures/scenarios/first_poll
-contact_email: dev@example.com
-notify: {channels: []}
-filters:
-  title:
-    include: ['\bbackend\b']
-watchlist:
-  - {name: Acme, ats: greenhouse, token: acme, priority: 5}
-  - {name: Beta, ats: lever, token: beta}
-  - {name: Gamma, ats: ashby, token: gamma}
-searches:
-  - {name: backend-sf, site: linkedin, search_term: backend engineer, location: "San Francisco, CA"}
+# Infrastructure for the recorded scenarios; the preferences and the watchlist are in
+# import.yaml, brought into the database with `jobpulse profile import` (see there).
 discovery:
   max_validations_per_cycle: 1   # the recorded routes answer for Delta's board only
   max_page_fetches_per_cycle: 0

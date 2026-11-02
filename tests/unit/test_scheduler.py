@@ -160,10 +160,12 @@ async def test_worker_jobs_follow_the_config() -> None:
         ("job_boards", ("indeed", "linkedin")),
     ]
 
+    # Searches live in the profile and can appear while the worker runs (M6), so the
+    # job-board job is scheduled even without one.
     quiet = AppConfig.model_validate(
         {"contact_email": "dev@example.com", "simplify": {"enabled": False}}
     )
-    assert set(scheduled_jobs(quiet, run)) == {"watchlist"}
+    assert set(scheduled_jobs(quiet, run)) == {"watchlist", "job_boards"}
 
 
 # --- the watchdog (Milestone 3) ----------------------------------------------------------

@@ -85,6 +85,11 @@ def get(session: Session) -> StoredResume | None:
     return _stored(row) if row is not None else None
 
 
+def text(session: Session) -> str | None:
+    """The resume's full text, for the LLM layer; ``None`` when none is stored."""
+    return session.scalar(select(ResumeRow.text).where(ResumeRow.id == RESUME_ID))
+
+
 def put(
     session: Session,
     *,

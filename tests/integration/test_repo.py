@@ -4,7 +4,7 @@ from datetime import timedelta
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
-from jobpulse.config import SIMPLIFY_NEW_GRAD_URL, SearchEntry, SimplifyConfig
+from jobpulse.config import SIMPLIFY_NEW_GRAD_URL, SearchEntry, SimplifyConfig, WatchlistEntry
 from jobpulse.core.applicants import ApplicantCount
 from jobpulse.core.assessment import Assessment
 from jobpulse.core.models import Decision
@@ -13,65 +13,84 @@ from jobpulse.db.session import session_scope
 from jobpulse.db.tables import Company, PostingRow, Run, Search, SourceState
 from jobpulse.llm.base import LlmReply
 from tests.factories import NOW, make_posting
-from tests.integration.conftest import make_config
+
+WATCHLIST: tuple[dict[str, object], ...] = (
+    {"name": "Acme", "ats": "greenhouse", "token": "acme", "priority": 5},
+    {"name": "Beta", "ats": "lever", "token": "beta", "priority": 3},
+)
 
 
-def test_watchlist_sync_is_idempotent(database: sessionmaker[Session]) -> None:
-    entries = make_config().watchlist
+def watchlist(*entries: dict[str, object]) -> list[WatchlistEntry]:
+    """An old config.yaml's watchlist entries, as `profile import` reads them."""
+    return [WatchlistEntry.model_validate(entry) for entry in (entries or WATCHLIST)]
+
+
+def test_watchlist_import_is_idempotent(database: sessionmaker[Session]) -> None:
     with session_scope(database) as session:
-        first = repo.sync_watchlist(session, entries, now=NOW)
+        first = repo.import_watchlist(session, watchlist(), now=NOW)
     with session_scope(database) as session:
-        second = repo.sync_watchlist(session, entries, now=NOW)
+        second = repo.import_watchlist(session, watchlist(), now=NOW)
 
     assert first.added == ("greenhouse/acme", "lever/beta")
     assert second == repo.SyncReport()
     with database() as session:
+        assert set(session.scalars(select(Company.source_of_discovery))) == {"dashboard"}
         assert session.scalar(select(func.count(Company.id))) == 2
 
 
-def test_sync_updates_changed_fields_and_deactivates_removed_companies(
+def test_import_updates_changed_fields_and_leaves_other_companies_alone(
     database: sessionmaker[Session],
 ) -> None:
+    """The dashboard owns every company now: one left out of the file isn't paused."""
     with session_scope(database) as session:
-        repo.sync_watchlist(session, make_config().watchlist, now=NOW)
-    changed = make_config(
-        watchlist=[{"name": "Acme Corp", "ats": "greenhouse", "token": "acme", "priority": 9}]
-    ).watchlist
+        repo.import_watchlist(session, watchlist(), now=NOW)
+    changed = watchlist({"name": "Acme Corp", "ats": "greenhouse", "token": "acme", "priority": 9})
     with session_scope(database) as session:
-        report = repo.sync_watchlist(session, changed, now=NOW)
+        report = repo.import_watchlist(session, changed, now=NOW)
 
     assert report.updated == ("greenhouse/acme",)
-    assert report.deactivated == ("lever/beta",)
     with database() as session:
         acme = session.scalars(select(Company).where(Company.token == "acme")).one()
         beta = session.scalars(select(Company).where(Company.token == "beta")).one()
     assert (acme.name, acme.priority, acme.active) == ("Acme Corp", 9, True)
-    assert beta.active is False
+    assert beta.active is True
 
 
-def test_companies_added_outside_config_are_left_alone(database: sessionmaker[Session]) -> None:
+def test_rows_config_yaml_owned_become_dashboard_rows(database: sessionmaker[Session]) -> None:
     with session_scope(database) as session:
         session.add(
             Company(
                 name="Gamma",
                 ats_type="ashby",
                 token="gamma",
-                source_of_discovery="dashboard",
+                active=False,
+                source_of_discovery="config",
                 created_at=NOW,
                 updated_at=NOW,
             )
         )
     with session_scope(database) as session:
-        report = repo.sync_watchlist(session, make_config().watchlist, now=NOW)
-    assert report.deactivated == ()
+        report = repo.import_watchlist(session, watchlist(), now=NOW)
+    assert report.updated == ("ashby/gamma",)
     with database() as session:
         gamma = session.scalars(select(Company).where(Company.token == "gamma")).one()
-    assert gamma.active is True
+    assert (gamma.source_of_discovery, gamma.active) == ("dashboard", False)
+
+
+def test_blocked_names_import_once(database: sessionmaker[Session]) -> None:
+    with session_scope(database) as session:
+        assert repo.import_blocklist(session, ["Jobot", "Revature LLC"], now=NOW) == [
+            "Jobot",
+            "Revature LLC",
+        ]
+    with session_scope(database) as session:
+        assert repo.import_blocklist(session, ["JOBOT", "Revature"], now=NOW) == []
+        assert len(repo.blocked_companies(session)) == 2
 
 
 def test_list_companies(database: sessionmaker[Session]) -> None:
     with session_scope(database) as session:
-        repo.sync_watchlist(session, make_config().watchlist, now=NOW)
+        repo.import_watchlist(session, watchlist(), now=NOW)
     with session_scope(database) as session:
         overview = repo.list_companies(session)
     assert [(c.ats, c.token, c.open_postings, c.baseline_done_at) for c in overview] == [
@@ -163,7 +182,7 @@ def test_feed_targets_keep_the_etag_and_reset_on_a_new_url(database: sessionmake
 
 def test_known_companies_cover_every_company_in_lowercase(database: sessionmaker[Session]) -> None:
     with session_scope(database) as session:
-        repo.sync_watchlist(session, make_config().watchlist, now=NOW)
+        repo.import_watchlist(session, watchlist(), now=NOW)
         session.add(
             Company(
                 name="Sierra",
@@ -202,13 +221,13 @@ def test_delete_runs_before_removes_only_older_runs(database: sessionmaker[Sessi
 OMEGA = {"name": "Omega", "ats": "workday", "token": "omega.wd5/External"}
 
 
-def workday_config(keywords: list[str]) -> list[object]:
-    return list(make_config(watchlist=[{**OMEGA, "keywords": keywords}]).watchlist)
+def workday_config(keywords: list[str]) -> list[WatchlistEntry]:
+    return watchlist({**OMEGA, "keywords": keywords})
 
 
 def test_workday_keywords_are_stored_and_reach_the_target(database: sessionmaker[Session]) -> None:
     with session_scope(database) as session:
-        repo.sync_watchlist(session, workday_config(["backend", "platform"]), now=NOW)  # type: ignore[arg-type]
+        repo.import_watchlist(session, workday_config(["backend", "platform"]), now=NOW)
     with database() as session:
         company = session.scalars(select(Company)).one()
         [target] = repo.company_targets(session)
@@ -222,14 +241,14 @@ def test_workday_keywords_are_stored_and_reach_the_target(database: sessionmaker
 
 def test_changed_workday_keywords_start_a_new_baseline(database: sessionmaker[Session]) -> None:
     with session_scope(database) as session:
-        repo.sync_watchlist(session, workday_config(["backend"]), now=NOW)  # type: ignore[arg-type]
+        repo.import_watchlist(session, workday_config(["backend"]), now=NOW)
         session.execute(update(Company).values(baseline_done_at=NOW))
     with session_scope(database) as session:
-        unchanged = repo.sync_watchlist(session, workday_config(["backend"]), now=NOW)  # type: ignore[arg-type]
+        unchanged = repo.import_watchlist(session, workday_config(["backend"]), now=NOW)
     with database() as session:
         assert session.scalars(select(Company)).one().baseline_done_at == NOW
     with session_scope(database) as session:
-        changed = repo.sync_watchlist(session, workday_config(["backend", "api"]), now=NOW)  # type: ignore[arg-type]
+        changed = repo.import_watchlist(session, workday_config(["backend", "api"]), now=NOW)
     assert unchanged == repo.SyncReport()
     assert changed.updated == ("workday/omega.wd5/External",)
     with database() as session:
@@ -240,7 +259,7 @@ def test_changed_workday_keywords_start_a_new_baseline(database: sessionmaker[Se
 
 def test_other_boards_have_no_keywords(database: sessionmaker[Session]) -> None:
     with session_scope(database) as session:
-        repo.sync_watchlist(session, make_config().watchlist, now=NOW)
+        repo.import_watchlist(session, watchlist(), now=NOW)
     with database() as session:
         targets = repo.company_targets(session)
     assert all(target.keywords == () for target in targets)

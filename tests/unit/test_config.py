@@ -1,4 +1,9 @@
-"""Config validation: every error names the offending field and the file it came from."""
+"""Config validation: every error names the offending field and the file it came from.
+
+Most of these validate the sections through ``load_legacy_config``, which reads the whole
+pre-M6 shape (preferences and watchlist included), as `jobpulse profile import` does; the
+profile and config.yaml share those models. The M6 section at the end covers the split:
+config.yaml with infrastructure only, and the profile parsed on its own."""
 
 import textwrap
 from pathlib import Path
@@ -7,20 +12,36 @@ import pytest
 
 from jobpulse.config import (
     DEFAULT_DATABASE_URL,
+    PROFILE_VERSION,
     SIMPLIFY_NEW_GRAD_URL,
+    AppConfig,
     ConfigError,
+    InfraConfig,
+    Profile,
+    ProfileError,
     company_blocklist,
+    compose,
     config_warnings,
     dashboard_credentials,
     filter_rules,
     load_config,
+    load_legacy_config,
     load_settings,
+    parse_profile,
+    parse_profile_yaml,
+    profile_data,
+    profile_yaml,
+    read_config_lenient,
     require_secrets,
+    scoring_hash,
+    split,
 )
 from jobpulse.core.filters import Blocklist
+from jobpulse.credentials import env_secrets
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 EXAMPLE_CONFIG = REPO_ROOT / "config.example.yaml"
+EXAMPLE_PROFILE = REPO_ROOT / "profile.example.yaml"
 MINIMAL = "contact_email: dev@example.com\n"
 GOOD_TOPIC = "jobpulse-Zq3vX9kR2mT7wL4pB8nC1dF6"
 
@@ -39,28 +60,36 @@ def write_env(tmp_path: Path, body: str = "") -> Path:
 
 def config_error(path: Path) -> str:
     with pytest.raises(ConfigError) as excinfo:
-        load_config(path)
+        load_legacy_config(path)
     return str(excinfo.value)
 
 
 def secrets_error(config_path: Path, env_path: Path) -> str:
-    config = load_config(config_path)
+    config = load_legacy_config(config_path)
     with pytest.raises(ConfigError) as excinfo:
-        require_secrets(config, load_settings(env_path), env_file=env_path)
+        require_secrets(config, env_secrets(load_settings(env_path)), env_file=env_path)
     return str(excinfo.value)
+
+
+def example() -> AppConfig:
+    """config.example.yaml with profile.example.yaml, as a fresh install composes them."""
+    return compose(
+        load_config(EXAMPLE_CONFIG),
+        parse_profile_yaml(EXAMPLE_PROFILE.read_text(encoding="utf-8")),
+    )
 
 
 # --- config.yaml ------------------------------------------------------------------
 
 
-def test_example_config_is_valid() -> None:
-    config = load_config(EXAMPLE_CONFIG)
-    assert {entry.ats for entry in config.watchlist} == {"greenhouse", "lever", "ashby"}
+def test_example_files_are_valid() -> None:
+    config = example()
     assert config.notify.channels == ["ntfy"]
+    assert config.database_url == DEFAULT_DATABASE_URL
 
 
 def test_minimal_config_gets_spec_defaults(tmp_path: Path) -> None:
-    config = load_config(write_config(tmp_path))
+    config = load_legacy_config(write_config(tmp_path))
     assert config.database_url == DEFAULT_DATABASE_URL
     assert config.detection.freshness_hours == 48
     assert config.detection.closure_missing_polls == 2
@@ -236,7 +265,7 @@ def test_top_level_must_be_a_mapping(tmp_path: Path) -> None:
 
 
 def test_placeholders_produce_warnings_not_errors() -> None:
-    warnings = config_warnings(load_config(EXAMPLE_CONFIG))
+    warnings = config_warnings(example())
     assert any("filters.level.include" in w and "<SET ME>" in w for w in warnings)
     assert any("contact_email" in w for w in warnings)
 
@@ -245,7 +274,7 @@ def test_placeholders_produce_warnings_not_errors() -> None:
 
 
 def test_m2_sections_get_their_defaults(tmp_path: Path) -> None:
-    config = load_config(write_config(tmp_path))
+    config = load_legacy_config(write_config(tmp_path))
     assert config.simplify.enabled
     assert config.simplify.name == "new-grad"
     assert config.simplify.url == SIMPLIFY_NEW_GRAD_URL
@@ -262,7 +291,7 @@ def test_m2_sections_get_their_defaults(tmp_path: Path) -> None:
 
 
 def test_example_config_has_m2_sections() -> None:
-    config = load_config(EXAMPLE_CONFIG)
+    config = example()
     assert config.simplify.url == SIMPLIFY_NEW_GRAD_URL
     assert config.searches == []
 
@@ -290,7 +319,7 @@ def test_m2_sections_name_bad_fields(tmp_path: Path, body: str, field: str) -> N
 
 
 def test_linkedin_is_remote_produces_a_warning(tmp_path: Path) -> None:
-    config = load_config(
+    config = load_legacy_config(
         write_config(
             tmp_path,
             """
@@ -308,7 +337,7 @@ def test_linkedin_is_remote_produces_a_warning(tmp_path: Path) -> None:
 
 def test_a_linkedin_search_for_remote_produces_a_warning(tmp_path: Path) -> None:
     """LinkedIn reads a location of "Remote" as anywhere in the world."""
-    config = load_config(
+    config = load_legacy_config(
         write_config(
             tmp_path,
             """
@@ -359,18 +388,18 @@ def test_ntfy_topic_with_bad_characters_is_rejected(tmp_path: Path) -> None:
 
 
 def test_valid_ntfy_topic_passes(tmp_path: Path) -> None:
-    config = load_config(write_config(tmp_path))
+    config = load_legacy_config(write_config(tmp_path))
     env_file = write_env(tmp_path, f"NTFY_TOPIC={GOOD_TOPIC}\n")
-    require_secrets(config, load_settings(env_file), env_file=env_file)
+    require_secrets(config, env_secrets(load_settings(env_file)), env_file=env_file)
 
 
 def test_environment_variable_satisfies_a_secret(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("NTFY_TOPIC", GOOD_TOPIC)
-    config = load_config(write_config(tmp_path))
+    config = load_legacy_config(write_config(tmp_path))
     env_file = write_env(tmp_path)
-    require_secrets(config, load_settings(env_file), env_file=env_file)
+    require_secrets(config, env_secrets(load_settings(env_file)), env_file=env_file)
 
 
 def test_discord_channel_requires_webhook(tmp_path: Path) -> None:
@@ -392,9 +421,9 @@ def test_discord_webhook_must_be_https(tmp_path: Path) -> None:
 
 
 def test_no_channels_needs_no_secrets(tmp_path: Path) -> None:
-    config = load_config(write_config(tmp_path, "notify: {channels: []}\n"))
+    config = load_legacy_config(write_config(tmp_path, "notify: {channels: []}\n"))
     env_file = write_env(tmp_path)
-    require_secrets(config, load_settings(env_file), env_file=env_file)
+    require_secrets(config, env_secrets(load_settings(env_file)), env_file=env_file)
 
 
 def test_settings_mask_secrets_in_repr(tmp_path: Path) -> None:
@@ -414,7 +443,7 @@ def test_empty_env_value_counts_as_unset(tmp_path: Path) -> None:
 
 
 def test_discovery_narrowing_and_blocklist_defaults(tmp_path: Path) -> None:
-    config = load_config(write_config(tmp_path))
+    config = load_legacy_config(write_config(tmp_path))
     assert config.discovery.require_match is True
     assert config.discovery.max_board_jobs == 1000
     assert config.discovery.max_auto_companies == 50
@@ -440,7 +469,7 @@ def test_blocklist_and_narrowing_name_bad_fields(tmp_path: Path, body: str, fiel
 
 
 def test_limits_can_be_turned_off(tmp_path: Path) -> None:
-    config = load_config(
+    config = load_legacy_config(
         write_config(tmp_path, "discovery: {max_board_jobs: null, max_auto_companies: null}\n")
     )
     assert config.discovery.max_board_jobs is None
@@ -469,7 +498,7 @@ def test_blocking_an_active_watchlist_company_is_an_error(tmp_path: Path, blockl
 
 
 def test_an_inactive_watchlist_company_may_be_blocked(tmp_path: Path) -> None:
-    config = load_config(
+    config = load_legacy_config(
         write_config(
             tmp_path,
             """
@@ -483,7 +512,7 @@ def test_an_inactive_watchlist_company_may_be_blocked(tmp_path: Path) -> None:
 
 
 def test_the_blocklist_compiles_into_the_filter_rules(tmp_path: Path) -> None:
-    config = load_config(
+    config = load_legacy_config(
         write_config(
             tmp_path,
             "blocklist: {companies: ['Jobot', 'Revature LLC'], boards: [greenhouse/SpaceX]}\n",
@@ -540,12 +569,12 @@ def test_dashboard_password_is_redacted_from_logs(tmp_path: Path) -> None:
 
 
 def test_run_history_is_kept_for_30_days_by_default(tmp_path: Path) -> None:
-    assert load_config(write_config(tmp_path)).retention.runs_days == 30
+    assert load_legacy_config(write_config(tmp_path)).retention.runs_days == 30
     assert load_config(EXAMPLE_CONFIG).retention.runs_days == 30
 
 
 def test_run_history_can_be_kept_forever(tmp_path: Path) -> None:
-    config = load_config(write_config(tmp_path, "retention: {runs_days: null}\n"))
+    config = load_legacy_config(write_config(tmp_path, "retention: {runs_days: null}\n"))
     assert config.retention.runs_days is None
 
 
@@ -560,21 +589,13 @@ def test_run_history_must_cover_the_busy_window(tmp_path: Path) -> None:
     assert "retention.runs_days" in message
     assert "health.busy_window_days" in message
     # without health checks nothing reads that far back
-    config = load_config(
+    config = load_legacy_config(
         write_config(tmp_path, "retention: {runs_days: 3}\nhealth: {enabled: false}\n")
     )
     assert config.retention.runs_days == 3
 
 
 # --- Milestone 4 sections -------------------------------------------------------------
-
-RESUME_TEXT = "Backend engineer: Python, Go, Postgres. 4 years.\n"
-
-
-def write_resume(tmp_path: Path, text: str = RESUME_TEXT) -> Path:
-    path = tmp_path / "resume.txt"
-    path.write_text(text, encoding="utf-8")
-    return path
 
 
 @pytest.mark.parametrize("wait", ["12", "20"])
@@ -586,7 +607,7 @@ def test_job_pages_wait_less_than_the_freshness_window(tmp_path: Path, wait: str
 
 
 def test_m4_sections_get_their_defaults(tmp_path: Path) -> None:
-    config = load_config(write_config(tmp_path))
+    config = load_legacy_config(write_config(tmp_path))
     assert config.linkedin.job_pages
     assert config.linkedin.max_job_pages_per_hour == 40
     assert config.linkedin.job_page_wait_hours == 12
@@ -600,11 +621,11 @@ def test_m4_sections_get_their_defaults(tmp_path: Path) -> None:
     assert config.llm.band == 0.10
     assert config.llm.wanted_levels == []
     assert config.llm.max_calls_per_day == 25
-    assert config.llm.resume_path is None
+    assert config.llm.role == "backend software engineer"
 
 
-def test_the_example_config_keeps_the_llm_off() -> None:
-    assert load_config(EXAMPLE_CONFIG).llm.enabled is False
+def test_the_example_profile_keeps_the_llm_off() -> None:
+    assert example().llm.enabled is False
 
 
 @pytest.mark.parametrize(
@@ -617,7 +638,7 @@ def test_the_example_config_keeps_the_llm_off() -> None:
     ],
 )
 def test_workday_tokens_are_normalized(tmp_path: Path, token: str, expected: str) -> None:
-    config = load_config(
+    config = load_legacy_config(
         write_config(
             tmp_path,
             f"watchlist:\n  - {{name: Omega, ats: workday, token: '{token}', keywords: [backend]}}\n",
@@ -669,48 +690,19 @@ def test_the_same_workday_board_twice_is_a_duplicate(tmp_path: Path) -> None:
 
 
 def test_a_workday_board_can_be_blocked(tmp_path: Path) -> None:
-    config = load_config(
+    config = load_legacy_config(
         write_config(tmp_path, "blocklist: {boards: [workday/omega.wd5/External]}\n")
     )
     assert company_blocklist(config).blocks_board("workday", "omega.wd5/External")
 
 
 def test_workday_entries_no_longer_warn(tmp_path: Path) -> None:
-    config = load_config(
+    config = load_legacy_config(
         write_config(
             tmp_path, "watchlist:\n  - {name: Omega, ats: workday, token: omega.wd5/External}\n"
         )
     )
     assert not any("workday" in warning.lower() for warning in config_warnings(config))
-
-
-def test_the_llm_needs_a_resume_when_enabled(tmp_path: Path) -> None:
-    message = config_error(write_config(tmp_path, "llm: {enabled: true}\n"))
-    assert "llm" in message
-    assert "resume_path" in message
-
-
-def test_the_resume_path_is_relative_to_the_config_file(tmp_path: Path) -> None:
-    resume = write_resume(tmp_path)
-    config = load_config(write_config(tmp_path, "llm: {enabled: true, resume_path: resume.txt}\n"))
-    assert config.llm.resume_path == resume
-
-
-@pytest.mark.parametrize(("text", "problem"), [(None, "not found"), ("  \n", "empty")])
-def test_an_unreadable_resume_is_a_config_error(
-    tmp_path: Path, text: str | None, problem: str
-) -> None:
-    if text is not None:
-        write_resume(tmp_path, text)
-    path = write_config(tmp_path, "llm: {enabled: true, resume_path: resume.txt}\n")
-    message = config_error(path)
-    assert "llm.resume_path" in message
-    assert problem in message
-
-
-def test_a_missing_resume_is_fine_while_the_llm_is_off(tmp_path: Path) -> None:
-    config = load_config(write_config(tmp_path, "llm: {resume_path: nosuch.txt}\n"))
-    assert not config.llm.enabled
 
 
 @pytest.mark.parametrize(
@@ -722,6 +714,8 @@ def test_a_missing_resume_is_fine_while_the_llm_is_off(tmp_path: Path) -> None:
         ("llm: {band: 0}\n", "llm.band"),
         ("llm: {max_calls_per_day: 0}\n", "llm.max_calls_per_day"),
         ("llm: {model: ''}\n", "llm.model"),
+        ("llm: {role: ''}\n", "llm.role"),
+        ("llm: {resume_path: resume.txt}\n", "llm.resume_path"),
         ("scoring: {applicant_cap: 0}\n", "scoring.applicant_cap"),
         ("scoring: {weights: {llm: 2}}\n", "scoring.weights.llm"),
         ("workday: {max_pages: 0}\n", "workday.max_pages"),
@@ -737,31 +731,130 @@ def test_m4_sections_name_bad_fields(tmp_path: Path, body: str, field: str) -> N
 
 
 def llm_config(tmp_path: Path) -> Path:
-    write_resume(tmp_path)
-    return write_config(
-        tmp_path, "notify: {channels: []}\nllm: {enabled: true, resume_path: resume.txt}\n"
-    )
+    return write_config(tmp_path, "notify: {channels: []}\nllm: {enabled: true}\n")
 
 
 def test_the_llm_key_is_required_by_commands_that_call_the_llm(tmp_path: Path) -> None:
-    config = load_config(llm_config(tmp_path))
+    config = load_legacy_config(llm_config(tmp_path))
     env = write_env(tmp_path)
     with pytest.raises(ConfigError) as excinfo:
-        require_secrets(config, load_settings(env), env_file=env, llm=True)
+        require_secrets(config, env_secrets(load_settings(env)), env_file=env, llm=True)
     assert "LLM_API_KEY" in str(excinfo.value)
     assert str(env) in str(excinfo.value)
-    require_secrets(config, load_settings(env), env_file=env)  # notify test: no LLM
+    require_secrets(config, env_secrets(load_settings(env)), env_file=env)  # notify test: no LLM
 
 
 def test_a_set_llm_key_passes_and_is_never_echoed(tmp_path: Path) -> None:
-    config = load_config(llm_config(tmp_path))
+    config = load_legacy_config(llm_config(tmp_path))
     env = write_env(tmp_path, "LLM_API_KEY=sk-ant-secret-0123456789\n")
     settings = load_settings(env)
-    require_secrets(config, settings, env_file=env, llm=True)
+    require_secrets(config, env_secrets(settings), env_file=env, llm=True)
     assert "sk-ant-secret-0123456789" in settings.secret_values()
 
 
 def test_the_llm_key_is_not_needed_while_the_llm_is_off(tmp_path: Path) -> None:
     path = write_config(tmp_path, "notify: {channels: []}\n")
     env = write_env(tmp_path)
-    require_secrets(load_config(path), load_settings(env), env_file=env, llm=True)
+    require_secrets(
+        load_legacy_config(path), env_secrets(load_settings(env)), env_file=env, llm=True
+    )
+
+
+# --- M6: config.yaml holds infrastructure; preferences are the database profile ----------
+
+
+def test_config_yaml_holds_infrastructure_only(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text("detection: {freshness_hours: 24}\ndashboard: {port: 8100}\n", "utf-8")
+    config = load_config(path)
+    assert isinstance(config, InfraConfig)
+    assert config.detection.freshness_hours == 24
+    assert config.dashboard.port == 8100
+
+
+def test_each_preference_key_left_in_config_yaml_is_its_own_error(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        "contact_email: me@example.com\nfilters: {title: {include: [backend]}}\n"
+        "watchlist: []\nnotify: {channels: [ntfy]}\ndashboard: {port: 0}\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(path)
+    fields = {error.field: error.message for error in excinfo.value.errors}
+    assert set(fields) == {"contact_email", "filters", "watchlist", "notify", "dashboard.port"}
+    assert "Settings" in fields["filters"]
+    assert "profile import" in fields["filters"]
+    assert "Watchlist page" in fields["watchlist"]
+    assert "me@example.com" not in str(excinfo.value)  # the value is never echoed
+
+
+def test_a_missing_config_yaml_means_defaults_only_when_allowed(tmp_path: Path) -> None:
+    assert load_config(tmp_path / "config.yaml", missing_ok=True) == InfraConfig()
+    with pytest.raises(ConfigError, match="not found"):
+        load_config(tmp_path / "config.yaml")
+
+
+def test_an_old_config_yaml_is_read_leniently_for_the_database_url(tmp_path: Path) -> None:
+    path = write_config(tmp_path, "database_url: sqlite:///old.db\nfilters: {nonsense: 1}\n")
+    assert read_config_lenient(path).database_url == "sqlite:///old.db"
+    assert read_config_lenient(tmp_path / "missing.yaml") == InfraConfig()
+
+
+def test_compose_and_split_are_inverses(tmp_path: Path) -> None:
+    legacy = load_legacy_config(
+        write_config(
+            tmp_path,
+            """
+            timezone: America/Los_Angeles
+            detection: {freshness_hours: 24}
+            filters: {title: {include: [{pattern: backend, weight: 0.9}]}}
+            searches: [{name: s, site: indeed, search_term: backend}]
+            """,
+        )
+    )
+    infra, profile = split(legacy)
+    config = compose(infra, profile)
+    assert compose(*split(config)) == config
+    assert config.detection.freshness_hours == 24
+    assert config.filters == legacy.filters
+    assert filter_rules(config) == filter_rules(legacy)  # the same compiled rules
+
+
+def test_the_profile_round_trips_through_its_stored_json() -> None:
+    profile = split(example())[1]
+    assert parse_profile(profile_data(profile)) == profile
+    assert parse_profile_yaml(profile_yaml(profile)) == profile
+    assert profile_data(profile)["version"] == PROFILE_VERSION
+
+
+def test_profile_errors_name_each_field() -> None:
+    with pytest.raises(ProfileError) as excinfo:
+        parse_profile_yaml(
+            "timezone: Mars/Base\nfilters: {title: {include: ['(']}}\ndatabase_url: x\n"
+        )
+    fields = {error.field for error in excinfo.value.errors}
+    assert fields == {"timezone", "filters.title.include[0].pattern", "database_url"}
+
+
+@pytest.mark.parametrize(
+    ("text", "problem"),
+    [("- a\n", "mapping"), ("filters: [\n", "line 2"), ("version: 99\n", "newer jobpulse")],
+)
+def test_a_profile_that_cant_be_read_says_why(text: str, problem: str) -> None:
+    with pytest.raises(ProfileError, match=problem):
+        parse_profile_yaml(text)
+
+
+def test_an_empty_profile_is_the_defaults() -> None:
+    assert parse_profile_yaml("") == Profile()
+    assert Profile().contact_email is None
+
+
+def test_the_scoring_hash_follows_filters_and_scoring_only() -> None:
+    base = Profile()
+    weights = Profile.model_validate({"scoring": {"weights": {"stack": 0.3}}})
+    stack = Profile.model_validate({"filters": {"description": {"stack_keywords": {"go": 1}}}})
+    timezone = Profile.model_validate({"timezone": "America/New_York"})
+    assert len({scoring_hash(base), scoring_hash(weights), scoring_hash(stack)}) == 3
+    assert scoring_hash(base) == scoring_hash(timezone)

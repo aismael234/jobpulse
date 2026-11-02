@@ -12,7 +12,8 @@ from jobpulse.cli import app
 from tests.factories import FIXTURES, NOW
 
 SCENARIOS = FIXTURES / "scenarios"
-CONFIG = SCENARIOS / "config.yaml"
+CONFIG = SCENARIOS / "config.yaml"  # infrastructure
+IMPORT = SCENARIOS / "import.yaml"  # preferences and watchlist, as an old config.yaml had them
 
 runner = CliRunner()
 
@@ -32,6 +33,8 @@ def cli(
     base = ["--config", str(CONFIG), "--env-file", str(tmp_path / ".env")]
     upgraded = runner.invoke(app, [*base, "db", "upgrade"])
     assert upgraded.exit_code == 0, upgraded.output
+    imported = runner.invoke(app, [*base, "profile", "import", str(IMPORT)])
+    assert imported.exit_code == 0, imported.output
     return base, db_url
 
 
@@ -62,8 +65,9 @@ def test_dry_run_of_a_first_poll_prints_baseline_lines_and_saves_nothing(
     # scenario's page cap of 0.
     assert "discovery: 1 more candidate waits for later cycles" in output
     assert "would notify: nothing" in output
-    for name in ("postings", "runs", "companies", "searches", "source_state"):
+    for name in ("postings", "runs", "searches", "source_state"):
         assert count_rows(db_url, name) == 0
+    assert count_rows(db_url, "companies") == 3  # the imported watchlist, and nothing more
 
 
 def test_dry_run_after_a_baseline_prints_the_push_it_would_send(
@@ -154,11 +158,11 @@ def test_companies_list_marks_blocked_companies(cli: tuple[list[str], str], tmp_
     poll(base, "first_poll")  # discovery adds Delta
     blocking = tmp_path / "blocking.yaml"
     blocking.write_text(
-        CONFIG.read_text(encoding="utf-8") + "blocklist: {companies: [Delta]}\n", encoding="utf-8"
+        IMPORT.read_text(encoding="utf-8") + "blocklist: {companies: [Delta]}\n", encoding="utf-8"
     )
-    listed = runner.invoke(
-        app, ["--config", str(blocking), "--env-file", str(tmp_path / ".env"), "companies", "list"]
-    )
+    imported = runner.invoke(app, [*base, "profile", "import", str(blocking), "--replace"])
+    assert imported.exit_code == 0, imported.output
+    listed = runner.invoke(app, [*base, "companies", "list"])
     assert listed.exit_code == 0, listed.output
     [delta] = [line for line in listed.output.splitlines() if " delta " in line]
     assert "blocked" in delta
@@ -166,14 +170,15 @@ def test_companies_list_marks_blocked_companies(cli: tuple[list[str], str], tmp_
     assert all("blocked" not in line for line in listed.output.splitlines() if " acme " in line)
 
 
-def test_companies_sync_and_list(cli: tuple[list[str], str]) -> None:
+def test_the_imported_watchlist_is_listed_and_owned_by_the_dashboard(
+    cli: tuple[list[str], str],
+) -> None:
     base, _ = cli
-    synced = runner.invoke(app, [*base, "companies", "sync"])
-    assert synced.exit_code == 0, synced.output
-    assert "added: greenhouse/acme" in synced.output
     listed = runner.invoke(app, [*base, "companies", "list"])
     assert listed.exit_code == 0, listed.output
     assert listed.output.count("baseline pending") == 3
+    assert listed.output.count("(dashboard)") == 3
+    assert "sync" not in runner.invoke(app, [*base, "companies", "--help"]).output
 
 
 def test_workday_is_a_source(cli: tuple[list[str], str]) -> None:

@@ -255,6 +255,13 @@ form.inline button:hover { border-color: var(--accent); color: var(--accent); }
 .colors legend { float: left; margin-right: 0.4rem; color: var(--muted); }
 .color-choice { display: inline-flex; align-items: center; gap: 0.15rem; font-size: 1.2rem; }
 .saved-form .row + .row, .saved-form .hint { margin-top: 0.5rem; }
+.secret-list input[type="password"] { width: 14rem; max-width: 100%; }
+.test-push, .resume-lines { margin: 0.6rem 0; }
+.settings-block form.inline { flex-wrap: wrap; max-width: 100%; }
+.settings-block input[type="file"] { max-width: 100%; min-width: 0; }
+.resume-lines ol { margin: 0.4rem 0; padding-left: 1.4rem; color: var(--muted); font-size: 0.9rem; }
+.profile-form { display: flex; flex-direction: column; gap: 0.5rem; align-items: flex-start; }
+.profile-form textarea { width: 100%; box-sizing: border-box; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85rem; tab-size: 2; white-space: pre; overflow-wrap: normal; overflow-x: auto; }
 
 @media (max-width: 640px) {
   main { padding: 0.75rem; }

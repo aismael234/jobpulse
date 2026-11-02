@@ -1,11 +1,16 @@
-"""Configuration: ``config.yaml`` validated with Pydantic, secrets from ``.env`` via pydantic-settings.
+"""Configuration: infrastructure from ``config.yaml`` and preferences from the database
+profile, both validated with Pydantic; secrets from ``.env`` via pydantic-settings, or from
+Settings (``credentials``).
 
-Every problem is reported as a ``ConfigError`` that names the file and a dotted field path
-such as ``watchlist[3].ats``, so a typo is quick to find.
+Every problem is reported as a ``ConfigError`` (or, for the profile, a ``ProfileError``)
+that names a dotted field path such as ``filters.title.include[3].pattern``, so a typo is
+quick to find.
 """
 
+import hashlib
+import json
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any, Literal, Self
@@ -423,23 +428,17 @@ class MaintenanceConfig(_Model):
 
 
 class LlmConfig(_Model):
+    """The LLM's second opinion. It reads the stored resume (Settings, or `jobpulse resume
+    set`)."""
+
     enabled: bool = False
     provider: Literal["anthropic"] = "anthropic"
     model: str = Field(default="claude-opus-5-5", min_length=1)
     effort: LlmEffort = "low"
-    resume_path: Path | None = None  # relative to config.yaml
+    role: str = Field(default="backend software engineer", min_length=1, max_length=100)
     band: float = Field(default=0.10, gt=0, le=1)
     wanted_levels: list[Level] = []
     max_calls_per_day: int = Field(default=25, ge=1, le=1000)
-
-    @model_validator(mode="after")
-    def _resume_when_enabled(self) -> Self:
-        if self.enabled and self.resume_path is None:
-            raise ValueError(
-                "resume_path is required when the LLM layer is enabled: a plain-text resume, "
-                "relative to config.yaml"
-            )
-        return self
 
 
 class EmbeddingsConfig(_Model):
@@ -480,33 +479,80 @@ class DashboardConfig(_Model):
     port: int = Field(default=8000, ge=1, le=65535)
 
 
-class AppConfig(_Model):
-    contact_email: str
-    timezone: str = "UTC"
+PROFILE_VERSION = 1
+# The preferences that moved from config.yaml into the database profile (M6).
+PROFILE_KEYS = (
+    "contact_email",
+    "timezone",
+    "filters",
+    "scoring",
+    "notify",
+    "searches",
+    "blocklist",
+    "llm",
+)
+MOVED_KEYS = (*PROFILE_KEYS, "watchlist")
+
+
+class InfraConfig(_Model):
+    """config.yaml: how jobpulse runs. Every key is optional, and so is the file; your
+    preferences are the database profile (``Profile``)."""
+
     database_url: str = DEFAULT_DATABASE_URL
     http: HttpConfig = HttpConfig()
     schedules: SchedulesConfig = SchedulesConfig()
     detection: DetectionConfig = DetectionConfig()
-    filters: FiltersConfig = FiltersConfig()
-    scoring: ScoringConfig = ScoringConfig()
-    notify: NotifyConfig = NotifyConfig()
-    watchlist: list[WatchlistEntry] = []
-    searches: list[SearchEntry] = []
     linkedin: LinkedInPacing = LinkedInPacing()
     workday: WorkdayConfig = WorkdayConfig()
     simplify: SimplifyConfig = SimplifyConfig()
     discovery: DiscoveryConfig = DiscoveryConfig()
-    blocklist: BlocklistConfig = BlocklistConfig()
     health: HealthConfig = HealthConfig()
     maintenance: MaintenanceConfig = MaintenanceConfig()
     retention: RetentionConfig = RetentionConfig()
     dashboard: DashboardConfig = DashboardConfig()
-    llm: LlmConfig = LlmConfig()
     embeddings: EmbeddingsConfig = EmbeddingsConfig()
+
+    @model_validator(mode="after")
+    def _job_pages_wait_within_freshness(self) -> Self:
+        wait, fresh = self.linkedin.job_page_wait_hours, self.detection.freshness_hours
+        if wait >= fresh:
+            raise ValueError(
+                f"linkedin.job_page_wait_hours ({wait:g}) must be less than "
+                f"detection.freshness_hours ({fresh:g}): a posting still waiting when it stops "
+                "being fresh would never be judged"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _run_history_covers_the_busy_window(self) -> Self:
+        days, window = self.retention.runs_days, self.health.busy_window_days
+        if self.health.enabled and days is not None and days < window:
+            raise ValueError(
+                f"retention.runs_days ({days}) must be at least health.busy_window_days "
+                f"({window:g}): the busy-source health rule reads that much run history"
+            )
+        return self
+
+
+class Profile(_Model):
+    """Your preferences: stored in the database, edited on Settings, and read by the worker
+    at the start of every cycle."""
+
+    version: int = PROFILE_VERSION
+    contact_email: str | None = None  # sent in the User-Agent to the ATS APIs
+    timezone: str = "UTC"
+    filters: FiltersConfig = FiltersConfig()
+    scoring: ScoringConfig = ScoringConfig()
+    notify: NotifyConfig = NotifyConfig()
+    searches: list[SearchEntry] = []
+    blocklist: BlocklistConfig = BlocklistConfig()
+    llm: LlmConfig = LlmConfig()
 
     @field_validator("contact_email")
     @classmethod
-    def _email(cls, value: str) -> str:
+    def _email(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
         if not EMAIL_PATTERN.fullmatch(value):
             raise ValueError(f"{value!r} doesn't look like an email address")
         if not value.isascii():
@@ -523,6 +569,30 @@ class AppConfig(_Model):
                 f"unknown IANA timezone {value!r} (e.g. America/Los_Angeles)"
             ) from None
         return value
+
+    @field_validator("searches")
+    @classmethod
+    def _unique_search_names(cls, value: list[SearchEntry]) -> list[SearchEntry]:
+        seen: dict[str, int] = {}
+        for index, entry in enumerate(value):
+            if entry.name in seen:
+                raise ValueError(
+                    f"searches[{index}] is a duplicate name of searches[{seen[entry.name]}] ({entry.name})"
+                )
+            seen[entry.name] = index
+        return value
+
+
+class AppConfig(InfraConfig, Profile):
+    """What the rest of jobpulse reads: config.yaml's infrastructure with the profile
+    (``compose``)."""
+
+
+class LegacyConfig(AppConfig):
+    """A config.yaml from before M6, preferences and watchlist included: what `jobpulse
+    profile import` reads."""
+
+    watchlist: list[WatchlistEntry] = []
 
     @field_validator("watchlist")
     @classmethod
@@ -559,38 +629,29 @@ class AppConfig(_Model):
             )
         return self
 
-    @model_validator(mode="after")
-    def _job_pages_wait_within_freshness(self) -> Self:
-        wait, fresh = self.linkedin.job_page_wait_hours, self.detection.freshness_hours
-        if wait >= fresh:
-            raise ValueError(
-                f"linkedin.job_page_wait_hours ({wait:g}) must be less than "
-                f"detection.freshness_hours ({fresh:g}): a posting still waiting when it stops "
-                "being fresh would never be judged"
-            )
-        return self
 
-    @model_validator(mode="after")
-    def _run_history_covers_the_busy_window(self) -> Self:
-        days, window = self.retention.runs_days, self.health.busy_window_days
-        if self.health.enabled and days is not None and days < window:
-            raise ValueError(
-                f"retention.runs_days ({days}) must be at least health.busy_window_days "
-                f"({window:g}): the busy-source health rule reads that much run history"
-            )
-        return self
+def scoring_hash(profile: Profile) -> str:
+    """Names the filters and scoring that open matches were scored with: when it changes,
+    the worker re-scores them."""
+    data = profile.model_dump(mode="json", include={"filters", "scoring"})
+    return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
 
-    @field_validator("searches")
-    @classmethod
-    def _unique_search_names(cls, value: list[SearchEntry]) -> list[SearchEntry]:
-        seen: dict[str, int] = {}
-        for index, entry in enumerate(value):
-            if entry.name in seen:
-                raise ValueError(
-                    f"searches[{index}] is a duplicate name of searches[{seen[entry.name]}] ({entry.name})"
-                )
-            seen[entry.name] = index
-        return value
+
+def compose(infra: InfraConfig, profile: Profile) -> AppConfig:
+    """Both halves, already validated, as one ``AppConfig``."""
+    values = {name: getattr(infra, name) for name in InfraConfig.model_fields}
+    values.update({name: getattr(profile, name) for name in Profile.model_fields})
+    return AppConfig.model_construct(**values)
+
+
+def split(config: AppConfig) -> tuple[InfraConfig, Profile]:
+    infra = InfraConfig.model_construct(
+        **{name: getattr(config, name) for name in InfraConfig.model_fields}
+    )
+    profile = Profile.model_construct(
+        **{name: getattr(config, name) for name in Profile.model_fields}
+    )
+    return infra, profile
 
 
 class Settings(BaseSettings):
@@ -628,11 +689,61 @@ class Settings(BaseSettings):
         return values
 
 
-def load_config(path: Path) -> AppConfig:
-    """Read and validate ``config.yaml``; raise ``ConfigError`` naming every bad field."""
+MOVED_TO_SETTINGS = (
+    "moved to the database: edit it on Settings, or run `jobpulse profile import` once"
+)
+MOVED_TO_WATCHLIST = (
+    "moved to the database: edit it on the Watchlist page, or run `jobpulse profile import` once"
+)
+
+
+def load_config(path: Path, *, missing_ok: bool = False) -> InfraConfig:
+    """Read and validate ``config.yaml``, which holds infrastructure only; raise
+    ``ConfigError`` naming every bad field. A preference key (``filters``, ``watchlist``…)
+    is an error per key that says where it went. ``missing_ok``: no file means defaults."""
+    data = _read_yaml(path, missing_ok=missing_ok)
+    errors = [
+        FieldError(key, MOVED_TO_WATCHLIST if key == "watchlist" else MOVED_TO_SETTINGS)
+        for key in data
+        if key in MOVED_KEYS
+    ]
+    rest = {key: value for key, value in data.items() if key not in MOVED_KEYS}
+    try:
+        config = InfraConfig.model_validate(rest)
+    except ValidationError as exc:
+        errors += describe_errors(exc)
+    if errors:
+        raise ConfigError(path, errors)
+    return config
+
+
+def read_config_lenient(path: Path, *, missing_ok: bool = True) -> InfraConfig:
+    """Like ``load_config``, but preference keys from before M6 are dropped unread, so
+    ``db upgrade`` and ``profile import`` work on an old config.yaml."""
+    data = _read_yaml(path, missing_ok=missing_ok)
+    try:
+        return InfraConfig.model_validate(
+            {key: value for key, value in data.items() if key not in MOVED_KEYS}
+        )
+    except ValidationError as exc:
+        raise ConfigError(path, describe_errors(exc)) from None
+
+
+def load_legacy_config(path: Path) -> LegacyConfig:
+    """A config.yaml from before M6, preferences and watchlist included, validated whole."""
+    data = _read_yaml(path, missing_ok=False)
+    try:
+        return LegacyConfig.model_validate(data)
+    except ValidationError as exc:
+        raise ConfigError(path, describe_errors(exc)) from None
+
+
+def _read_yaml(path: Path, *, missing_ok: bool) -> dict[str, Any]:
     try:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
+        if missing_ok:
+            return {}
         raise ConfigError(
             path, [FieldError("", "file not found (copy config.example.yaml to config.yaml)")]
         ) from None
@@ -641,54 +752,75 @@ def load_config(path: Path) -> AppConfig:
     except yaml.YAMLError as exc:
         raise ConfigError(path, [FieldError("", _yaml_problem(exc))]) from None
     if data is None:
-        data = {}
+        return {}
     if not isinstance(data, dict):
         raise ConfigError(
             path, [FieldError("", "the top level must be a mapping of section names to values")]
         )
-    try:
-        config = AppConfig.model_validate(data)
-    except ValidationError as exc:
-        errors = [FieldError(_format_location(e["loc"]), _describe(e)) for e in exc.errors()]
-        raise ConfigError(path, errors) from None
-    return _with_resume_beside(config, path)
+    return data
 
 
-def _with_resume_beside(config: AppConfig, path: Path) -> AppConfig:
-    """``llm.resume_path`` relative to the config file; when the layer is on, it must be a
-    readable, non-empty text file."""
-    resume = config.llm.resume_path
-    if resume is None:
-        return config
-    if not resume.is_absolute():
-        resume = path.parent / resume
-        config = config.model_copy(
-            update={"llm": config.llm.model_copy(update={"resume_path": resume})}
+class ProfileError(ValueError):
+    """An invalid profile. ``str()`` lists every problem with its field path."""
+
+    def __init__(self, errors: list[FieldError]) -> None:
+        super().__init__(errors)
+        self.errors = errors
+
+    def __str__(self) -> str:
+        return "; ".join(
+            f"{error.field}: {error.message}" if error.field else error.message
+            for error in self.errors
         )
-    if config.llm.enabled and (problem := _resume_problem(resume)):
-        raise ConfigError(path, [FieldError("llm.resume_path", problem)])
-    return config
 
 
-def _resume_problem(path: Path) -> str | None:
+def upgrade_profile_data(data: dict[str, Any]) -> dict[str, Any]:
+    """Profile data written by an older jobpulse, brought up to ``PROFILE_VERSION``.
+    Migrations never touch the profile's JSON, so changes to its shape go here."""
+    version = data.get("version", PROFILE_VERSION)
+    if isinstance(version, int) and version > PROFILE_VERSION:
+        raise ProfileError(
+            [
+                FieldError(
+                    "version",
+                    f"written by a newer jobpulse (version {version}; this one reads up to "
+                    f"{PROFILE_VERSION})",
+                )
+            ]
+        )
+    return {**data, "version": PROFILE_VERSION}
+
+
+def parse_profile(data: Any) -> Profile:
+    """Validate profile data (stored JSON or the Advanced editor's YAML); ``ProfileError``
+    names every bad field and never echoes a value it can't show."""
+    if not isinstance(data, dict):
+        raise ProfileError(
+            [FieldError("", "the profile must be a mapping of section names to values")]
+        )
     try:
-        text = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return f"file not found: {path}"
-    except (OSError, UnicodeDecodeError) as exc:
-        return f"can't be read as UTF-8 text ({type(exc).__name__}): {path}"
-    return None if text.strip() else f"the file is empty: {path}"
+        return Profile.model_validate(upgrade_profile_data(data))
+    except ValidationError as exc:
+        raise ProfileError(describe_errors(exc)) from None
 
 
-def read_resume(config: AppConfig) -> str:
-    """The resume the LLM layer compares postings with (``llm.resume_path``)."""
-    path = config.llm.resume_path
-    if path is None:
-        raise ConfigError(DEFAULT_CONFIG_PATH, [FieldError("llm.resume_path", "not set")])
-    problem = _resume_problem(path)
-    if problem:
-        raise ConfigError(path, [FieldError("llm.resume_path", problem)])
-    return path.read_text(encoding="utf-8")
+def parse_profile_yaml(text: str) -> Profile:
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        raise ProfileError([FieldError("", _yaml_problem(exc))]) from None
+    return parse_profile({} if data is None else data)
+
+
+def profile_data(profile: Profile) -> dict[str, Any]:
+    """The profile as JSON-ready data: what the database stores."""
+    return profile.model_dump(mode="json")
+
+
+def profile_yaml(profile: Profile) -> str:
+    return yaml.safe_dump(
+        profile_data(profile), sort_keys=False, allow_unicode=True, default_flow_style=False
+    )
 
 
 def load_settings(env_file: Path | None) -> Settings:
@@ -707,62 +839,52 @@ def resolve_config_path(cli_value: Path | None, settings: Settings) -> Path:
     return cli_value or settings.jobpulse_config or DEFAULT_CONFIG_PATH
 
 
-def require_secrets(
-    config: AppConfig, settings: Settings, *, env_file: Path, llm: bool = False
-) -> None:
-    """Check the secrets that the enabled notification channels need, and with ``llm`` the
-    LLM layer's key when the layer is on (commands that can call it: the worker and a live
-    poll).
+def secret_problem(name: str, value: str) -> str | None:
+    """Why a secret's value can't be used (``None`` when it can); never echoes the value."""
+    if name == "ntfy_topic" and not NTFY_TOPIC_PATTERN.fullmatch(value):
+        return (
+            "must be 24–64 characters of letters, digits, '_' or '-'; anyone who knows or "
+            "guesses the topic can read your alerts"
+        )
+    if name == "discord_webhook_url" and not value.startswith("https://"):
+        return "must be an https:// webhook URL"
+    return None
 
-    Only commands that send call this; dry runs and ``config check`` without channels don't.
-    Error messages never echo the secret values.
+
+def require_secrets(
+    config: AppConfig, secrets: Mapping[str, str | None], *, env_file: Path, llm: bool = False
+) -> None:
+    """Check the secrets (``.env`` or Settings, resolved: ``credentials.SecretStore``) that
+    the enabled notification channels need, and with ``llm`` the LLM layer's key when the
+    layer is on (a live poll).
+
+    Only commands that send call this; the worker starts without them and waits. Error
+    messages never echo the secret values.
     """
     errors: list[FieldError] = []
-    if (
-        llm
-        and config.llm.enabled
-        and not (settings.llm_api_key and settings.llm_api_key.get_secret_value())
-    ):
+    if llm and config.llm.enabled and not secrets.get("llm_api_key"):
         errors.append(
             FieldError(
                 "LLM_API_KEY",
-                "not set, but llm.enabled is true; put your Anthropic API key in .env "
-                "(see .env.example)",
+                "not set, but llm.enabled is true; add your Anthropic API key on Settings or "
+                "in .env",
             )
         )
-    if "ntfy" in config.notify.channels:
-        topic = settings.ntfy_topic.get_secret_value() if settings.ntfy_topic else ""
-        if not topic:
+    for channel, name in (("ntfy", "ntfy_topic"), ("discord", "discord_webhook_url")):
+        if channel not in config.notify.channels:
+            continue
+        value = secrets.get(name)
+        if not value:
             errors.append(
-                FieldError(
-                    "NTFY_TOPIC",
-                    "not set, but notify.channels includes 'ntfy'; put a long random topic in "
-                    ".env (see .env.example)",
-                )
+                FieldError(name.upper(), f"not set, but notify.channels includes {channel!r}")
             )
-        elif not NTFY_TOPIC_PATTERN.fullmatch(topic):
-            errors.append(
-                FieldError(
-                    "NTFY_TOPIC",
-                    "must be 24–64 characters of letters, digits, '_' or '-'; anyone who knows "
-                    "or guesses the topic can read your alerts",
-                )
-            )
-    if "discord" in config.notify.channels:
-        webhook = (
-            settings.discord_webhook_url.get_secret_value() if settings.discord_webhook_url else ""
-        )
-        if not webhook:
-            errors.append(
-                FieldError("DISCORD_WEBHOOK_URL", "not set, but notify.channels includes 'discord'")
-            )
-        elif not webhook.startswith("https://"):
-            errors.append(FieldError("DISCORD_WEBHOOK_URL", "must be an https:// webhook URL"))
+        elif problem := secret_problem(name, value):
+            errors.append(FieldError(name.upper(), problem))
     if errors:
         raise ConfigError(
             env_file,
             errors,
-            heading="missing or invalid secrets (set them in {path} or the environment)",
+            heading="missing or invalid secrets (set them on Settings, or in {path})",
         )
 
 
@@ -792,9 +914,9 @@ def dashboard_credentials(settings: Settings, *, env_file: Path) -> tuple[str, s
 def config_warnings(config: AppConfig) -> list[str]:
     """Things that are valid but almost certainly not what you want yet."""
     warnings: list[str] = []
-    if config.contact_email == EXAMPLE_CONTACT_EMAIL:
+    if config.contact_email in (None, EXAMPLE_CONTACT_EMAIL):
         warnings.append(
-            "contact_email is still the example address; set yours so API operators can reach you"
+            "contact_email isn't set (Settings): set yours so API operators can reach you"
         )
     pattern_lists = {
         "filters.title.include": [p.pattern for p in config.filters.title.include],
@@ -838,6 +960,12 @@ def _format_location(location: tuple[int | str, ...]) -> str:
     return text
 
 
+def describe_errors(exc: ValidationError) -> list[FieldError]:
+    """Each validation error with its dotted field path, as config.yaml and Settings show
+    them."""
+    return [FieldError(_format_location(e["loc"]), _describe(e)) for e in exc.errors()]
+
+
 def _describe(error: ErrorDetails) -> str:
     kind = error["type"]
     if kind == "extra_forbidden":
@@ -863,7 +991,7 @@ def _patterns(patterns: list[str]) -> tuple[re.Pattern[str], ...]:
     return tuple(re.compile(p, re.IGNORECASE) for p in patterns if p != PLACEHOLDER)
 
 
-def filter_rules(config: AppConfig) -> core_filters.FilterRules:
+def filter_rules(config: Profile) -> core_filters.FilterRules:
     """Compile the filter section into core rules (case-insensitive, placeholders dropped)."""
     filters = config.filters
     return core_filters.FilterRules(
@@ -895,13 +1023,13 @@ def filter_rules(config: AppConfig) -> core_filters.FilterRules:
     )
 
 
-def company_blocklist(config: AppConfig) -> core_filters.Blocklist:
+def company_blocklist(config: Profile) -> core_filters.Blocklist:
     return core_filters.Blocklist.build(
         companies=config.blocklist.companies, boards=config.blocklist.boards
     )
 
 
-def scoring_weights(config: AppConfig) -> Weights:
+def scoring_weights(config: Profile) -> Weights:
     weights = config.scoring.weights
     return Weights(
         freshness=weights.freshness,
@@ -915,11 +1043,11 @@ def scoring_weights(config: AppConfig) -> Weights:
     )
 
 
-def location_aliases(config: AppConfig) -> dict[str, str]:
+def location_aliases(config: Profile) -> dict[str, str]:
     return merge_aliases(config.filters.locations.aliases)
 
 
-def short_labels(config: AppConfig) -> dict[str, str]:
+def short_labels(config: Profile) -> dict[str, str]:
     """Display names for push titles: built-ins plus short alias keys such as ``SF``."""
     reverse = {
         label: key for key, label in config.filters.locations.aliases.items() if len(key) <= 4

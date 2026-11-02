@@ -5,10 +5,10 @@ from typing import Any
 from jobpulse.llm.prompt import (
     MAX_DESCRIPTION_CHARS,
     PROMPT_VERSION,
-    SYSTEM_PROMPT,
     build_request,
     posting_text,
     resume_block,
+    system_prompt,
 )
 from tests.factories import make_posting
 
@@ -59,7 +59,8 @@ def test_the_resume_is_wrapped() -> None:
 def test_the_request() -> None:
     posting = make_posting(description_text="Build Python services.")
     request = build_request(posting, resume=RESUME, model="claude-opus-5-5", effort="low")
-    assert request.system == SYSTEM_PROMPT
+    assert request.system == system_prompt("backend software engineer")
+    assert request.system.startswith("You help one job seeker, a backend software engineer,")
     assert request.resume == RESUME
     assert request.posting == posting_text(posting)
     assert len(request.input_hash) == 64
@@ -78,5 +79,6 @@ def test_the_hash_names_exactly_this_question() -> None:
     assert hash_of(resume=RESUME + " Now 5 years.") != same
     assert hash_of(model="claude-sonnet-5-5") != same
     assert hash_of(effort="high") != same
+    assert hash_of(role="data engineer") != same
     assert hash_of(posting=make_posting(description_text="Build Go services.")) != same
     assert PROMPT_VERSION  # bumping it changes every hash, so old answers are asked again

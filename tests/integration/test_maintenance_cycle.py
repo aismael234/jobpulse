@@ -13,7 +13,6 @@ import respx
 import time_machine
 from sqlalchemy import select
 
-from jobpulse.config import WatchlistEntry
 from jobpulse.db.tables import Run
 from tests.factories import NOW
 from tests.integration.conftest import Env
@@ -47,12 +46,9 @@ def maintenance(request: httpx.Request) -> httpx.Response:
 
 @pytest.fixture
 def boards(env: Env, respx_mock: respx.MockRouter) -> list[respx.Route]:
-    env.reconfigure(
-        watchlist=[
-            WatchlistEntry(name=token.split(".")[0].title(), ats="workday", token=token)
-            for token in BOARDS
-        ]
-    )
+    env.pause("acme", "beta")
+    for token in BOARDS:
+        env.watch(token.split(".")[0].title(), "workday", token)
     respx_mock.get(MAINTENANCE_URL).respond(200, html="<html>We'll be back soon</html>")
     routes = [respx_mock.post(url) for url in BOARDS.values()]
     answer(routes, jobs)

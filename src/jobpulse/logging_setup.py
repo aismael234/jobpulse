@@ -7,6 +7,7 @@ arguments and traceback) is scrubbed of known secret values.
 
 import logging
 import sys
+import threading
 import time
 from collections.abc import Iterable
 from typing import TextIO
@@ -20,24 +21,44 @@ LOG_FORMAT = "%(asctime)s %(levelname)-7s %(name)s: %(message)s"
 DATE_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 
+class SecretRegistry:
+    """Every secret value this process knows, for redaction: ``.env``'s from the start, and
+    those saved on Settings as soon as they're read or saved. Values are only ever added, so
+    a secret replaced on Settings stays masked; reading takes no lock."""
+
+    def __init__(self, values: Iterable[str] = ()) -> None:
+        self._lock = threading.Lock()
+        self._values: tuple[str, ...] = ()
+        self.add(values)
+
+    def add(self, values: Iterable[str]) -> None:
+        fresh = {value for value in values if len(value) >= MIN_SECRET_LENGTH}
+        if fresh <= set(self._values):
+            return
+        with self._lock:
+            # Longest first, so a secret that contains another is replaced whole.
+            self._values = tuple(sorted(fresh | set(self._values), key=len, reverse=True))
+
+    def values(self) -> tuple[str, ...]:
+        return self._values
+
+    def redact(self, text: str) -> str:
+        for secret in self._values:
+            text = text.replace(secret, REDACTED)
+        return text
+
+
 class RedactingFormatter(logging.Formatter):
-    def __init__(self, secrets: Iterable[str], fmt: str = LOG_FORMAT) -> None:
+    def __init__(self, secrets: Iterable[str] | SecretRegistry, fmt: str = LOG_FORMAT) -> None:
         super().__init__(fmt, datefmt=DATE_FORMAT)
         self.converter = time.gmtime  # timestamps in UTC, like everything else
-        # Longest first, so a secret that contains another is replaced whole.
-        self._secrets = sorted(
-            {secret for secret in secrets if len(secret) >= MIN_SECRET_LENGTH},
-            key=len,
-            reverse=True,
-        )
+        self._registry = secrets if isinstance(secrets, SecretRegistry) else SecretRegistry(secrets)
 
     def format(self, record: logging.LogRecord) -> str:
         return self.redact(super().format(record))
 
     def redact(self, text: str) -> str:
-        for secret in self._secrets:
-            text = text.replace(secret, REDACTED)
-        return text
+        return self._registry.redact(text)
 
 
 class _StderrHandler(logging.StreamHandler):
@@ -60,7 +81,9 @@ _OWN_HANDLER = "_jobpulse_handler"
 
 
 def configure_logging(
-    level: str | int = "INFO", secrets: Iterable[str] = (), stream: TextIO | None = None
+    level: str | int = "INFO",
+    secrets: Iterable[str] | SecretRegistry = (),
+    stream: TextIO | None = None,
 ) -> logging.Handler:
     """Install one redacting handler on the root logger (stderr by default).
 

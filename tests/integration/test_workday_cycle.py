@@ -12,7 +12,6 @@ import httpx
 import pytest
 import respx
 
-from jobpulse.config import WatchlistEntry
 from tests.factories import NOW
 from tests.integration.conftest import Env, SimplifyMock, simplify_listing
 
@@ -20,7 +19,6 @@ TOKEN = "omega.wd5/External"
 API = "https://omega.wd5.myworkdayjobs.com/wday/cxs/omega/External"
 JOBS_URL = f"{API}/jobs"
 DETAIL = re.compile(re.escape(API) + r"/job/[^/]+/(?P<job>[^/?]+)")
-OMEGA: dict[str, Any] = {"name": "Omega", "ats": "workday", "token": TOKEN, "priority": 5}
 NEW_GRAD = "Backend-Engineer-New-Grad_R0012345"
 NEW_GRAD_URL = f"https://omega.wd5.myworkdayjobs.com/External/job/Seattle-WA/{NEW_GRAD}"
 
@@ -81,7 +79,8 @@ class WorkdayMock:
 
 @pytest.fixture
 def workday(env: Env, respx_mock: respx.MockRouter) -> WorkdayMock:
-    env.reconfigure(watchlist=[WatchlistEntry.model_validate(OMEGA)])
+    env.pause("acme", "beta")
+    env.watch("Omega", "workday", TOKEN, priority=5)
     mock = WorkdayMock(respx_mock.post(JOBS_URL), respx_mock.get(url__regex=DETAIL.pattern))
     mock.list_route.side_effect = mock.answer_list
     mock.detail_route.side_effect = mock.answer_detail
@@ -89,7 +88,7 @@ def workday(env: Env, respx_mock: respx.MockRouter) -> WorkdayMock:
 
 
 def keywords(env: Env, *words: str) -> None:
-    env.reconfigure(watchlist=[WatchlistEntry.model_validate({**OMEGA, "keywords": list(words)})])
+    env.set_keywords(TOKEN, words)
 
 
 async def test_the_first_poll_is_silent_and_a_new_job_is_pushed(
@@ -210,7 +209,7 @@ async def test_a_feed_copy_of_a_watched_workday_job_is_merged(
 async def test_a_new_workday_board_takes_over_an_earlier_feed_copy(
     env: Env, workday: WorkdayMock, feed: SimplifyMock
 ) -> None:
-    env.reconfigure(watchlist=[])
+    env.pause(TOKEN)
     feed.respond(simplify_listing("unrelated-1", "Backend Engineer", company="Delta", posted=NOW))
     await env.poll(sources=["simplify"])
     copy = simplify_listing(
@@ -224,7 +223,7 @@ async def test_a_new_workday_board_takes_over_an_earlier_feed_copy(
     await env.poll(sources=["simplify"])
     assert len(env.notifier.sent) == 1  # pushed from the feed
 
-    env.reconfigure(watchlist=[WatchlistEntry.model_validate(OMEGA)])
+    env.pause(TOKEN, paused=False)
     job = wd_job(9, "Backend Engineer, New Grad", externalPath=f"/job/Seattle-WA/{NEW_GRAD}")
     workday.jobs = [job]
     report = await env.poll(sources=["workday"])

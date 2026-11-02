@@ -7,7 +7,12 @@ from typing import Any
 from alembic import context
 from alembic.autogenerate.api import AutogenContext
 
-from jobpulse.config import DEFAULT_ENV_FILE, load_config, load_settings, resolve_config_path
+from jobpulse.config import (
+    DEFAULT_ENV_FILE,
+    load_settings,
+    read_config_lenient,
+    resolve_config_path,
+)
 from jobpulse.db.session import create_engine_for, resolve_database_url
 from jobpulse.db.tables import Base
 from jobpulse.db.types import UTCDateTime
@@ -25,9 +30,9 @@ def database_url() -> str:
     if explicit:
         return str(explicit)
     settings = load_settings(DEFAULT_ENV_FILE)
-    config_path = resolve_config_path(None, settings)
-    app_config = load_config(config_path) if config_path.exists() else None
-    return resolve_database_url(settings, app_config)
+    # Lenient: an old config.yaml with preferences still upgrades (M6 moved them to the DB).
+    infra = read_config_lenient(resolve_config_path(None, settings))
+    return resolve_database_url(settings, infra)
 
 
 def render_item(type_: str, obj: Any, autogen_context: AutogenContext) -> str | bool:

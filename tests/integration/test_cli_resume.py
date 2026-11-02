@@ -20,7 +20,8 @@ Experience
 • Built Python services on Postgres for a payments team
 • Led a React rewrite of the billing dashboard
 """
-CONFIG = """contact_email: dev@example.com
+# Preferences as an old config.yaml had them, brought in with `profile import`.
+PROFILE = """contact_email: dev@example.com
 filters:
   description:
     stack_keywords:
@@ -36,10 +37,14 @@ def base(
     db_url = f"sqlite:///{tmp_path / 'jobpulse.db'}"
     monkeypatch.setenv("DATABASE_URL", db_url)
     config = tmp_path / "config.yaml"
-    config.write_text(CONFIG, encoding="utf-8")
+    config.write_text("", encoding="utf-8")
+    profile = tmp_path / "profile.yaml"
+    profile.write_text(PROFILE, encoding="utf-8")
     args = ["--config", str(config), "--env-file", str(tmp_path / ".env")]
     upgraded = runner.invoke(cli.app, [*args, "db", "upgrade"])
     assert upgraded.exit_code == 0, upgraded.output
+    imported = runner.invoke(cli.app, [*args, "profile", "import", str(profile)])
+    assert imported.exit_code == 0, imported.output
     return args
 
 

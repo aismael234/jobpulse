@@ -558,7 +558,8 @@ def write_csv(report: EvalReport, path: Path) -> None:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    from jobpulse.config import company_blocklist, filter_rules, load_config
+    from jobpulse.config import Profile, company_blocklist, filter_rules, load_legacy_config
+    from jobpulse.db import profile as profile_db
     from jobpulse.db import repo
     from jobpulse.db.session import create_engine_for, make_session_factory
     from jobpulse.embeddings.fastembed import DEFAULT_CACHE_DIR, FastEmbedEmbedder
@@ -567,7 +568,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="resume_eval", description=__doc__.split("\n")[0])
     parser.add_argument("--database-url", required=True, help="a scratch copy, never the live DB")
     parser.add_argument("--resume", type=Path, required=True)
-    parser.add_argument("--config", type=Path, default=Path("config.yaml"))
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help="an old config.yaml with preferences (default: the profile stored in the database)",
+    )
     parser.add_argument("--out", type=Path, required=True, help="directory for report and CSV")
     parser.add_argument("--cache-dir", type=Path, default=DEFAULT_CACHE_DIR)
     parser.add_argument("--days", type=int, default=7)
@@ -581,11 +587,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     ):
         parser.error("this is the live database; copy it to a scratch path first")
 
-    config = load_config(args.config)
     resume = read_resume_file(args.resume)
     embedder = FastEmbedEmbedder(cache_dir=args.cache_dir)
     factory = make_session_factory(create_engine_for(args.database_url))
     with factory() as session:
+        config: Profile | None = (
+            load_legacy_config(args.config)
+            if args.config is not None
+            else profile_db.get(session).profile
+        )
+        if config is None:
+            parser.error("no profile stored in that database; pass --config with an old config")
         rules = filter_rules(config)
         rules = FilterRules(
             **{

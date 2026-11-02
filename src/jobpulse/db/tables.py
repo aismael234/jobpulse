@@ -303,3 +303,33 @@ class PostingVector(Base):
     dims: Mapped[int]
     vectors: Mapped[bytes] = mapped_column(LargeBinary)
     created_at: Mapped[datetime]
+
+
+class ProfileRow(Base):
+    """Your preferences (``config.Profile``) as JSON, one row (M6). ``revision`` goes up with
+    every save, so the worker and the dashboard know when to recompile; ``onboarded_at`` NULL
+    means the worker waits. ``scored_hash`` names the filters and scoring open matches were
+    last scored with (``config.scoring_hash``)."""
+
+    __tablename__ = "profile"
+    __table_args__ = (CheckConstraint("id = 1", name="single_row"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=False)
+    data: Mapped[dict[str, Any]] = mapped_column(JSONType)
+    revision: Mapped[int]
+    onboarded_at: Mapped[datetime | None]
+    scored_hash: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime]
+    updated_at: Mapped[datetime]
+
+
+class SecretRow(Base):
+    """A secret saved on Settings: an ntfy topic, a Discord webhook, an API key. The same
+    secret in ``.env`` wins. Plain text, like ``.env``: keep the database and its backups
+    private."""
+
+    __tablename__ = "secrets"
+
+    name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str] = mapped_column(Text)
+    updated_at: Mapped[datetime]

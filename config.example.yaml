@@ -1,11 +1,8 @@
-# jobpulse configuration. Copy to config.yaml (gitignored) and edit.
-# Secrets (ntfy topic, Discord webhook, dashboard password, API keys) go in .env, never here.
-
-# Sent in the User-Agent to the ATS APIs so their operators can reach you.
-contact_email: you@example.com
-
-# Used for display. Storage is always UTC.
-timezone: America/Los_Angeles
+# jobpulse infrastructure. Copy to config.yaml (gitignored) and edit, or run without one: every
+# key has a default. Your preferences (filters, scoring, notifications, searches, blocklist) live
+# in the database: edit them on the dashboard's Settings page (profile.example.yaml shows them
+# all). Secrets (ntfy topic, Discord webhook, dashboard password, API keys) go in .env or on
+# Settings, never here.
 
 # DATABASE_URL in .env overrides this. SQLite runs in WAL mode.
 database_url: sqlite:///data/jobpulse.db
@@ -31,98 +28,6 @@ detection:
   closure_missing_polls: 2      # complete polls a job must be missing from before it closes
   fingerprint_window_days: 30   # how far back a company+title+location match merges
 
-filters:
-  title:
-    include:                    # at least one must match; the weight feeds the title score
-      - {pattern: '\bback[- ]?end\b', weight: 1.0}
-      - {pattern: '\bplatform\b', weight: 0.8}
-      - {pattern: '\binfrastructure\b', weight: 0.8}
-      - {pattern: '\bapi\b', weight: 0.7}
-      - {pattern: '\bsoftware engineer\b', weight: 0.6}
-    exclude:                    # any match rejects the posting
-      - '\bmanager\b'
-      - '\bintern(ship)?\b'
-      - '\bfront[- ]?end\b'
-      - '\bsales\b'
-      - '\brecruit'
-  level:
-    include: ["<SET ME>"]       # level words you want, e.g. 'senior' or '\bii\b'; a title match adds a bonus
-    exclude: ['\bstaff\b', '\bprincipal\b']   # EXAMPLE ONLY; a title match rejects the posting
-  description:
-    max_years_experience: null  # e.g. 5; null turns the check off
-    years_mode: penalize        # penalize (lowers the score) or exclude
-    level_phrases_exclude: []   # e.g. 'staff-level'
-    stack_keywords:             # regex: weight, matched against the description
-      '\bpython\b': 1.0
-      '\bgo(lang)?\b': 1.0
-      '\bpostgres(ql)?\b': 0.5
-      '\bkubernetes\b': 0.5
-  locations:
-    countries: []               # ISO codes or names, e.g. [US, CA]: keep postings with a location
-                                # there. Remote (Global) counts everywhere; a posting none of whose
-                                # locations has a known country follows unknown_location_passes
-    include: []                 # regexes over normalized labels, e.g. '^Remote \(US\)$'; empty = anywhere
-    exclude: []
-    aliases:                    # your abbreviations, on top of the built-in table
-      SF: San Francisco, CA
-      NYC: New York, NY
-    unknown_location_passes: true
-
-scoring:
-  weights:
-    freshness: 0.25
-    company_priority: 0.20
-    title: 0.30
-    stack: 0.25
-    level_mismatch: 0.50        # subtracted
-    applicants: 0.10            # only when known (a LinkedIn job page's applicant count)
-    resume: 0.25                # replaces stack for postings with a description once a resume is set
-    llm: 0.15                   # only with the LLM layer on: the most it adds or subtracts
-  priority_cap: 10              # watchlist priority is scaled to 0..1 against this
-  applicant_cap: 200            # applicants scale against this: none scores 1, this many or more 0
-  instant_threshold: 0.55       # every match is pushed; the LLM layer double-checks scores near this
-
-notify:
-  channels: [ntfy]              # ntfy and/or discord; their secrets go in .env
-  ntfy:
-    base_url: https://ntfy.sh   # or your self-hosted server
-    priority: 4
-    tags: [briefcase]
-  # Once a saved filter exists (dashboard Settings), each fitting match is its own push. ntfy.sh
-  # allows a burst of 60, then one per 5 s, and 250 messages a day; the rest of a cycle go out
-  # as one summary.
-  # saved_filters: {max_per_cycle: 10, max_per_day: 200, spacing_seconds: 5}
-
-# EXAMPLES: replace with the companies you care about. Tokens verified on 2026-10-23.
-# Greenhouse: job-boards.greenhouse.io/<token> · Lever: jobs.lever.co/<token>
-# (region: eu for jobs.eu.lever.co) · Ashby: jobs.ashbyhq.com/<token>
-# Workday: <tenant>.wd<N>.myworkdayjobs.com/<site> becomes token <tenant>.wd<N>/<site> (the URL
-# works as the token too). Give big tenants keywords: each one is searched, and only the matches
-# are polled (they never close jobs); without keywords every job is paged through. For example:
-#  - {name: Workday, ats: workday, token: workday.wd5/Workday, priority: 2, keywords: [backend, platform]}
-watchlist:
-  - {name: Stripe, ats: greenhouse, token: stripe, priority: 5}
-  - {name: Discord, ats: greenhouse, token: discord, priority: 3}
-  - {name: Figma, ats: greenhouse, token: figma, priority: 3}
-  - {name: GitLab, ats: greenhouse, token: gitlab, priority: 2}
-  - {name: Cloudflare, ats: greenhouse, token: cloudflare, priority: 3}
-  - {name: Spotify, ats: lever, token: spotify, priority: 2}
-  - {name: Zoox, ats: lever, token: zoox, priority: 1}
-  - {name: Palantir, ats: lever, token: palantir, priority: 2}
-  - {name: Linear, ats: ashby, token: linear, priority: 4}
-  - {name: Ramp, ats: ashby, token: ramp, priority: 4}
-  - {name: Supabase, ats: ashby, token: supabase, priority: 3}
-
-# Indeed and LinkedIn searches through JobSpy. Each asks for jobs posted in the last
-# hours_old (3) hours on every run, so a late or failed run leaves no gap. The first run of a
-# new (or changed) search is a silent baseline. LinkedIn ignores is_remote and reads a
-# location of "Remote" as anywhere in the world: search a country ("United States") and let
-# filters.locations.countries keep the postings there. Keep LinkedIn searches few and
-# results_wanted low.
-searches: []
-#  - {name: backend-us-remote, site: indeed, search_term: "backend engineer", location: "United States", is_remote: true}
-#  - {name: backend-sf, site: linkedin, search_term: "backend engineer", location: "San Francisco, CA", results_wanted: 25}
-
 linkedin:
   delay_min_seconds: 4          # pause between LinkedIn requests, chosen at random in this range
   delay_max_seconds: 8
@@ -145,7 +50,8 @@ simplify:
 
 # Greenhouse, Lever and Ashby boards linked from the feed or from job-board postings are
 # checked with one API call and added to the watchlist (source auto, priority 0). A new
-# board's first poll is a silent baseline. Boards you removed from config are never re-added.
+# board's first poll is a silent baseline. Boards already on the watchlist, paused ones included,
+# are never added again.
 discovery:
   enabled: true
   require_match: true           # only boards with a posting that passes your title and location filters
@@ -153,16 +59,6 @@ discovery:
   max_auto_companies: 50        # stop adding once this many discovered companies are polled; null = no limit
   max_validations_per_cycle: 10
   max_page_fetches_per_cycle: 5 # gh_jid links on company sites: the page is read once for the board
-
-# Companies and boards to stay away from. A blocked company's postings (from any source) are
-# stored but never pushed, discovery never adds its boards, and a board it
-# added earlier is no longer polled. Names match whole, ignoring case, punctuation and
-# Inc/LLC/Ltd: "Acme, Inc." blocks "ACME" but not "Acme Widgets". Blocked boards (ats/token)
-# are never added or polled, though their jobs can still reach you through the feed or a
-# search. To drop a company from the watchlist above, remove it there instead.
-blocklist:
-  companies: []                 # e.g. [Jobot, Revature]
-  boards: []                    # e.g. [greenhouse/spacex]
 
 # One push when a source keeps failing or a busy one goes quiet, and one more when it recovers.
 health:
@@ -189,19 +85,6 @@ retention:
 dashboard:
   host: 127.0.0.1               # keep it local; reach it from your phone through Tailscale
   port: 8000
-
-# An optional second opinion from Claude on postings whose score is within `band` of
-# instant_threshold: the level the role hires for, its backend focus and your resume's fit move
-# the score by up to scoring.weights.llm. The postings and your resume go to Anthropic's API, so
-# it stays off until you turn it on. Needs LLM_API_KEY in .env.
-llm:
-  enabled: false
-  model: claude-opus-5-5
-  effort: low                   # low, medium, high, xhigh or max: more thinking costs more
-  resume_path: null             # a plain-text resume, relative to this file; keep it out of git
-  band: 0.10                    # ask about matches scoring within this of scoring.instant_threshold
-  wanted_levels: []             # e.g. [entry, mid]; from intern, entry, mid, senior, staff, principal, manager
-  max_calls_per_day: 25         # in any 24 hours, failed calls included; answers are cached per posting
 
 # Resume similarity: `jobpulse resume set FILE` stores your resume, and postings with a
 # description are scored by how close they are to it (scoring.weights.resume) in place of the

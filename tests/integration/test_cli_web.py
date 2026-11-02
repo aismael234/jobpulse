@@ -14,9 +14,6 @@ from tests.factories import NOW
 
 runner = CliRunner()
 CONFIG = """\
-contact_email: dev@example.com
-notify:
-  channels: [ntfy]
 simplify: {enabled: false}
 discovery: {enabled: false}
 """

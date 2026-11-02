@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from jobpulse.core.assessment import Assessment, apply_assessment, needs_assessment
 from jobpulse.core.models import Decision, Posting
 from jobpulse.llm.base import AssessmentRequest, LlmClient, LlmReply
-from jobpulse.llm.prompt import build_request
+from jobpulse.llm.prompt import DEFAULT_ROLE, build_request
 
 DEFAULT_CONCURRENCY = 3
 
@@ -34,6 +34,7 @@ class LlmScorer:
         weight: float,
         wanted_levels: Collection[str] = (),
         max_calls_per_day: int = 25,
+        role: str = DEFAULT_ROLE,
         concurrency: int = DEFAULT_CONCURRENCY,
     ) -> None:
         """``client`` may be ``None`` for dry runs, which only read the cache."""
@@ -46,6 +47,7 @@ class LlmScorer:
         self.weight = weight
         self.wanted_levels = frozenset(wanted_levels)
         self.max_calls_per_day = max_calls_per_day
+        self.role = role
         self._semaphore = asyncio.Semaphore(concurrency)
         self.stopped: str | None = None  # why asking stopped for this process (a bad key)
 
@@ -65,7 +67,11 @@ class LlmScorer:
             Ask(
                 index,
                 build_request(
-                    postings[index], resume=self.resume, model=self.model, effort=self.effort
+                    postings[index],
+                    resume=self.resume,
+                    model=self.model,
+                    effort=self.effort,
+                    role=self.role,
                 ),
             )
             for index in indexes
