@@ -4,6 +4,10 @@ Each open, untriaged match (New or Saved) is scored again as ``evaluate`` would 
 when it was decided, with today's weights, title and stack rules, company priority and caps.
 Its resume part is the stored resume score, and the LLM's part is kept as stored. Tiers never
 change here: a stricter rule doesn't hide an open match, it only scores it lower.
+
+A match decided before ``postings.decided_at`` existed (migration 0007) can't be scored as of
+its decision, so its stored freshness part stays; one whose resume part is stored without a
+resume score keeps that part too.
 """
 
 import math
@@ -15,7 +19,13 @@ from sqlalchemy.orm import Session
 from jobpulse.core.detection import EvaluationContext, match_score
 from jobpulse.core.filters import FilterRules
 from jobpulse.core.models import ATS_SOURCES
-from jobpulse.core.scoring import DREAM_PRIORITY, Weights, priority_component
+from jobpulse.core.scoring import (
+    DREAM_PRIORITY,
+    Weights,
+    priority_component,
+    with_part,
+    with_resume,
+)
 from jobpulse.core.similarity import ResumeMatch
 from jobpulse.db import repo
 from jobpulse.db.tables import Company, PostingRow
@@ -61,7 +71,12 @@ def rescore_matches(
             ),
         )
         total, breakdown = match_score(repo.row_to_posting(row), context)
-        llm = (row.score_breakdown or {}).get("llm")
+        stored = row.score_breakdown or {}
+        if row.decided_at is None and stored.get("freshness") is not None:
+            total, breakdown = with_part(breakdown, "freshness", stored["freshness"])
+        if row.resume_score is None and stored.get("resume") is not None:
+            total, breakdown = with_resume(breakdown, resume=stored["resume"], stack=None)
+        llm = stored.get("llm")
         if llm is not None:
             total = round(math.fsum((total, llm)), 4) + 0.0
             breakdown = {**breakdown, "llm": llm, "total": total}

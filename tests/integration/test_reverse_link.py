@@ -141,6 +141,8 @@ async def test_a_new_board_baseline_takes_over_a_pushed_feed_listing(
     assert ats_row.tier == "instant"  # the baseline row took over the feed's match
     assert ats_row.notified_at == pushed.notified_at
     assert ats_row.score == pushed.score
+    assert ats_row.decided_at == pushed.decided_at  # re-scoring reads it
+    assert ats_row.decided_at is not None
     assert env.posting("lever", "0b7f3c2e-9d14-4a6b-8e5f-3c1d2a4b6e8f").tier == "baseline"
 
 

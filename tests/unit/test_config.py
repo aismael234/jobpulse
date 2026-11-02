@@ -5,6 +5,7 @@ pre-M6 shape (preferences and watchlist included), as `jobpulse profile import` 
 profile and config.yaml share those models. The M6 section at the end covers the split:
 config.yaml with infrastructure only, and the profile parsed on its own."""
 
+import hashlib
 import textwrap
 from pathlib import Path
 
@@ -862,3 +863,12 @@ def test_the_scoring_hash_follows_filters_and_scoring_only() -> None:
     timezone = Profile.model_validate({"timezone": "America/New_York"})
     assert len({scoring_hash(base), scoring_hash(weights), scoring_hash(stack)}) == 3
     assert scoring_hash(base) == scoring_hash(timezone)
+
+
+def test_settings_left_at_their_defaults_never_move_the_scoring_hash() -> None:
+    """A new jobpulse that adds a setting with a default doesn't re-score every open match."""
+    assert scoring_hash(Profile()) == hashlib.sha256(b"{}").hexdigest()
+    explicit = Profile.model_validate(
+        {"filters": {"pay": {"min_yearly_usd": None}, "locations": {"places": []}}}
+    )
+    assert scoring_hash(explicit) == scoring_hash(Profile())

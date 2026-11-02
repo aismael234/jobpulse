@@ -191,3 +191,45 @@ async def test_a_profile_seen_for_the_first_time_rescores_nothing(
     assert env.posting("greenhouse", "102").score == 0.01
     with env.sessions() as session:
         assert profile_db.scored_hash(session) is not None
+
+
+async def test_a_match_decided_before_decided_at_keeps_its_freshness(
+    env: Env, gh: GreenhouseMock
+) -> None:
+    """Matches decided before postings.decided_at existed (0007) can't be scored again as of
+    their decision, so their stored freshness and resume parts stay."""
+    await baseline(env, gh)
+    gh.respond(gh_job(101, published=OLD), gh_job(102, published=FRESH))
+    await env.poll(sources=["greenhouse"])
+    stored = {
+        "freshness": 0.1263,
+        "company_priority": 0.1,
+        "title": 0.3,
+        "stack": None,
+        "level_mismatch": 0.0,
+        "applicants": None,
+        "resume": 0.0862,
+        "total": 0.6125,
+    }
+    env.update_posting(
+        "greenhouse",
+        "102",
+        decided_at=None,
+        resume_score=None,
+        score=0.6125,
+        score_breakdown=stored,
+    )
+
+    scoring = env.config.scoring.model_dump()
+    scoring["weights"]["title"] = 0.6
+    env.reconfigure(scoring=ScoringConfig.model_validate(scoring))
+    report = await env.poll(sources=["greenhouse"])
+
+    assert report.rescored == 1
+    after = env.posting("greenhouse", "102")
+    assert after.score_breakdown is not None
+    assert after.score_breakdown["freshness"] == 0.1263
+    assert after.score_breakdown["resume"] == 0.0862
+    assert after.score_breakdown["stack"] is None
+    assert after.score_breakdown["title"] == pytest.approx(0.60)
+    assert after.score == pytest.approx(0.1263 + 0.1 + 0.6 + 0.0862)

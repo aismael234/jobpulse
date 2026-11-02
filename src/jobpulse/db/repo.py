@@ -901,6 +901,9 @@ def _adopt(
         primary.tier_reason = f"{copy.tier_reason} (first seen on {copy.source})"
         primary.score = copy.score
         primary.score_breakdown = copy.score_breakdown
+        primary.decided_at = copy.decided_at  # re-scoring scores it as of then
+        primary.resume_score = copy.resume_score
+        primary.resume_line = copy.resume_line
     copy.merged_into_id = primary.id
     copy.tier = "merged"
     copy.tier_reason = f"duplicate of posting {primary.id} ({how}), seen before it"

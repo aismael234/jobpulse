@@ -742,8 +742,9 @@ class LegacyConfig(AppConfig):
 
 def scoring_hash(profile: Profile) -> str:
     """Names the filters and scoring that open matches were scored with: when it changes,
-    the worker re-scores them."""
-    data = profile.model_dump(mode="json", include={"filters", "scoring"})
+    the worker re-scores them. Settings left at their defaults don't count, so a new
+    jobpulse that adds one doesn't re-score every open match."""
+    data = profile.model_dump(mode="json", include={"filters", "scoring"}, exclude_defaults=True)
     return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
 
 

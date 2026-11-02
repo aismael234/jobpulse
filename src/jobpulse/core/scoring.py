@@ -92,6 +92,22 @@ def score(inputs: ScoreInputs, weights: Weights) -> tuple[float, dict[str, float
     return _rounded(total), breakdown
 
 
+def with_part(
+    breakdown: Mapping[str, float | None], name: str, value: float | None
+) -> tuple[float, dict[str, float | None]]:
+    """A breakdown with one part (already weighted) replaced and the total summed again."""
+    parts: dict[str, float | None] = {
+        key: part for key, part in breakdown.items() if key != "total"
+    }
+    parts[name] = value
+    total = _rounded(math.fsum(part for part in parts.values() if part is not None))
+    rounded: dict[str, float | None] = {
+        key: None if part is None else _rounded(part) for key, part in parts.items()
+    }
+    rounded["total"] = total
+    return total, rounded
+
+
 def with_resume(
     breakdown: Mapping[str, float | None], *, resume: float | None, stack: float | None
 ) -> tuple[float, dict[str, float | None]]:
