@@ -844,7 +844,8 @@ def _adopt(
 
 
 def set_decision(session: Session, row_id: int, decision: Decision) -> None:
-    """A decision on a stored posting. The years asked stay unless this decision read them."""
+    """A decision on a stored posting. The years asked and the resume match stay unless this
+    decision read them."""
     values: dict[str, Any] = {
         "tier": decision.tier,
         "tier_reason": decision.reason,
@@ -853,6 +854,9 @@ def set_decision(session: Session, row_id: int, decision: Decision) -> None:
     }
     if decision.years_required is not None:
         values["years_required"] = decision.years_required
+    if decision.resume_score is not None:
+        values["resume_score"] = decision.resume_score
+        values["resume_line"] = decision.resume_line
     session.execute(update(PostingRow).where(PostingRow.id == row_id).values(**values))
 
 
@@ -890,6 +894,8 @@ def save_evaluation(
             score=decision.score,
             score_breakdown=decision.breakdown,
             years_required=decision.years_required,
+            resume_score=decision.resume_score,
+            resume_line=decision.resume_line,
             employment_type=posting_employment_type(posting),
             repost_reason=repost_reason,
             decided_at=decided_at,

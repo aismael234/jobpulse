@@ -25,7 +25,7 @@ STATUSES: tuple[str, ...] = ("New", "Saved", "Applied", "Dismissed")
 BLOCKLIST_EXEMPT_STATUSES = frozenset({"Applied"})
 PAGE_SIZE = 50
 
-SortOrder = Literal["score", "fresh", "pushed", "moved"]
+SortOrder = Literal["score", "fresh", "pushed", "moved", "resume"]
 ContractFilter = Literal["show", "hide", "only"]
 # Reposts are hidden by default where postings wait to be triaged; views of postings you
 # chose (Saved, Applied) and dismissed ones always show them.
@@ -257,6 +257,8 @@ def _order(sort: SortOrder) -> tuple[Any, ...]:
         return pushed_at().desc(), by_score
     if sort == "moved":
         return PostingRow.status_changed_at.desc().nulls_last(), pushed_at().desc()
+    if sort == "resume":
+        return PostingRow.resume_score.desc().nulls_last(), by_score, freshness
     return (by_score, freshness) if sort == "score" else (freshness, by_score)
 
 

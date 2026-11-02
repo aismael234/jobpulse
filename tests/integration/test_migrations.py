@@ -9,6 +9,7 @@ from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.migration import MigrationContext
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.exc import IntegrityError
 from typer.testing import CliRunner
 
 from jobpulse.cli import app
@@ -342,6 +343,63 @@ def test_0007_adds_saved_filters_and_decided_at_in_place(db_url: str) -> None:
     tables = set(inspect(engine).get_table_names())
     assert not {"saved_filters", "filter_pushes", "preferences"} & tables
     assert "decided_at" not in {c["name"] for c in inspect(engine).get_columns("postings")}
+
+
+def test_0008_adds_resume_tables_and_columns_in_place(db_url: str) -> None:
+    config = alembic_config(db_url)
+    command.upgrade(config, "0007")
+    engine = create_engine(db_url)
+    seen = "2026-10-24 08:00:00.000000"
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO postings (id, source, external_id, company_name, title, locations, "
+                "canonical_url, fingerprint, url, first_seen_at, last_seen_at, also_seen_on, raw) "
+                "VALUES (1, 'greenhouse', '1', 'Acme', 'Role', '[]', 'c', 'f', 'u', :seen, :seen, "
+                "'[]', '{}')"
+            ),
+            {"seen": seen},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO llm_assessments (posting_id, input_hash, model, created_at) "
+                "VALUES (1, 'h', 'm', :seen)"
+            ),
+            {"seen": seen},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO filter_pushes (id, posting_id, filter_id, sent_at) "
+                "VALUES (1, 1, 1, :seen)"
+            ),
+            {"seen": seen},
+        )
+
+    command.upgrade(config, "0008")
+
+    tables = set(inspect(engine).get_table_names())
+    assert {"resume", "posting_vectors"} <= tables
+    columns = {c["name"] for c in inspect(engine).get_columns("postings")}
+    assert {"resume_score", "resume_line"} <= columns
+    with engine.connect() as connection:  # in place: nothing cascaded
+        assert connection.execute(text("SELECT count(*) FROM llm_assessments")).scalar() == 1
+        assert connection.execute(text("SELECT count(*) FROM filter_pushes")).scalar() == 1
+    with engine.begin() as connection:  # one resume at most
+        insert = text(
+            "INSERT INTO resume (id, filename, media_type, text, sha256, uploaded_at, lines, "
+            "anchor_count) VALUES (:id, 'r.txt', 'text/plain', 't', 's', :seen, '[]', 0)"
+        )
+        connection.execute(insert, {"id": 1, "seen": seen})
+    with pytest.raises(IntegrityError), engine.begin() as connection:
+        connection.execute(insert, {"id": 2, "seen": seen})
+
+    command.downgrade(config, "0007")
+    tables = set(inspect(engine).get_table_names())
+    assert not {"resume", "posting_vectors"} & tables
+    columns = {c["name"] for c in inspect(engine).get_columns("postings")}
+    assert not {"resume_score", "resume_line"} & columns
+    with engine.connect() as connection:
+        assert connection.execute(text("SELECT count(*) FROM llm_assessments")).scalar() == 1
 
 
 def test_cli_db_upgrade_uses_database_url(tmp_path: Path, db_url: str) -> None:

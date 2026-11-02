@@ -179,8 +179,15 @@ The full plan, with decisions, code facts and a data snapshot, is in `/Users/ala
   - [x] none saved: batch pushes as today; any saved: one message per fitting posting with bullets, most-matched last, at most 10 per cycle and 200 a day, then one summary;
   - [x] only postings decided after a save fire; on/off switches, with all off meaning silence;
   - [x] dashboard buttons with new-match badges (cleared when opened) and bullets on cards.
-- [ ] **M5a — Resume similarity experiment:** local embeddings evaluated on a scratch copy, with dismissals your rules already explain set aside. Stop and decide the weight together.
-- [ ] **M5b — Resume scoring wiring** (migration 0008).
+- [x] **M5a — Resume similarity experiment** (built 2026-11-01, not committed): local embeddings evaluated on a scratch copy, with dismissals your rules already explain set aside. Weight decided 2026-11-01: 0.25, the same as stack (a like-for-like swap).
+  - `core/similarity.py`, `embeddings/` (fastembed, bge-small-en-v1.5, 64 MB in `data/models`), `resume_files.py` (PDF, DOCX, TXT, MD), `jobpulse embeddings download`, `devtools/resume_eval.py`.
+  - Result: resume similarity tracks your choices about as well as the stack keywords do, and no better. Applied against all 1,141 dismissals with a description: best variant AUC 0.606 (CI 0.55–0.67), stack part 0.598, stored total 0.612. Against the 26 kept dismissals (single clicks, not explained by rules) every signal's CI includes 0.5.
+- [x] **M5b — Resume scoring wiring** (migration 0008; built 2026-11-01, not committed; live DB untouched):
+  - [x] `scoring.weights.resume` (0.25) replaces the stack part for matches with a description while a resume is stored; no resume, no description or no model keeps the stack keywords;
+  - [x] descriptions embedded once per model and cached (`posting_vectors`); the model loads only when a resume exists; `embeddings.enabled: false` turns it off;
+  - [x] a new resume (or model) re-scores open New and Saved matches at the next cycle start, keeping the LLM's part; anchors measured on them once 50 have vectors;
+  - [x] `jobpulse resume set | show | clear | rescore --backfill`;
+  - [x] a "Best resume match" sort and the closest resume line on each card.
 - [ ] **M6 — Profile in the DB, secrets, Settings, config.yaml import** (migration 0009).
 - [ ] **M7 — Seed, remote sync, contribute** (migration 0010).
 - [ ] **M8 — `jobpulse up` and the onboarding wizard.**
@@ -356,4 +363,18 @@ The full plan, with decisions, code facts and a data snapshot, is in `/Users/ala
   - **Replay on a scratch copy** (live DB backed up read-only, upgraded to 0007), last 24 h of pushed matches without blocked companies (190 in 13 batches), four sample filters: Bay Area 25; under 50 applicants, no contract 159 (only LinkedIn has counts, so most pass); pay ≥ $150k, no contract 175 (unlisted pay passes unless "Pay listed"); remote, no contract 2. 188 fit at least one and 2 none; that day would have sent 54 messages of their own plus 2 summaries in 11 cycles, against 13 batches.
   - `scripts/check.sh` green: 1508 passed.
   - Live: you backed up to `data/jobpulse-before-0007.db` (integrity ok, 40,514 postings) and ran `db upgrade` to 0007. Worker and dashboard need starting on the new code. Your pushes stay batched until you save a filter. Nothing committed yet.
-
+- **2026-11-01** — M5a done (your go-ahead: "Proceed with M5a").
+  - **Test-first:** against stubs, 21 similarity, 12 resume-file, 2 CLI and 4 analysis tests failed on missing behavior. Two test bugs fixed on the way: a DOCX fixture stored uncompressed, and an assertion that ignored the title in title+desc variants. Now 1,549 pass (16 live skipped); the live embedding test passes.
+  - **Packages (your OK):** fastembed 0.9.0 (onnxruntime 1.31.0, tokenizers, huggingface-hub) and pypdf 6.21.1, inside `exclude-newer`. The model is the quantized bge-small-en-v1.5 (384 dims), downloaded with your OK.
+  - **Data (scratch copy at 0007, worker stopped, copied with `cp`):** 85 applied and 1,141 dismissed postings have a description. Set aside: 115 that today's rules filter, 123 triaged before 0005, 877 bulk dismissals; 26 kept. Bulk moves dominate your dismissals, so the clean negative set is small.
+  - **Results:** 32 variants (posting text, chunking, resume side, aggregation). Best, `desc|block|chunks|mean`: AUC 0.591 against the kept 26 (CI 0.46–0.72), 0.606 against all dismissals (0.55–0.67), 0.617 against those rules don't explain. Stack part: 0.512 / 0.598; stored total 0.483 / 0.612; title part about 0.50. In place of stack at 0.10–0.40, the simulated total moves from 0.483 to 0.498–0.539 on the kept 26, all inside noise. Per-line variants, the ones that give a "closest line", score lower (0.52–0.59).
+  - **Throughput:** 16 texts/s on this Mac (10,053 texts in 641 s), and 32 variants matched in 20 s in pure Python. A backfill of about 2,000 postings is about 8 minutes; a cycle's few new survivors take seconds.
+  - **Calibration anchors** (p5, p95 over 800 recent matches): 0.668 and 0.776.
+  - Not committed. Live DB untouched.
+- **2026-11-01** — M5b done (your go-ahead: "Proceed with M5b"; weight 0.25, your pick).
+  - **Test-first:** the new tests failed on missing modules and names (no stubs this time); one test bug fixed on the way (the test config's stack saturation is 2, so the expected stack part is 0.125). Now 1,590 pass (16 live skipped); both live embedding tests pass.
+  - **Schema 0008:** `resume` (one row, `CHECK id = 1`: file name, media type, text, sha256, content lines, model, line and chunk vectors, anchors, `rescored_at`), `posting_vectors` (CASCADE from `postings`), and `postings.resume_score` / `resume_line`, added in place.
+  - **Scoring:** M5a's best variant (the description as one block against the mean resume chunk), calibrated between anchors; the card shows the single closest resume line, cut to 160 characters. Only matches the rules keep are embedded, not every survivor: filtered and stale ones are never shown with a score.
+  - **Beyond the plan:** `db/resume.py` holds the resume store and vector encoding (the plan said `repo.py` plus `db/vectors.py`); `resume_scoring.py` holds what the poller and the CLI share. `resume clear` puts open matches back on the stack keywords. A `LazyEmbedder` means a worker with no resume never loads the model.
+  - **Rehearsal on a scratch copy** (live DB copied with `cp`, worker stopped, upgraded to 0008): 315 open New matches, 172 with a description. `resume set` kept 14 content lines; `rescore --backfill` embedded 172 descriptions in 12 s. Anchors measured on them: 0.674 and 0.771 (M5a: 0.668 and 0.776). Score change: mean +0.018, median +0.020, from -0.25 to +0.25; calibrated resume scores have quartiles 0.37 / 0.61 / 0.80. 5 of the top 20 by score stay in the top 20. A Greenhouse-only dry run on the copy found no new matches, so the in-cycle path ran only in tests with the fake embedder.
+  - Not committed. Live DB untouched (still 0007).

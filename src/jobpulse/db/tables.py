@@ -3,7 +3,18 @@
 from datetime import datetime
 from typing import Any, ClassVar
 
-from sqlalchemy import ForeignKey, Index, MetaData, String, Text, UniqueConstraint, false, true
+from sqlalchemy import (
+    CheckConstraint,
+    ForeignKey,
+    Index,
+    LargeBinary,
+    MetaData,
+    String,
+    Text,
+    UniqueConstraint,
+    false,
+    true,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from jobpulse.core.timeparse import utcnow
@@ -111,6 +122,8 @@ class PostingRow(Base):
     employment_type: Mapped[str | None] = mapped_column(String(12))  # core.employment
     repost_reason: Mapped[str | None] = mapped_column(Text)  # NULL: not a repost (core.reposts)
     decided_at: Mapped[datetime | None]  # when the cycle decided it (saved filters fire after)
+    resume_score: Mapped[float | None]  # calibrated resume similarity (M5b), when scored
+    resume_line: Mapped[str | None] = mapped_column(Text)  # the closest resume line
     notified_at: Mapped[datetime | None]
     merged_into_id: Mapped[int | None] = mapped_column(
         ForeignKey("postings.id", ondelete="SET NULL")
@@ -249,3 +262,44 @@ class Preference(Base):
     name: Mapped[str] = mapped_column(String(64), primary_key=True)
     value: Mapped[Any] = mapped_column(JSONType)
     updated_at: Mapped[datetime]
+
+
+class ResumeRow(Base):
+    """The one resume postings are compared with (M5b). ``lines`` are its content lines
+    (``core.similarity.resume_lines``: no headings or contact details); the vectors are from
+    ``embed_model`` and are dropped whenever the text changes. ``rescored_at`` NULL means open
+    matches still need re-scoring against it."""
+
+    __tablename__ = "resume"
+    __table_args__ = (CheckConstraint("id = 1", name="single_row"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=False)
+    filename: Mapped[str] = mapped_column(Text)
+    media_type: Mapped[str] = mapped_column(String(100))
+    text: Mapped[str] = mapped_column(Text)
+    sha256: Mapped[str] = mapped_column(String(64))
+    uploaded_at: Mapped[datetime]
+    lines: Mapped[list[str]] = mapped_column(JSONType)
+    embed_model: Mapped[str | None] = mapped_column(String(100))
+    dims: Mapped[int | None]
+    line_vectors: Mapped[bytes | None] = mapped_column(LargeBinary)
+    chunk_vectors: Mapped[bytes | None] = mapped_column(LargeBinary)
+    anchor_low: Mapped[float | None]  # NULL: core.similarity.DEFAULT_ANCHORS
+    anchor_high: Mapped[float | None]
+    anchor_count: Mapped[int] = mapped_column(default=0, server_default="0")
+    rescored_at: Mapped[datetime | None]
+
+
+class PostingVector(Base):
+    """A posting's description embedded (M5b), cached by model and input hash."""
+
+    __tablename__ = "posting_vectors"
+
+    posting_id: Mapped[int] = mapped_column(
+        ForeignKey("postings.id", ondelete="CASCADE"), primary_key=True
+    )
+    model: Mapped[str] = mapped_column(String(100))
+    input_hash: Mapped[str] = mapped_column(String(64))
+    dims: Mapped[int]
+    vectors: Mapped[bytes] = mapped_column(LargeBinary)
+    created_at: Mapped[datetime]

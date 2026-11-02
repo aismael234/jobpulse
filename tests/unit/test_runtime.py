@@ -3,12 +3,20 @@ layer, which exists only when it's switched on."""
 
 from pathlib import Path
 
+import pytest
 from pydantic import SecretStr
 
-from jobpulse.config import AppConfig, Settings
+from jobpulse.config import AppConfig, Settings, scoring_weights
+from jobpulse.embeddings.base import EmbedderUnavailable
 from jobpulse.httpclient import HttpClient
 from jobpulse.llm.claude import ClaudeClient
-from jobpulse.runtime import KNOWN_SOURCES, WATCHLIST_SOURCES, build_adapters, build_llm
+from jobpulse.runtime import (
+    KNOWN_SOURCES,
+    WATCHLIST_SOURCES,
+    build_adapters,
+    build_embedder,
+    build_llm,
+)
 from jobpulse.sources.jobspy_boards import JobSpyAdapter
 from jobpulse.sources.linkedin_guest import LinkedInSource
 from jobpulse.sources.workday import WorkdayAdapter
@@ -78,3 +86,25 @@ async def test_a_dry_run_gets_a_layer_that_only_reads_the_cache(tmp_path: Path) 
     assert scorer is not None
     assert not scorer.can_ask
     await scorer.aclose()
+
+
+# --- M5b: the embedder --------------------------------------------------------------
+
+
+def test_the_embedder_is_built_lazily_and_never_loads_until_used(tmp_path: Path) -> None:
+    """Building it costs nothing: an install without a resume never loads the model."""
+    embedder = build_embedder(config(tmp_path, embeddings={"cache_dir": str(tmp_path / "m")}))
+    assert embedder is not None
+    assert embedder.model.startswith("BAAI/bge-small-en-v1.5@fastembed-")
+    with pytest.raises(EmbedderUnavailable, match="jobpulse embeddings download"):
+        embedder.embed(["Python services"])  # nothing in the cache dir
+
+
+def test_embeddings_can_be_turned_off(tmp_path: Path) -> None:
+    assert build_embedder(config(tmp_path, embeddings={"enabled": False})) is None
+
+
+def test_the_resume_weight_reaches_the_scoring_weights(tmp_path: Path) -> None:
+    assert scoring_weights(config(tmp_path)).resume == 0.25
+    tuned = config(tmp_path, scoring={"weights": {"resume": 0.1}})
+    assert scoring_weights(tuned).resume == 0.1

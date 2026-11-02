@@ -177,6 +177,7 @@ button.link:hover { text-decoration: underline; }
 .score.instant { background: var(--good-soft); color: var(--good); }
 .pay { color: var(--good); font-weight: 500; }
 .note { font-style: italic; }
+.posting .resume { flex-basis: 100%; font-size: 0.85rem; overflow-wrap: anywhere; }
 .badge {
   display: inline-block;
   padding: 0 0.45rem;

@@ -23,6 +23,7 @@
       <option value="score"{% if query.sort == "score" %} selected{% endif %}>Best score</option>
       <option value="fresh"{% if query.sort == "fresh" %} selected{% endif %}>Newest</option>
       <option value="pushed"{% if query.sort == "pushed" %} selected{% endif %}>Recently pushed</option>
+      <option value="resume"{% if query.sort == "resume" %} selected{% endif %}>Best resume match</option>
       {% if moved_sort %}
       <option value="moved"{% if query.sort == "moved" %} selected{% endif %}>{{ moved_sort }}</option>
       {% endif %}

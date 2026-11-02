@@ -1,5 +1,6 @@
-"""One poll cycle: fetch, diff, dedupe, prescreen, enrich, decide (with the LLM layer's second
-opinion near the threshold, when it's on), notify, check health, discover new boards.
+"""One poll cycle: fetch, diff, dedupe, prescreen, enrich, decide (with resume similarity in
+place of the stack keywords when a resume is stored, and the LLM layer's second opinion near
+the threshold, when it's on), notify, check health, discover new boards.
 
 A posting whose detail couldn't be read (``EnrichmentDeferred``: LinkedIn's hourly page cap or
 cool-down) stays pending, undecided, and the next cycle of its source tries again, until it
@@ -45,11 +46,14 @@ from jobpulse.core.models import (
 from jobpulse.core.palette import phone_bullet
 from jobpulse.core.reposts import REPOST_AFTER, repost_reason
 from jobpulse.core.scoring import priority_component
+from jobpulse.core.similarity import ResumeMatch, Vector
 from jobpulse.core.timeparse import utcnow
 from jobpulse.db import repo, saved_filters
+from jobpulse.db import resume as resume_db
 from jobpulse.db.saved_filters import Saved
 from jobpulse.db.tables import PostingRow
 from jobpulse.discovery import Discoverer, Sighting
+from jobpulse.embeddings.base import Embedder
 from jobpulse.health import HealthMonitor, HealthRules
 from jobpulse.llm.scorer import Ask, LlmScorer
 from jobpulse.notify.base import Notification, Notifier, NotifierError
@@ -60,6 +64,14 @@ from jobpulse.notify.format import (
     posting_notification,
     saved_filter_summary,
     title_line,
+)
+from jobpulse.resume_scoring import (
+    embed_resume,
+    input_hash,
+    needs_rescore,
+    posting_text,
+    rescore,
+    resume_match,
 )
 from jobpulse.sources.base import EnrichmentDeferred, SourceAdapter
 from jobpulse.sources.maintenance import Sleep
@@ -130,6 +142,10 @@ class CycleReport:
     llm_over_limit: int = 0  # band postings left to the rules: llm.max_calls_per_day reached
     llm_would_ask: int = 0  # dry run: band postings with no cached answer
     llm_stopped: str | None = None  # why the LLM layer stopped asking (a bad key)
+    resume_matched: int = 0  # matches scored against the resume
+    resume_embedded: int = 0  # descriptions embedded this cycle (the rest from the cache)
+    resume_rescored: int = 0  # open matches re-scored at cycle start (the resume changed)
+    resume_failed: str | None = None  # why the embedder couldn't be used: stack keywords instead
 
 
 @dataclass
@@ -178,6 +194,7 @@ class Poller:
         discoverer: Discoverer | None = None,
         llm: LlmScorer | None = None,
         sleep: Sleep = asyncio.sleep,
+        embedder: Embedder | None = None,
     ) -> None:
         self._config = config
         self._sessions = sessions
@@ -187,6 +204,8 @@ class Poller:
         self._discoverer = discoverer
         self._llm = llm
         self._sleep = sleep  # spaces saved-filter pushes out
+        self._embedder = embedder
+        self._resume_lock = asyncio.Lock()  # one re-score at a time across concurrent cycles
         self._health = (
             HealthMonitor(HealthRules.from_config(config.health, config.maintenance))
             if config.health.enabled
@@ -221,6 +240,7 @@ class Poller:
             self._rules = replace(self._rules, blocklist=self._blocklist)
             targets = self._targets(session, sources, target_key)
             unit.checkpoint()
+            await self._rescore_resume(unit, report)
 
             started_at = self._clock()
             results = await asyncio.gather(*(self._fetch(target) for target in targets))
@@ -242,6 +262,7 @@ class Poller:
                 evaluate(posting, self._context(survivor))
                 for survivor, posting in zip(survivors, enriched, strict=True)
             ]
+            decisions = await self._resume_matches(unit, report, survivors, enriched, decisions)
             decisions = await self._review(unit, report, survivors, enriched, decisions)
             for survivor, posting, decision in zip(survivors, enriched, decisions, strict=True):
                 repo.save_evaluation(
@@ -591,6 +612,103 @@ class Poller:
             kept.append(survivor)
             postings.append(posting)
         return kept, postings
+
+    async def _rescore_resume(self, unit: _UnitOfWork, report: CycleReport) -> None:
+        """At cycle start: embed the stored resume when its vectors are missing or from another
+        model, then re-score open matches when it changed since the last re-score."""
+        embedder = self._embedder
+        if embedder is None:
+            return
+        async with self._resume_lock:
+            session = unit.session
+            stored = resume_db.get(session)
+            if stored is None or not stored.lines:
+                return
+            if stored.embed_model != embedder.model:
+                unit.checkpoint()  # nothing stays open while the model runs
+                try:
+                    vectors = await asyncio.to_thread(embed_resume, embedder, stored.lines)
+                except Exception as exc:
+                    report.resume_failed = f"couldn't embed the resume ({exc})"
+                    log.warning("resume: %s", report.resume_failed)
+                    return
+                resume_db.save_vectors(session, model=embedder.model, vectors=vectors)
+                stored = resume_db.get(session)
+            if stored is None or not needs_rescore(session, stored):
+                return
+            result = rescore(session, rules=self._rules, weights=self._weights, now=self._clock())
+            report.resume_rescored = result.rescored
+            unit.checkpoint()
+
+    async def _resume_matches(
+        self,
+        unit: _UnitOfWork,
+        report: CycleReport,
+        survivors: list[_Survivor],
+        postings: list[Posting],
+        decisions: list[Decision],
+    ) -> list[Decision]:
+        """Matches with a description, scored against the stored resume in place of the stack
+        keywords. Descriptions already embedded with this model come from the cache; the rest
+        are embedded in a thread and cached. Without a usable embedder or resume, the
+        decisions stand."""
+        embedder = self._embedder
+        wanted = [
+            index
+            for index, (posting, decision) in enumerate(zip(postings, decisions, strict=True))
+            if decision.tier == "instant" and posting_text(posting.description_text)
+        ]
+        if embedder is None or not wanted:
+            return decisions
+        session = unit.session
+        stored = resume_db.get(session)
+        if stored is None or stored.vectors is None or stored.embed_model != embedder.model:
+            return decisions
+        model = embedder.model
+        texts = {index: posting_text(postings[index].description_text) for index in wanted}
+        hashes = {index: input_hash(model, text) for index, text in texts.items()}
+        cached = resume_db.posting_vectors(
+            session, [survivors[index].row_id for index in wanted], model=model
+        )
+        found: dict[int, list[Vector]] = {}
+        missing: list[int] = []
+        for index in wanted:
+            entry = cached.get(survivors[index].row_id)
+            if entry is not None and entry[0] == hashes[index]:
+                found[index] = entry[1]
+            else:
+                missing.append(index)
+        unit.checkpoint()  # nothing stays open while the model runs
+        if missing:
+            unique = list(dict.fromkeys(texts[index] for index in missing))
+            try:
+                embedded = await asyncio.to_thread(embedder.embed, unique)
+            except Exception as exc:
+                report.resume_failed = f"couldn't embed {len(unique)} descriptions ({exc})"
+                log.warning("resume: %s", report.resume_failed)
+            else:
+                by_text = dict(zip(unique, embedded, strict=True))
+                report.resume_embedded += len(unique)
+                fresh = {index: [by_text[texts[index]]] for index in missing}
+                resume_db.save_posting_vectors(
+                    session,
+                    {
+                        survivors[index].row_id: (hashes[index], vectors)
+                        for index, vectors in fresh.items()
+                    },
+                    model=model,
+                    now=self._clock(),
+                )
+                found.update(fresh)
+        decided = list(decisions)
+        for index, vectors in found.items():
+            match: ResumeMatch | None = resume_match(vectors, stored)
+            if match is None:
+                continue
+            context = replace(self._context(survivors[index]), resume=match)
+            decided[index] = evaluate(postings[index], context)
+            report.resume_matched += 1
+        return decided
 
     async def _review(
         self,

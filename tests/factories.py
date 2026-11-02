@@ -1,8 +1,11 @@
 """Builders shared by the tests."""
 
+import hashlib
 import itertools
 import json
+import math
 import re
+from array import array
 from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -158,3 +161,26 @@ class FakeMonotonic:
 
     def __call__(self) -> float:
         return self.now
+
+
+class FakeEmbedder:
+    """A hashed bag of words: texts sharing words get close vectors. Counts what it embeds."""
+
+    model = "fake-bag-of-words@1"
+    dims = 64
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.texts: list[str] = []
+
+    def embed(self, texts: Sequence[str]) -> list[array[float]]:
+        self.calls += 1
+        self.texts.extend(texts)
+        vectors = []
+        for text in texts:
+            counts = [0.0] * self.dims
+            for word in re.findall(r"[a-z0-9]+", text.lower()):
+                counts[int(hashlib.md5(word.encode()).hexdigest(), 16) % self.dims] += 1.0
+            norm = math.sqrt(sum(c * c for c in counts)) or 1.0
+            vectors.append(array("f", (c / norm for c in counts)))
+        return vectors

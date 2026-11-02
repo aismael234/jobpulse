@@ -213,3 +213,5 @@ class Decision:
     score: float | None = None
     breakdown: dict[str, float | None] | None = None
     years_required: int | None = None  # from the description, once it was read
+    resume_score: float | None = None  # calibrated resume similarity, when it was scored
+    resume_line: str | None = None  # the closest resume line, for the card

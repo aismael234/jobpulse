@@ -76,6 +76,7 @@ scoring:
     stack: 0.25
     level_mismatch: 0.50        # subtracted
     applicants: 0.10            # only when known (a LinkedIn job page's applicant count)
+    resume: 0.25                # replaces stack for postings with a description once a resume is set
     llm: 0.15                   # only with the LLM layer on: the most it adds or subtracts
   priority_cap: 10              # watchlist priority is scaled to 0..1 against this
   applicant_cap: 200            # applicants scale against this: none scores 1, this many or more 0
@@ -201,3 +202,11 @@ llm:
   band: 0.10                    # ask about matches scoring within this of scoring.instant_threshold
   wanted_levels: []             # e.g. [entry, mid]; from intern, entry, mid, senior, staff, principal, manager
   max_calls_per_day: 25         # in any 24 hours, failed calls included; answers are cached per posting
+
+# Resume similarity: `jobpulse resume set FILE` stores your resume, and postings with a
+# description are scored by how close they are to it (scoring.weights.resume) in place of the
+# stack keywords. It runs locally (bge-small-en-v1.5, 64 MB, about 200 MB of memory while in
+# use); `jobpulse embeddings download` fetches the model once, nothing else downloads it.
+embeddings:
+  enabled: true                 # false on small hosts: the stack keywords stay
+  cache_dir: data/models        # relative to where jobpulse runs

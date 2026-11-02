@@ -17,6 +17,7 @@ _BREAKDOWN_LABELS = {
     "title": "title",
     "freshness": "fresh",
     "stack": "stack",
+    "resume": "resume",
     "company_priority": "priority",
     "applicants": "applicants",
     "level_mismatch": "level",

@@ -283,6 +283,7 @@ class ScoringWeights(_Model):
     stack: float = Field(default=0.25, ge=0)
     level_mismatch: float = Field(default=0.50, ge=0)
     applicants: float = Field(default=0.10, ge=0)
+    resume: float = Field(default=0.25, ge=0)  # replaces stack when a resume match is known
     llm: float = Field(default=0.15, ge=0, le=1)
 
 
@@ -441,6 +442,13 @@ class LlmConfig(_Model):
         return self
 
 
+class EmbeddingsConfig(_Model):
+    """The local embedding model behind resume similarity (M5b)."""
+
+    enabled: bool = True  # false on small hosts: the model takes about 200 MB of memory
+    cache_dir: Path = Path("data/models")  # where `jobpulse embeddings download` puts it
+
+
 class DiscoveryConfig(_Model):
     enabled: bool = True
     require_match: bool = True
@@ -494,6 +502,7 @@ class AppConfig(_Model):
     retention: RetentionConfig = RetentionConfig()
     dashboard: DashboardConfig = DashboardConfig()
     llm: LlmConfig = LlmConfig()
+    embeddings: EmbeddingsConfig = EmbeddingsConfig()
 
     @field_validator("contact_email")
     @classmethod
@@ -901,6 +910,7 @@ def scoring_weights(config: AppConfig) -> Weights:
         stack=weights.stack,
         level_mismatch=weights.level_mismatch,
         applicants=weights.applicants,
+        resume=weights.resume,
         llm=weights.llm,
     )
 

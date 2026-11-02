@@ -10,6 +10,7 @@ from jobpulse.core.scoring import (
     freshness_component,
     priority_component,
     score,
+    with_resume,
 )
 
 WEIGHTS = Weights(
@@ -87,3 +88,38 @@ def test_applicant_component_falls_with_the_count(count: ApplicantCount, expecte
 
 def test_applicant_component_scales_against_the_cap() -> None:
     assert applicant_component(ApplicantCount("50 applicants", 50, 50), 100) == pytest.approx(0.5)
+
+
+def test_a_known_resume_part_replaces_the_stack_part() -> None:
+    weights = Weights(stack=0.25, resume=0.2)
+    total, breakdown = score(
+        ScoreInputs(freshness=0.0, company_priority=0.0, title=1.0, stack=1.0, resume=0.5),
+        weights,
+    )
+    assert total == pytest.approx(0.3 + 0.1)
+    assert breakdown["stack"] is None
+    assert breakdown["resume"] == pytest.approx(0.1)
+
+
+def test_without_a_resume_part_the_breakdown_has_no_resume_key() -> None:
+    _, breakdown = score(ScoreInputs(freshness=0.0, company_priority=0.0, title=1.0), WEIGHTS)
+    assert "resume" not in breakdown
+
+
+def test_with_resume_swaps_the_parts_and_keeps_the_rest() -> None:
+    stored = {"title": 0.3, "stack": 0.25, "llm": -0.05, "applicants": None, "total": 0.5}
+    total, breakdown = with_resume(stored, resume=0.1, stack=None)
+    assert total == pytest.approx(0.35)
+    assert breakdown == {
+        "title": 0.3,
+        "stack": None,
+        "llm": -0.05,
+        "applicants": None,
+        "resume": 0.1,
+        "total": 0.35,
+    }
+
+    total, restored = with_resume(breakdown, resume=None, stack=0.2)
+    assert total == pytest.approx(0.45)
+    assert "resume" not in restored
+    assert restored["stack"] == pytest.approx(0.2)

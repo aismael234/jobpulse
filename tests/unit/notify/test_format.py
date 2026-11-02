@@ -7,6 +7,7 @@ from jobpulse.core.timeparse import start_of_day
 from jobpulse.notify.format import (
     PushContent,
     batch_notification,
+    breakdown_text,
     category_label,
     humanize_age,
     posting_notification,
@@ -160,3 +161,9 @@ def test_the_summary_counts_the_rest_per_filter() -> None:
     assert message.title == "+7 more matching your saved filters"
     assert message.body == "+7 more matching your saved filters: 🟢 4 · 🟣 3"
     assert message.click_url is None
+
+
+def test_breakdown_text_names_the_resume_part() -> None:
+    assert breakdown_text({"title": 0.3, "stack": None, "resume": 0.2, "total": 0.5}) == (
+        "title +0.30, resume +0.20"
+    )

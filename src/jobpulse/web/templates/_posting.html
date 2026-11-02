@@ -28,6 +28,7 @@
       {% if row.department %}<span>{{ row.department }}</span>{% endif %}
       {% if row.applicant_label %}<span>{{ row.applicant_label }}</span>{% endif %}
       {% if row.years_required is not none %}<span>asks {{ row.years_required }}+ yrs</span>{% endif %}
+      {% if row.resume_line %}<span class="resume" title="The resume line closest to this posting{% if row.resume_score is not none %} (match {{ "%.2f"|format(row.resume_score) }}){% endif %}">Resume: {{ row.resume_line|truncate(160, False, "…", 0) }}</span>{% endif %}
       {% if row.score_breakdown and "llm" in row.score_breakdown %}<span class="note" title="{{ row.tier_reason }}">LLM {{ "%+.2f"|format(row.score_breakdown["llm"]) }}</span>{% endif %}
       {% if row.notified_at %}<span class="note" title="{{ row.notified_at|local }}">pushed {{ row.notified_at|ago }}</span>{% endif %}
       {% if row.status != "New" and row.status_changed_at %}<span class="note moved" title="{{ row.status_changed_at|local }}">{{ row.status|lower }} {{ row.status_changed_at|ago }}</span>{% endif %}

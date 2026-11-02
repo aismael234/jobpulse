@@ -20,6 +20,7 @@ from jobpulse.core.detection import (
 from jobpulse.core.filters import Blocklist, FilterRules, LocationRules
 from jobpulse.core.models import FetchResult, Posting
 from jobpulse.core.scoring import Weights
+from jobpulse.core.similarity import ResumeMatch
 from jobpulse.core.timeparse import end_of_day, start_of_day
 from tests.factories import NOW, compiled, make_posting, weighted
 
@@ -314,3 +315,36 @@ def test_evaluate_judges_locations_that_enrichment_supplied() -> None:
     far = evaluate(make_posting(locations=("Austin, TX",)), context(rules=STRICT_LOCATIONS))
     assert near.tier == "instant"
     assert far.tier == "filtered"
+
+
+# --- M5b: resume similarity ----------------------------------------------------------
+
+CLOSE = ResumeMatch(score=0.8, line="Built Python services on Postgres")
+
+
+def test_evaluate_uses_the_resume_match_in_place_of_the_stack_part() -> None:
+    posting = make_posting(description_text="Python services.")
+    plain = evaluate(posting, context())
+    matched = evaluate(posting, context(resume=CLOSE))
+    assert plain.breakdown is not None
+    assert matched.breakdown is not None
+    assert plain.breakdown["stack"] == pytest.approx(0.25)
+    assert matched.breakdown["stack"] is None
+    assert matched.breakdown["resume"] == pytest.approx(0.25 * 0.8)
+    assert matched.score == pytest.approx((plain.score or 0) - 0.25 + 0.2)
+    assert (matched.resume_score, matched.resume_line) == (0.8, CLOSE.line)
+    assert (plain.resume_score, plain.resume_line) == (None, None)
+
+
+def test_evaluate_ignores_a_resume_match_without_a_description() -> None:
+    decision = evaluate(make_posting(description_text="  "), context(resume=CLOSE))
+    assert decision.breakdown is not None
+    assert "resume" not in decision.breakdown
+    assert decision.resume_score is None
+
+
+def test_a_filtered_posting_carries_no_resume_match() -> None:
+    posting = make_posting(title="Engineering Manager", description_text="Python.")
+    decision = evaluate(posting, context(resume=CLOSE))
+    assert decision.tier == "filtered"
+    assert decision.resume_score is None

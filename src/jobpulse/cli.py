@@ -9,6 +9,7 @@ from typing import Annotated, NoReturn
 
 import typer
 import uvicorn
+from sqlalchemy.orm import Session, sessionmaker
 
 from jobpulse import __version__
 from jobpulse.board_import import ImportReport, import_boards, read_links, render_import
@@ -21,21 +22,36 @@ from jobpulse.config import (
     company_blocklist,
     config_warnings,
     dashboard_credentials,
+    filter_rules,
     load_config,
     load_settings,
     require_secrets,
     resolve_config_path,
+    scoring_weights,
 )
 from jobpulse.core.filters import Blocklist
+from jobpulse.core.similarity import resume_lines
 from jobpulse.core.timeparse import utcnow
 from jobpulse.db import migrate, repo
+from jobpulse.db import resume as resume_db
 from jobpulse.db.session import display_url, resolve_database_url, session_scope
 from jobpulse.devtools.fixtures import FixtureScraper, FixtureTransport
+from jobpulse.embeddings.base import EmbedderUnavailable
+from jobpulse.embeddings.fastembed import DEFAULT_CACHE_DIR, DEFAULT_MODEL, download_model
 from jobpulse.logging_setup import configure_logging
+from jobpulse.resume_files import ResumeFileError, read_resume_file
+from jobpulse.resume_scoring import (
+    backfill,
+    missing_vectors,
+    refresh_resume,
+    rescore,
+    restore_stack,
+)
 from jobpulse.runtime import (
     KNOWN_SOURCES,
     DatabaseNotReady,
     WorkerStalled,
+    build_embedder,
     build_http,
     open_database,
     poll_once,
@@ -59,10 +75,17 @@ config_app = typer.Typer(help="Validate configuration.", no_args_is_help=True)
 db_app = typer.Typer(help="Database migrations.", no_args_is_help=True)
 companies_app = typer.Typer(help="Watchlist companies.", no_args_is_help=True)
 notify_app = typer.Typer(help="Notification channels.", no_args_is_help=True)
+embeddings_app = typer.Typer(help="The local embedding model.", no_args_is_help=True)
+resume_app = typer.Typer(
+    help="The resume postings are compared with (in place of stack keywords).",
+    no_args_is_help=True,
+)
 app.add_typer(config_app, name="config")
 app.add_typer(db_app, name="db")
 app.add_typer(companies_app, name="companies")
 app.add_typer(notify_app, name="notify")
+app.add_typer(embeddings_app, name="embeddings")
+app.add_typer(resume_app, name="resume")
 
 
 @dataclass(frozen=True)
@@ -399,6 +422,174 @@ def notify_test(ctx: typer.Context) -> None:
     if not channels:
         _fail("no notification channels configured (notify.channels in config.yaml)")
     typer.echo(f"test notification sent via {', '.join(channels)}")
+
+
+@embeddings_app.command("download")
+def embeddings_download(
+    cache_dir: Annotated[
+        Path, typer.Option("--cache-dir", help="Where to keep the model.")
+    ] = DEFAULT_CACHE_DIR,
+) -> None:
+    """Download the embedding model from Hugging Face (the only command that downloads it)."""
+    typer.echo(f"Downloading {DEFAULT_MODEL} into {cache_dir} ...")
+    try:
+        model = download_model(DEFAULT_MODEL, cache_dir)
+    except Exception as exc:  # network, disk or Hugging Face errors: report, don't trace
+        _fail(f"download failed ({type(exc).__name__}: {exc})")
+    typer.echo(f"{model} is ready in {cache_dir}")
+
+
+def _plural(number: int, singular: str, plural: str) -> str:
+    return f"{number} {singular if number == 1 else plural}"
+
+
+def _sessions(state: CliState, config: AppConfig | None = None) -> sessionmaker[Session]:
+    try:
+        return open_database(_database_url(state, config))
+    except DatabaseNotReady as exc:
+        _fail(exc)
+
+
+@resume_app.command("set")
+def resume_set(
+    ctx: typer.Context,
+    file: Annotated[
+        Path,
+        typer.Argument(help="Your resume: .pdf, .docx, .txt or .md, at most 2 MB.", dir_okay=False),
+    ],
+) -> None:
+    """Store a resume, replacing any other. Postings are compared with its content lines;
+    headings and contact details are left out."""
+    state = _state(ctx)
+    try:
+        read = read_resume_file(file)
+    except ResumeFileError as exc:
+        _fail(exc)
+    lines = resume_lines(read.text)
+    if not lines:
+        _fail(f"no content lines found in {file.name}: use bullets or full sentences")
+    with session_scope(_sessions(state)) as session:
+        resume_db.put(
+            session,
+            filename=file.name,
+            media_type=read.media_type,
+            text=read.text,
+            lines=lines,
+            now=utcnow(),
+        )
+    typer.echo(f"{file.name}: {_plural(len(lines), 'content line', 'content lines')} stored.")
+    typer.echo(
+        "The worker embeds it and re-scores open matches on its next cycle; to do it now, run "
+        "`jobpulse resume rescore --backfill`."
+    )
+
+
+@resume_app.command("show")
+def resume_show(
+    ctx: typer.Context,
+    lines: Annotated[bool, typer.Option("--lines", help="List the content lines too.")] = False,
+) -> None:
+    """Show the stored resume: file, content lines, model and the last re-score."""
+    with session_scope(_sessions(_state(ctx))) as session:
+        stored = resume_db.get(session)
+    if stored is None:
+        typer.echo("no resume stored; run `jobpulse resume set FILE`")
+        return
+    typer.echo(
+        f"{stored.filename} ({stored.media_type}), set {stored.uploaded_at:%Y-%m-%d %H:%M} UTC: "
+        f"{_plural(len(stored.lines), 'content line', 'content lines')}"
+    )
+    if stored.embed_model is None:
+        typer.echo("not embedded yet: the worker does it on its next cycle")
+    else:
+        typer.echo(f"embedded with {stored.embed_model}")
+    if stored.rescored_at is not None:
+        low, high = stored.anchors
+        measured = (
+            f"measured on {stored.anchor_count} matches" if stored.anchor_count else "defaults"
+        )
+        typer.echo(
+            f"open matches re-scored {stored.rescored_at:%Y-%m-%d %H:%M} UTC; "
+            f"anchors {low:.3f}-{high:.3f} ({measured})"
+        )
+    if lines:
+        for line in stored.lines:
+            typer.echo(f"  - {line}")
+
+
+@resume_app.command("clear")
+def resume_clear(ctx: typer.Context) -> None:
+    """Delete the resume; open matches go back to the stack keywords."""
+    state = _state(ctx)
+    config = _load_config(state)
+    with session_scope(_sessions(state, config)) as session:
+        if not resume_db.clear(session):
+            typer.echo("no resume stored")
+            return
+        restored = restore_stack(
+            session, rules=filter_rules(config), weights=scoring_weights(config)
+        )
+    typer.echo(
+        f"resume cleared; {_plural(restored, 'open match', 'open matches')} back on stack keywords"
+    )
+
+
+@resume_app.command("rescore")
+def resume_rescore(
+    ctx: typer.Context,
+    fill: Annotated[
+        bool,
+        typer.Option(
+            "--backfill",
+            help="First embed open matches whose description has no vector yet (about 16 a "
+            "second).",
+        ),
+    ] = False,
+) -> None:
+    """Re-score open New and Saved matches against the stored resume now, instead of at the
+    worker's next cycle."""
+    state = _state(ctx)
+    config = _load_config(state)
+    embedder = build_embedder(config)
+    if embedder is None:
+        _fail("resume similarity is off (embeddings.enabled is false, or fastembed is missing)")
+    with session_scope(_sessions(state, config)) as session:
+        stored = resume_db.get(session)
+        if stored is None or not stored.lines:
+            _fail("no resume stored; run `jobpulse resume set FILE` first")
+        try:
+            if refresh_resume(session, embedder):
+                typer.echo(f"embedded the resume with {embedder.model}")
+            session.commit()
+            if fill:
+
+                def progress(done: int) -> None:
+                    session.commit()
+                    typer.echo(f"  {done} embedded")
+
+                count = backfill(session, embedder, now=utcnow(), progress=progress)
+                typer.echo(f"embedded {_plural(count, 'description', 'descriptions')}")
+            elif missing := len(missing_vectors(session, embedder.model)):
+                typer.echo(
+                    f"{_plural(missing, 'open match has', 'open matches have')} no vector yet; "
+                    "run with --backfill to embed them first"
+                )
+        except EmbedderUnavailable as exc:
+            _fail(exc)
+        result = rescore(
+            session, rules=filter_rules(config), weights=scoring_weights(config), now=utcnow()
+        )
+    restored = (
+        f"; {_plural(result.restored, 'match', 'matches')} back on stack keywords"
+        if result.restored
+        else ""
+    )
+    anchors = (
+        f"anchors measured on {result.measured_on}" if result.measured_on else "default anchors"
+    )
+    typer.echo(
+        f"re-scored {_plural(result.rescored, 'open match', 'open matches')} ({anchors}){restored}"
+    )
 
 
 @app.command()

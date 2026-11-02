@@ -14,6 +14,8 @@ from jobpulse.config import AppConfig, Settings, location_aliases, read_resume
 from jobpulse.db import migrate
 from jobpulse.db.session import create_engine_for, display_url, make_session_factory
 from jobpulse.discovery import Discoverer
+from jobpulse.embeddings.base import Embedder, EmbedderUnavailable, LazyEmbedder
+from jobpulse.embeddings.fastembed import DEFAULT_MODEL, FastEmbedEmbedder, model_id
 from jobpulse.httpclient import HttpClient, RetryPolicy, build_user_agent
 from jobpulse.llm.claude import ClaudeClient
 from jobpulse.llm.scorer import LlmScorer
@@ -185,6 +187,20 @@ def build_llm(config: AppConfig, settings: Settings, *, dry_run: bool = False) -
     )
 
 
+def build_embedder(config: AppConfig) -> Embedder | None:
+    """The embedding model behind resume similarity, loaded only when first used (a resume is
+    stored). ``None`` when ``embeddings.enabled`` is false or fastembed isn't installed."""
+    if not config.embeddings.enabled:
+        return None
+    cache_dir = config.embeddings.cache_dir
+    try:
+        model = model_id(DEFAULT_MODEL)
+    except EmbedderUnavailable as exc:
+        log.warning("resume similarity is off: %s", exc)
+        return None
+    return LazyEmbedder(model, lambda: FastEmbedEmbedder(DEFAULT_MODEL, cache_dir))
+
+
 def build_notifier(http: HttpClient, config: AppConfig, settings: Settings) -> Notifier | None:
     """The enabled channels whose secrets are set; ``None`` when there are none."""
     channels: list[Notifier] = []
@@ -233,6 +249,7 @@ async def poll_once(
                 notifier=None if dry_run else build_notifier(http, config, settings),
                 discoverer=build_discoverer(http, config),
                 llm=llm,
+                embedder=build_embedder(config),
             )
             return await poller.run_cycle(sources=sources, target_key=target, dry_run=dry_run)
     finally:
@@ -303,6 +320,7 @@ def render_report(report: CycleReport) -> list[str]:
             "(raise it, or block companies you don't want)"
         )
     lines.extend(_llm_lines(report))
+    lines.extend(_resume_lines(report))
     if report.pruned_runs:
         lines.append(
             f"housekeeping: deleted {_count(report.pruned_runs, 'run')} older than "
@@ -310,6 +328,23 @@ def render_report(report: CycleReport) -> list[str]:
         )
     if report.dry_run:
         lines.append("dry run: rolled back")
+    return lines
+
+
+def _resume_lines(report: CycleReport) -> list[str]:
+    lines: list[str] = []
+    if report.resume_rescored:
+        lines.append(
+            f"resume: re-scored {_count(report.resume_rescored, 'open match', 'open matches')}"
+        )
+    if report.resume_matched:
+        cached = report.resume_matched - report.resume_embedded
+        lines.append(
+            f"resume: {_count(report.resume_matched, 'match', 'matches')} scored "
+            f"({report.resume_embedded} embedded, {max(0, cached)} from the cache)"
+        )
+    if report.resume_failed:
+        lines.append(f"resume: {report.resume_failed}; stack keywords used instead")
     return lines
 
 
@@ -348,6 +383,7 @@ async def run_worker(*, config: AppConfig, settings: Settings, database_url: str
             notifier=notifier,
             discoverer=build_discoverer(http, config),
             llm=llm,
+            embedder=build_embedder(config),
         )
 
         async def run(job: str, sources: tuple[str, ...]) -> None:

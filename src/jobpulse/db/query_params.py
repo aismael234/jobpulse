@@ -28,6 +28,7 @@ SORTS: dict[str, SortOrder] = {
     "fresh": "fresh",
     "pushed": "pushed",
     "moved": "moved",
+    "resume": "resume",
 }
 CONTRACTS: dict[str, ContractFilter] = {value: value for value, _ in CONTRACT_CHOICES}
 _SOURCES = frozenset(get_args(SourceName))

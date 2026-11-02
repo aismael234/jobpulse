@@ -14,6 +14,7 @@ from jobpulse.core.scoring import (
     freshness_component,
     score,
 )
+from jobpulse.core.similarity import ResumeMatch
 from jobpulse.core.timeparse import end_of_day
 
 
@@ -44,6 +45,7 @@ class EvaluationContext:
     weights: Weights
     company_priority: float = 0.0
     applicant_cap: int = 200  # applicant counts scale against this (scoring.applicant_cap)
+    resume: ResumeMatch | None = None  # the posting against the stored resume (M5b)
 
 
 def can_drive_closures(result: FetchResult) -> bool:
@@ -165,6 +167,8 @@ def evaluate(posting: Posting, ctx: EvaluationContext) -> Decision:
         )
     title = check_title(posting.title, ctx.rules)
     age = posting_age(posting, first_seen_at=ctx.first_seen_at, now=ctx.now)
+    has_description = bool(posting.description_text and posting.description_text.strip())
+    resume = ctx.resume if has_description else None
     total, breakdown = score(
         ScoreInputs(
             freshness=freshness_component(age, ctx.freshness),
@@ -177,6 +181,7 @@ def evaluate(posting: Posting, ctx: EvaluationContext) -> Decision:
                 if posting.applicants is not None
                 else None
             ),
+            resume=resume.score if resume is not None else None,
         ),
         ctx.weights,
     )
@@ -189,4 +194,6 @@ def evaluate(posting: Posting, ctx: EvaluationContext) -> Decision:
         score=total,
         breakdown=breakdown,
         years_required=description.years_required,
+        resume_score=resume.score if resume is not None else None,
+        resume_line=resume.line if resume is not None else None,
     )

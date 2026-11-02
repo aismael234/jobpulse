@@ -24,8 +24,10 @@ from jobpulse.config import SIMPLIFY_NEW_GRAD_URL, AppConfig, SearchEntry
 from jobpulse.core.dedupe import canonicalize_url
 from jobpulse.core.locations import normalize_locations
 from jobpulse.core.models import FetchResult, Posting, Target
+from jobpulse.core.similarity import resume_lines
 from jobpulse.core.timeparse import utcnow
 from jobpulse.db import repo, saved_filters
+from jobpulse.db import resume as resume_db
 from jobpulse.db.query_params import filter_params, parse_query
 from jobpulse.db.session import create_engine_for, make_session_factory
 from jobpulse.db.tables import (
@@ -309,6 +311,7 @@ class Env:
     adapters: dict[str, Any]
     discoverer: Discoverer | None = None
     llm: LlmScorer | None = None
+    embedder: Any = None  # resume similarity (M5b): a tests.factories.FakeEmbedder
     # Title lines of every match pushed by env.poll(); each cycle's go out as one message.
     pushed: list[str] = field(default_factory=list)
     sleep: FakeSleep = field(default_factory=FakeSleep)  # spacing between saved-filter pushes
@@ -322,7 +325,25 @@ class Env:
             discoverer=self.discoverer,
             llm=self.llm,
             sleep=self.sleep,
+            embedder=self.embedder,
         )
+
+    def set_resume(self, text: str, *, filename: str = "resume.txt") -> None:
+        """Store a resume as `jobpulse resume set` does; the next cycle embeds and re-scores."""
+        with self.sessions() as session:
+            resume_db.put(
+                session,
+                filename=filename,
+                media_type="text/plain",
+                text=text,
+                lines=resume_lines(text),
+                now=NOW - timedelta(minutes=5),
+            )
+            session.commit()
+
+    def resume(self) -> resume_db.StoredResume | None:
+        with self.sessions() as session:
+            return resume_db.get(session)
 
     def save_filter(
         self,
