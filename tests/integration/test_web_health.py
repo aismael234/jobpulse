@@ -166,3 +166,13 @@ def test_targets_that_are_no_longer_polled_are_marked(make_web: Callable[..., We
     assert "not polled" in row(page, "ashby", "old")
     assert "never run" in row(page, "linkedin", "backend-sf")
     assert "not polled" not in row(page, "linkedin", "backend-sf")
+
+
+def test_the_seed_sync_is_a_target_while_seed_remote_is_on(make_web: Callable[..., Web]) -> None:
+    web = make_web(config=make_config(seed={"remote": True}))
+    page = web.page("/health")
+    assert "never run" in row(page, "seed", "remote")
+    run(web, "seed", "remote", NOW - timedelta(hours=2), fetched_count=350, new_count=3)
+    shown = row(web.page("/health"), "seed", "remote")
+    assert "not polled" not in shown
+    assert "350" in shown

@@ -39,6 +39,7 @@ from jobpulse.core.countries import country_code
 from jobpulse.core.dedupe import normalize_company
 from jobpulse.core.locations import DEFAULT_SHORT_LABELS, merge_aliases
 from jobpulse.core.scoring import Weights
+from jobpulse.data import agency_names
 
 DEFAULT_CONFIG_PATH = Path("config.yaml")
 DEFAULT_ENV_FILE = Path(".env")
@@ -46,6 +47,10 @@ DEFAULT_DATABASE_URL = "sqlite:///data/jobpulse.db"
 SIMPLIFY_NEW_GRAD_URL = (
     "https://raw.githubusercontent.com/SimplifyJobs/New-Grad-Positions/dev/.github/scripts/"
     "listings.json"
+)
+# The seed installs sync from once the repository is public (M7, `seed.remote`).
+DEFAULT_SEED_URL = (
+    "https://raw.githubusercontent.com/aismael234/jobpulse/main/src/jobpulse/data/seed/boards.json"
 )
 PLACEHOLDER = "<SET ME>"
 EXAMPLE_CONTACT_EMAIL = "you@example.com"
@@ -457,6 +462,22 @@ class DiscoveryConfig(_Model):
     max_page_fetches_per_cycle: int = Field(default=5, ge=0, le=50)
 
 
+class SeedConfig(_Model):
+    """The public seed: once a day, a watchlist cycle fetches it and adds its new boards."""
+
+    remote: bool = False  # off until the repository is public
+    url: str = DEFAULT_SEED_URL
+    max_bytes: int = Field(default=2_000_000, ge=1, le=20_000_000)
+    max_new_boards: int = Field(default=100, ge=1, le=1000)  # validated per sync; more wait
+
+    @field_validator("url")
+    @classmethod
+    def _https(cls, value: str) -> str:
+        if not value.startswith("https://"):
+            raise ValueError("must be an https:// URL")
+        return value
+
+
 class BlocklistConfig(_Model):
     companies: list[CompanyName] = []
     boards: list[BoardRef] = []
@@ -489,6 +510,7 @@ PROFILE_KEYS = (
     "notify",
     "searches",
     "blocklist",
+    "hide_agencies",
     "llm",
 )
 MOVED_KEYS = (*PROFILE_KEYS, "watchlist")
@@ -511,6 +533,7 @@ class InfraConfig(_Model):
     retention: RetentionConfig = RetentionConfig()
     dashboard: DashboardConfig = DashboardConfig()
     embeddings: EmbeddingsConfig = EmbeddingsConfig()
+    seed: SeedConfig = SeedConfig()
 
     @model_validator(mode="after")
     def _job_pages_wait_within_freshness(self) -> Self:
@@ -546,6 +569,7 @@ class Profile(_Model):
     notify: NotifyConfig = NotifyConfig()
     searches: list[SearchEntry] = []
     blocklist: BlocklistConfig = BlocklistConfig()
+    hide_agencies: bool = True  # block the staffing agencies in data/seed/agencies.json
     llm: LlmConfig = LlmConfig()
 
     @field_validator("contact_email")
@@ -1024,8 +1048,10 @@ def filter_rules(config: Profile) -> core_filters.FilterRules:
 
 
 def company_blocklist(config: Profile) -> core_filters.Blocklist:
+    """The profile's blocklist, with the staffing agencies while ``hide_agencies`` is on."""
+    agencies = agency_names() if config.hide_agencies else ()
     return core_filters.Blocklist.build(
-        companies=config.blocklist.companies, boards=config.blocklist.boards
+        companies=[*config.blocklist.companies, *agencies], boards=config.blocklist.boards
     )
 
 

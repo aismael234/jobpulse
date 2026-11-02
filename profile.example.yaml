@@ -90,6 +90,10 @@ blocklist:
   companies: []                 # e.g. [Jobot, Revature]
   boards: []                    # e.g. [greenhouse/spacex]
 
+# Block the staffing agencies jobpulse ships a list of (data/seed/agencies.json), as if they
+# were in blocklist.companies: their postings are never pushed or shown outside Applied.
+hide_agencies: true
+
 # An optional second opinion from Claude on postings whose score is within `band` of
 # instant_threshold: the level the role hires for, its backend focus and your resume's fit move
 # the score by up to scoring.weights.llm. The postings and your resume (the one uploaded on

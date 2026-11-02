@@ -427,6 +427,21 @@ def test_0009_adds_the_profile_and_secrets_tables(db_url: str) -> None:
     assert not {"profile", "secrets"} & set(inspect(engine).get_table_names())
 
 
+def test_0010_adds_the_seed_state_table(db_url: str) -> None:
+    config = alembic_config(db_url)
+    command.upgrade(config, "0009")
+    command.upgrade(config, "0010")
+    engine = create_engine(db_url)
+    assert "seed_state" in set(inspect(engine).get_table_names())
+    row = "INSERT INTO seed_state (id, url, checked_at) VALUES ({id}, 'https://x', '2026-11-01')"
+    with engine.begin() as connection:
+        connection.execute(text(row.format(id=1)))
+    with pytest.raises(IntegrityError), engine.begin() as connection:
+        connection.execute(text(row.format(id=2)))
+    command.downgrade(config, "0009")
+    assert "seed_state" not in set(inspect(engine).get_table_names())
+
+
 def test_cli_db_upgrade_uses_database_url(tmp_path: Path, db_url: str) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text("contact_email: dev@example.com\n", encoding="utf-8")

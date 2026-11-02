@@ -339,6 +339,7 @@ class Env:
     discoverer: Discoverer | None = None
     llm: LlmScorer | None = None
     embedder: Any = None  # resume similarity (M5b): a tests.factories.FakeEmbedder
+    seed_sync: Any = None  # the public seed's daily sync (M7): a jobpulse.seed.SeedSync
     # Title lines of every match pushed by env.poll(); each cycle's go out as one message.
     pushed: list[str] = field(default_factory=list)
     sleep: FakeSleep = field(default_factory=FakeSleep)  # spacing between saved-filter pushes
@@ -368,6 +369,7 @@ class Env:
             sleep=self.sleep,
             embedder=self.embedder,
             on_profile=follow_profile(self.http, self.aliases),
+            seed_sync=self.seed_sync,
         )
 
     def set_resume(self, text: str, *, filename: str = "resume.txt") -> None:

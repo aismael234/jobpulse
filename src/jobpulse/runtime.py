@@ -29,6 +29,7 @@ from jobpulse.scheduler import (
     Worker,
     cadences_from_config,
 )
+from jobpulse.seed import SeedSync
 from jobpulse.sources.ashby import AshbyAdapter
 from jobpulse.sources.ats_detect import AtsDetector
 from jobpulse.sources.base import SourceAdapter
@@ -168,6 +169,13 @@ def build_discoverer(http: HttpClient, config: InfraConfig) -> Discoverer | None
     )
 
 
+def build_seed_sync(http: HttpClient, config: InfraConfig) -> SeedSync | None:
+    """The public seed's daily sync, while ``seed.remote`` is on."""
+    if not config.seed.remote:
+        return None
+    return SeedSync(http, AtsDetector(http), config.seed)
+
+
 def build_embedder(config: InfraConfig) -> Embedder | None:
     """The embedding model behind resume similarity, loaded only when first used (a resume is
     stored). ``None`` when ``embeddings.enabled`` is false or fastembed isn't installed."""
@@ -216,6 +224,7 @@ def build_poller(
         llm=llm,
         embedder=build_embedder(infra),
         on_profile=follow_profile(http, aliases),
+        seed_sync=build_seed_sync(http, infra),
     )
 
 
@@ -313,6 +322,7 @@ def render_report(report: CycleReport) -> list[str]:
             f"discovery: {boards} not added: discovery.max_auto_companies reached "
             "(raise it, or block companies you don't want)"
         )
+    lines.extend(_seed_lines(report))
     lines.extend(_llm_lines(report))
     lines.extend(_resume_lines(report))
     if report.pruned_runs:
@@ -322,6 +332,29 @@ def render_report(report: CycleReport) -> list[str]:
         )
     if report.dry_run:
         lines.append("dry run: rolled back")
+    return lines
+
+
+def _seed_lines(report: CycleReport) -> list[str]:
+    seed = report.seed
+    if seed is None:
+        return []
+    if seed.problem:
+        return [f"seed: sync FAILED: {seed.problem}"]
+    if seed.not_modified:
+        return ["seed: unchanged since the last sync (304)"]
+    lines = [
+        f"seed: {_count(seed.boards, 'board')} in the public seed, "
+        f"added {len(seed.added)}, paused {len(seed.retired)}"
+    ]
+    lines.extend(f"seed: added {label}" for label in seed.added)
+    lines.extend(f"seed: paused {label} (removed from the seed)" for label in seed.retired)
+    lines.extend(f"seed: skipped {line}" for line in seed.skipped)
+    if seed.capped:
+        lines.append(
+            f"seed: {_count(seed.capped, 'more new board waits', 'more new boards wait')} for the "
+            "next sync (seed.max_new_boards)"
+        )
     return lines
 
 

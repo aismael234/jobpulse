@@ -38,6 +38,7 @@ from jobpulse.config import (
 )
 from jobpulse.core.filters import Blocklist
 from jobpulse.credentials import env_secrets
+from jobpulse.data import agency_names
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 EXAMPLE_CONFIG = REPO_ROOT / "config.example.yaml"
@@ -449,7 +450,10 @@ def test_discovery_narrowing_and_blocklist_defaults(tmp_path: Path) -> None:
     assert config.discovery.max_auto_companies == 50
     assert config.blocklist.companies == []
     assert config.blocklist.boards == []
-    assert company_blocklist(config) == Blocklist()
+    # hide_agencies is on by default: the staffing agencies are the whole base
+    assert config.hide_agencies is True
+    assert company_blocklist(config) == Blocklist.build(companies=agency_names())
+    assert company_blocklist(config.model_copy(update={"hide_agencies": False})) == Blocklist()
 
 
 @pytest.mark.parametrize(
@@ -520,7 +524,7 @@ def test_the_blocklist_compiles_into_the_filter_rules(tmp_path: Path) -> None:
     )
     blocklist = company_blocklist(config)
     assert blocklist == Blocklist.build(
-        companies=["Jobot", "Revature"], boards=["greenhouse/spacex"]
+        companies=["Jobot", "Revature", *agency_names()], boards=["greenhouse/spacex"]
     )
     assert filter_rules(config).blocklist == blocklist
 

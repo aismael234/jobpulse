@@ -168,6 +168,8 @@ Never use `tailscale funnel` for this: it would put the dashboard on the public 
 - **Workday** boards have a token `<tenant>.wd<N>/<site>` and keywords: for `https://nvidia.wd5.myworkdayjobs.com/en-US/NVIDIAExternalCareerSite` the token is `nvidia.wd5/NVIDIAExternalCareerSite` (pasting the URL works too). Big tenants have thousands of jobs, so give them `keywords`: each one is a search on the board, and only its matches are polled. A board searched by keyword never closes postings (it never sees the whole board); one without keywords is paged through, at most `workday.max_pages` (25) pages of 20 jobs, and closes jobs only after a full read. Changing the keywords starts a new silent baseline.
 - **From the dashboard:** paste a board, job or careers-page URL on the Watchlist page. jobpulse recognizes the board from the URL, or reads the page once to find a Greenhouse, Lever, Ashby or Workday link or embed. It checks the board with one API call, shows the company and its open jobs, and adds it with the priority (and, for Workday, the keywords) you choose.
 - **From a file:** `uv run jobpulse companies import FILE --workday-keywords "software engineer, full stack"` adds the boards behind a file's links, for example an export from another job service. In JSON, every value that is a URL counts, with the company name beside it; in any other text, every URL. Each board is checked like a pasted URL (blocklist, one validation call, `discovery.max_board_jobs`), and `--dry-run` shows what would be added. Workday boards are searched for the keywords; a keyword is dropped for a board when it finds more jobs than a poll reads (`workday.max_pages` pages of 20), or when it costs more than one page and nothing on its first page passes your title rules (Workday's search is fuzzy: "full stack" finds a bank's "Full Time" jobs). Imported companies show as `import`.
+- **From the seed:** `uv run jobpulse companies seed apply` adds the boards that ship with jobpulse (`src/jobpulse/data/seed/boards.json`, built from a real watchlist less staffing agencies) that you don't have yet; `--dry-run` shows what would change. Known, blocked and paused boards are skipped, and Workday boards keep only the keywords that fit what a poll reads (software engineer, full stack, backend engineer, machine learning engineer). Seed companies show as `seed`. With `seed.remote` on (off until the repository is public), a watchlist cycle fetches the latest seed once a day and adds new boards the same way, each validated once.
+- **Back to the seed:** `uv run jobpulse companies contribute [--out FILE]` writes the boards you added that the seed lacks, in the seed's format, with the steps for a pull request.
 - **Automatically:** discovery adds boards linked from the SimplifyJobs feed and job-board postings when one of their postings passes your title and location filters. It adds at most `discovery.max_auto_companies` (50) and skips boards with more than `max_board_jobs` (1,000) open jobs. `uv run jobpulse companies list` shows where each company came from.
 
 Every new company's first poll is a silent baseline. Workday boards are never added by discovery. To never hear about a company again, block it from one of its cards, or add it to `blocklist.companies` in your profile (a board to `blocklist.boards`): its postings are kept but never pushed, and discovery leaves it alone.
@@ -214,6 +216,7 @@ Optional; every key has a default. `config.example.yaml` documents them all.
 | `retention` | How long the run history behind the Health page is kept (30 days). |
 | `dashboard` | Address and port of `jobpulse web`. |
 | `embeddings` | The local model behind resume similarity: on/off and where it's cached. |
+| `seed` | The daily sync of the public board seed (`remote`, off for now), its URL and limits. |
 
 A preference section left in `config.yaml` is an error that names it and says where it went.
 
@@ -230,6 +233,7 @@ Kept in the database and edited on Settings → Profile; `profile.example.yaml` 
 | `notify` | `channels`, ntfy server, priority and tags; `saved_filters` limits one-message-per-posting pushes (`max_per_cycle` 10, `max_per_day` 200, `spacing_seconds` 5). |
 | `searches` | Indeed and LinkedIn searches through JobSpy. |
 | `blocklist` | Companies and boards to stay away from (companies blocked from a card are listed on the Watchlist page). |
+| `hide_agencies` | Block the staffing agencies jobpulse ships a list of (on by default). |
 | `llm` | The optional LLM layer: on/off, model, effort, role, band, wanted levels, daily call cap. |
 
 Level, location and stack values in the example are placeholders; set your own. `jobpulse config check` validates config.yaml, the profile and the secrets.
@@ -259,6 +263,9 @@ Empty values count as unset. The four secrets above (ntfy topic and token, Disco
 | `jobpulse web [--host H] [--port P]` | The dashboard. |
 | `jobpulse companies list` | The watchlist with origin and baseline state. |
 | `jobpulse companies import FILE [--workday-keywords K] [--priority N] [--dry-run]` | Add the boards behind a file's links (see Adding companies). |
+| `jobpulse companies seed apply [--file F] [--dry-run]` | Add the seed's boards you don't have yet. |
+| `jobpulse companies seed export [--out F] [--add ats/token=Name]` | Build the seed from your watchlist (maintainers). |
+| `jobpulse companies contribute [--out F]` | Your boards the seed lacks, ready for a pull request. |
 | `jobpulse notify test` | One test push through every channel. |
 | `jobpulse db upgrade` / `current` | Apply migrations / show the revision. The other commands refuse a database that is behind. |
 | `jobpulse config check` | Validate `config.yaml`, the stored profile and the secrets your channels need. |

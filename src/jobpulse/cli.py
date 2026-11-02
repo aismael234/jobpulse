@@ -3,7 +3,7 @@
 import asyncio
 import ipaddress
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Annotated, NoReturn
 
@@ -71,6 +71,21 @@ from jobpulse.runtime import (
     run_worker,
     send_test_notification,
 )
+from jobpulse.seed import (
+    ExportReport,
+    Seed,
+    SeedError,
+    SeedPlan,
+    contribution,
+    export_seed,
+    packaged_seed,
+    parse_extra,
+    parse_seed,
+    plan_seed,
+    render_seed,
+    retirable,
+    write_seed,
+)
 from jobpulse.sources.ats_detect import AtsDetector
 from jobpulse.web.app import create_app
 
@@ -86,6 +101,7 @@ app = typer.Typer(
 config_app = typer.Typer(help="Validate configuration.", no_args_is_help=True)
 db_app = typer.Typer(help="Database migrations.", no_args_is_help=True)
 companies_app = typer.Typer(help="Watchlist companies.", no_args_is_help=True)
+seed_app = typer.Typer(help="The board seed every install starts from.", no_args_is_help=True)
 notify_app = typer.Typer(help="Notification channels.", no_args_is_help=True)
 embeddings_app = typer.Typer(help="The local embedding model.", no_args_is_help=True)
 resume_app = typer.Typer(
@@ -99,6 +115,7 @@ profile_app = typer.Typer(
 app.add_typer(config_app, name="config")
 app.add_typer(db_app, name="db")
 app.add_typer(companies_app, name="companies")
+companies_app.add_typer(seed_app, name="seed")
 app.add_typer(notify_app, name="notify")
 app.add_typer(embeddings_app, name="embeddings")
 app.add_typer(resume_app, name="resume")
@@ -445,6 +462,187 @@ def companies_import(
 
     for line in render_import(asyncio.run(run()), config=config):
         typer.echo(line)
+
+
+def _read_seed(path: Path | None) -> Seed:
+    try:
+        return packaged_seed() if path is None else parse_seed(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError) as exc:
+        _fail(f"couldn't read {path}: {exc}")
+    except SeedError as exc:
+        _fail(f"{path or 'the packaged seed'}: {exc}")
+
+
+@seed_app.command("apply")
+def seed_apply(
+    ctx: typer.Context,
+    file: Annotated[
+        Path | None,
+        typer.Option(
+            "--file", help="A seed file to apply instead of the packaged one.", dir_okay=False
+        ),
+    ] = None,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Say what would change; change nothing.")
+    ] = False,
+) -> None:
+    """Add the seed's boards you don't have yet (their first poll is silent) and pause the
+    seed boards it removed, unless you edited them. Workday boards are searched once per
+    keyword to keep only those that fit what a poll reads."""
+    state = _state(ctx)
+    infra = _load_infra(state)
+    seed = _read_seed(file)
+    sessions = _sessions(state, infra)
+    config = _app_config(state, infra, sessions, required=False)
+    _start_logging(state, config)
+    with sessions() as session:
+        known = repo.known_companies(session)
+        blocklist = repo.blocklist(session, company_blocklist(config))
+    rules = replace(filter_rules(config), blocklist=blocklist)
+
+    async def run() -> SeedPlan:
+        async with build_http(infra, contact_email=config.contact_email) as http:
+            return await plan_seed(
+                seed,
+                known=known,
+                blocklist=blocklist,
+                config=config,
+                rules=rules,
+                detector=AtsDetector(http),
+            )
+
+    plan = asyncio.run(run())
+    if dry_run:
+        added = [result.board.label for result in plan.add]
+        with sessions() as session:
+            retired = retirable(session, plan)
+    else:
+        with session_scope(sessions) as session:
+            added, retired = write_seed(session, plan, now=utcnow())
+    would = "would " if dry_run else ""
+    for label in added:
+        typer.echo(f"{would}add {label}")
+    for label in retired:
+        typer.echo(f"{would}pause {label} (removed from the seed)")
+    for result in plan.results:
+        if result.outcome != "add":
+            detail = f": {result.detail}" if result.detail else ""
+            typer.echo(
+                f"skipped {result.board.label} ({result.board.name}), {result.outcome}{detail}"
+            )
+    blocked = sum(result.outcome == "blocked" for result in plan.results)
+    left_out = sum(result.outcome in ("invalid", "too broad") for result in plan.results)
+    typer.echo(
+        f"{len(seed.boards):,} boards in the seed: {len(added):,} "
+        f"{'to add' if dry_run else 'added'}, {plan.known:,} already on your watchlist, "
+        f"{blocked:,} blocked, {left_out:,} left out; {len(retired):,} "
+        f"{'to pause' if dry_run else 'paused'}."
+    )
+    if added and not dry_run:
+        typer.echo("Their first poll stores the jobs they have now without notifying you.")
+
+
+def _write_or_print(text: str, out: Path | None) -> None:
+    if out is None:
+        typer.echo(text, nl=False)
+        return
+    try:
+        out.write_text(text, encoding="utf-8")
+    except OSError as exc:
+        _fail(f"couldn't write {out}: {exc}")
+
+
+@seed_app.command("export")
+def seed_export(
+    ctx: typer.Context,
+    out: Annotated[
+        Path | None,
+        typer.Option(
+            "--out",
+            help="Where to write the seed (its current content is the previous seed). "
+            "Without it, the seed goes to standard output.",
+            dir_okay=False,
+        ),
+    ] = None,
+    add: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--add",
+            help="A board to add, as ats/token or ats/token=Name (e.g. "
+            "greenhouse/anthropic=Anthropic); validated once. Repeat it for more.",
+        ),
+    ] = None,
+) -> None:
+    """Build the seed from your watchlist: active boards less staffing agencies and boards
+    whose latest run was a 4xx, without priorities or keywords."""
+    state = _state(ctx)
+    infra = _load_infra(state)
+    try:
+        extra = [parse_extra(value) for value in add or ()]
+    except ValueError as exc:
+        _fail(exc)
+    previous = _read_seed(out if out is not None and out.exists() else None)
+    sessions = _sessions(state, infra)
+    config = _app_config(state, infra, sessions, required=False)
+    _start_logging(state, config)
+
+    async def run() -> ExportReport:
+        async with build_http(infra, contact_email=config.contact_email) as http:
+            return await export_seed(
+                sessions=sessions, previous=previous, extra=extra, detector=AtsDetector(http)
+            )
+
+    report = asyncio.run(run())
+    _write_or_print(render_seed(report.seed), out)
+    notes = [
+        *(f"left out (staffing agency): {line}" for line in report.agencies),
+        *(f"left out (latest run a 4xx): {line}" for line in report.dead),
+        *(f"added: {line}" for line in report.extra_added),
+        *(f"already in the seed: {line}" for line in report.extra_known),
+        *(f"couldn't validate {line}" for line in report.extra_invalid),
+        *(f"review (looks like an agency): {line}" for line in report.flagged),
+        f"{len(report.seed.boards):,} boards and {len(report.seed.removed):,} removed in the "
+        f"seed ({report.carried:,} kept from the previous seed though not active here).",
+    ]
+    for note in notes:
+        typer.echo(note, err=True)
+
+
+CONTRIBUTE_STEPS = """To contribute them:
+  1. Fork https://github.com/aismael234/jobpulse and clone your fork.
+  2. Add these boards to src/jobpulse/data/seed/boards.json, one per line, keeping the list
+     sorted by ats and token.
+  3. Run `uv run pytest tests/unit/test_seed_file.py`, which checks the file.
+  4. Open a pull request.
+"""
+
+
+@companies_app.command("contribute")
+def companies_contribute(
+    ctx: typer.Context,
+    out: Annotated[
+        Path | None,
+        typer.Option(
+            "--out", help="Where to write the boards; standard output without it.", dir_okay=False
+        ),
+    ] = None,
+) -> None:
+    """Write the active boards you added that the seed lacks, in the seed's format, with the
+    steps to send them as a pull request."""
+    state = _state(ctx)
+    infra = _load_infra(state)
+    seed = _read_seed(None)
+    sessions = _sessions(state, infra)
+    with sessions() as session:
+        mine = contribution(session, seed)
+    if not mine.boards:
+        typer.echo("nothing to contribute: the seed has every board on your watchlist", err=True)
+        return
+    _write_or_print(render_seed(mine), out)
+    count = len(mine.boards)
+    where = f" in {out}" if out is not None else ""
+    typer.echo(f"{count:,} board{'s' if count != 1 else ''} the seed lacks{where}.", err=True)
+    typer.echo(CONTRIBUTE_STEPS, err=True, nl=False)
 
 
 @notify_app.command("test")

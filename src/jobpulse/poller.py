@@ -1,6 +1,7 @@
 """One poll cycle: read the profile, fetch, diff, dedupe, prescreen, enrich, decide (with
 resume similarity in place of the stack keywords when a resume is stored, and the LLM layer's
-second opinion near the threshold, when it's on), notify, check health, discover new boards.
+second opinion near the threshold, when it's on), notify, check health, discover new boards,
+and once a day in a watchlist cycle, sync the public seed (``seed.remote``).
 
 Preferences come from the database profile, read at the start of every cycle: a change on
 Settings applies from the next cycle, with no restart. Until a profile is onboarded, cycles
@@ -85,6 +86,7 @@ from jobpulse.resume_scoring import (
     rescore,
     resume_match,
 )
+from jobpulse.seed import SeedSync, SyncOutcome
 from jobpulse.sources.base import EnrichmentDeferred, SourceAdapter
 from jobpulse.sources.maintenance import Sleep
 
@@ -162,6 +164,7 @@ class CycleReport:
     resume_rescored: int = 0  # open matches re-scored at cycle start (the resume changed)
     resume_failed: str | None = None  # why the embedder couldn't be used: stack keywords instead
     rescored: int = 0  # open matches whose score changed with the profile's filters or scoring
+    seed: SyncOutcome | None = None  # the public seed's sync, when one ran this cycle
 
 
 @dataclass
@@ -212,6 +215,7 @@ class Poller:
         sleep: Sleep = asyncio.sleep,
         embedder: Embedder | None = None,
         on_profile: Callable[[AppConfig], None] | None = None,
+        seed_sync: SeedSync | None = None,
     ) -> None:
         """``on_profile`` is called with the composed config whenever a new profile revision
         is loaded (the runtime updates the adapters' location aliases and the User-Agent)."""
@@ -226,6 +230,7 @@ class Poller:
         self._embedder = embedder
         self._resume_lock = asyncio.Lock()  # one re-score at a time across concurrent cycles
         self._on_profile = on_profile
+        self._seed_sync = seed_sync
         self._health = (
             HealthMonitor(HealthRules.from_config(infra.health, infra.maintenance))
             if infra.health.enabled
@@ -317,6 +322,7 @@ class Poller:
             await self._notify(unit, report, sources)
             await self._check_health(unit, report)
             await self._discover(unit, report, sightings)
+            await self._sync_seed(unit, report, sources, target_key)
             self._prune_runs(unit, report)
             return report
         finally:
@@ -1065,6 +1071,30 @@ class Poller:
                 found.candidate.ref.ats, found.candidate.ref.token, found.validation.error,
             )  # fmt: skip
         unit.checkpoint()
+
+    async def _sync_seed(
+        self,
+        unit: _UnitOfWork,
+        report: CycleReport,
+        sources: Collection[str] | None,
+        target_key: str | None,
+    ) -> None:
+        """Once a day, in a cycle of the watchlist boards (never a dry run or a single
+        target): fetch the public seed and add its new boards, baseline pending."""
+        sync = self._seed_sync
+        if sync is None or report.dry_run or target_key is not None:
+            return
+        if sources is not None and not set(sources) & ATS_SOURCES:
+            return
+        if not sync.due(self._clock()):
+            return
+        report.seed = await sync.run(
+            unit.session,
+            unit.checkpoint,
+            config=self._config,
+            blocklist=self._blocklist,
+            rules=self._rules,
+        )
 
     def _prune_runs(self, unit: _UnitOfWork, report: CycleReport) -> None:
         """Delete runs older than ``retention.runs_days``, at most once a day, never in a

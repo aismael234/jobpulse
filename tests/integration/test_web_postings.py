@@ -403,3 +403,17 @@ def test_an_llm_second_opinion_shows_with_its_reason(web: Web) -> None:
     page = html.unescape(web.page("/"))
     assert page.count("LLM -0.09") == 1
     assert f'title="{reason}"' in page
+
+
+def test_staffing_agencies_are_hidden_while_hide_agencies_is_on(
+    make_web: Callable[..., Web],
+) -> None:
+    web = make_web()
+    agency = web.add(title="Backend Engineer", company_name="Motion Recruitment")
+    acme = web.add(title="Backend Engineer", company_name="Acme")
+    applied = web.add(title="Applied there", company_name="TalentHop", status="Applied")
+    assert web.ids() == [acme]
+    assert web.ids(view="applied") == [applied]
+
+    shown = make_web(config=make_config(hide_agencies=False))
+    assert sorted(shown.ids()) == sorted([agency, acme])

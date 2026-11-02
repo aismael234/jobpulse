@@ -138,6 +138,46 @@ def _counts(values: Sequence[tuple[str, int]]) -> str:
     return ", ".join(f"{keyword} ({count:,})" for keyword, count in values)
 
 
+@dataclass(frozen=True, slots=True)
+class KeywordCheck:
+    """What each keyword finds on a Workday board, sorted into kept and left out."""
+
+    kept: tuple[tuple[str, int], ...] = ()
+    dropped: tuple[tuple[str, int], ...] = ()  # more jobs than a poll reads
+    unmatched: tuple[tuple[str, int], ...] = ()  # pages of jobs, none passing the title rules
+    error: str | None = None  # a search failed
+
+
+async def check_workday_keywords(
+    detector: AtsDetector,
+    ref: AtsRef,
+    keywords: Sequence[str],
+    *,
+    cap: int,
+    rules: FilterRules,
+) -> KeywordCheck:
+    """Search each keyword once: one finding more than ``cap`` jobs (what a poll reads) is
+    dropped, and one costing more than a page is kept only when a title on its first page
+    passes ``rules``."""
+    kept: list[tuple[str, int]] = []
+    dropped: list[tuple[str, int]] = []
+    unmatched: list[tuple[str, int]] = []
+    for keyword in keywords:
+        search = await detector.workday_search(ref, keyword)
+        if not search.ok:
+            return KeywordCheck(error=search.error or "the search failed")
+        found = (keyword, search.job_count)
+        if search.job_count > cap:
+            dropped.append(found)
+        elif search.job_count > PAGE_LIMIT and not any(
+            check_title(title, rules).passed for title in search.titles
+        ):
+            unmatched.append(found)  # pages of noise every poll
+        else:
+            kept.append(found)
+    return KeywordCheck(tuple(kept), tuple(dropped), tuple(unmatched))
+
+
 async def _check(
     ref: AtsRef,
     link: Link,
@@ -169,36 +209,24 @@ async def _check(
                 detail=f"{count:,} open jobs, more than discovery.max_board_jobs ({limit:,})",
             )
         return BoardResult(ref, "would add", name, link.url, count)
-    cap = config.workday.max_pages * PAGE_LIMIT
-    kept: list[tuple[str, int]] = []
-    dropped: list[tuple[str, int]] = []
-    unmatched: list[tuple[str, int]] = []
-    for keyword in keywords:
-        search = await detector.workday_search(ref, keyword)
-        if not search.ok:
-            return BoardResult(ref, "invalid", name, link.url, count, detail=search.error or "")
-        found = (keyword, search.job_count)
-        if search.job_count > cap:
-            dropped.append(found)
-        elif search.job_count > PAGE_LIMIT and not any(
-            check_title(title, rules).passed for title in search.titles
-        ):
-            unmatched.append(found)  # pages of noise every poll
-        else:
-            kept.append(found)
-    if not kept:
+    check = await check_workday_keywords(
+        detector, ref, keywords, cap=config.workday.max_pages * PAGE_LIMIT, rules=rules
+    )
+    if check.error is not None:
+        return BoardResult(ref, "invalid", name, link.url, count, detail=check.error)
+    if not check.kept:
         return BoardResult(
             ref,
             "too broad",
             name,
             link.url,
             count,
-            dropped=tuple(dropped),
-            unmatched=tuple(unmatched),
+            dropped=check.dropped,
+            unmatched=check.unmatched,
             detail="no keyword fits",
         )
     return BoardResult(
-        ref, "would add", name, link.url, count, tuple(kept), tuple(dropped), tuple(unmatched)
+        ref, "would add", name, link.url, count, check.kept, check.dropped, check.unmatched
     )
 
 

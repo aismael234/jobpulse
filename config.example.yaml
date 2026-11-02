@@ -93,3 +93,12 @@ dashboard:
 embeddings:
   enabled: true                 # false on small hosts: the stack keywords stay
   cache_dir: data/models        # relative to where jobpulse runs
+
+# The public board seed: with `remote` on, a watchlist cycle fetches it once a day (with its
+# ETag) and adds the boards you lack, each validated once; their first poll is silent.
+# `jobpulse companies seed apply` adds the seed that ships with jobpulse.
+seed:
+  remote: false                 # off until the repository is public
+  url: https://raw.githubusercontent.com/aismael234/jobpulse/main/src/jobpulse/data/seed/boards.json
+  max_bytes: 2000000            # a bigger file applies nothing
+  max_new_boards: 100           # validated per sync; the rest wait for the next day

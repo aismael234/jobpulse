@@ -333,3 +333,17 @@ class SecretRow(Base):
     name: Mapped[str] = mapped_column(String(64), primary_key=True)
     value: Mapped[str] = mapped_column(Text)
     updated_at: Mapped[datetime]
+
+
+class SeedState(Base):
+    """The public seed's last sync (M7), one row: the ETag to send next, saved in the same
+    commit as the boards that sync added."""
+
+    __tablename__ = "seed_state"
+    __table_args__ = (CheckConstraint("id = 1", name="single_row"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=False)
+    url: Mapped[str] = mapped_column(Text)
+    etag: Mapped[str | None] = mapped_column(Text)
+    checked_at: Mapped[datetime]  # the last fetch, 304s included
+    synced_at: Mapped[datetime | None]  # the last fetch that brought a body and applied it

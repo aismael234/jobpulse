@@ -21,6 +21,8 @@ from jobpulse.credentials import SecretStore
 from jobpulse.httpclient import HttpClient
 from jobpulse.logging_setup import SecretRegistry
 from jobpulse.runtime import build_http
+from jobpulse.seed import REMOTE_TARGET
+from jobpulse.seed import SOURCE as SEED_SOURCE
 from jobpulse.sources.ats_detect import AtsDetector
 from jobpulse.web import routes
 from jobpulse.web.security import (
@@ -87,7 +89,8 @@ def create_app(
         templates=build_templates(store.registry),
         clock=clock,
         store=store,
-        feeds=[("simplify", infra.simplify.name)] if infra.simplify.enabled else [],
+        feeds=([("simplify", infra.simplify.name)] if infra.simplify.enabled else [])
+        + ([(SEED_SOURCE, REMOTE_TARGET)] if infra.seed.remote else []),
     )
 
     @asynccontextmanager

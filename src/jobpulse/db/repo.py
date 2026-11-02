@@ -55,6 +55,7 @@ from jobpulse.db.tables import (
     PostingRow,
     Run,
     Search,
+    SeedState,
     SourceState,
 )
 from jobpulse.llm.base import LlmReply
@@ -472,6 +473,71 @@ def add_discovered_company(
         discovered_from=discovered_from,
         now=now,
     )
+
+
+# --- the board seed (M7) ------------------------------------------------------------------
+
+
+def board_rows(session: Session) -> list[Company]:
+    """Every stored company, by board."""
+    return list(session.scalars(select(Company).order_by(Company.ats_type, Company.token)))
+
+
+def retirable_seed_companies(session: Session, keys: Collection[tuple[str, str]]) -> list[Company]:
+    """The seed's boards among ``keys`` (ats, lowercase token) that nobody edited: still
+    active, at priority 0."""
+    if not keys:
+        return []
+    rows = session.scalars(
+        select(Company).where(
+            Company.source_of_discovery == "seed",
+            Company.active.is_(True),
+            Company.priority == 0,
+        )
+    )
+    return [row for row in rows if (row.ats_type, row.token.lower()) in keys]
+
+
+def failing_boards(session: Session) -> set[tuple[str, str]]:
+    """(ats, lowercase token) of the boards whose latest run failed with a 4xx: gone, or
+    never readable."""
+    latest = (
+        select(func.max(Run.id))
+        .where(Run.source.in_(ATS_SOURCES))
+        .group_by(Run.source, Run.target)
+        .scalar_subquery()
+    )
+    rows = session.execute(
+        select(Run.source, Run.target).where(
+            Run.id.in_(latest), Run.ok.is_(False), Run.error_kind == "http_4xx"
+        )
+    )
+    return {(source, target.lower()) for source, target in rows}
+
+
+def seed_state(session: Session) -> SeedState | None:
+    return session.get(SeedState, 1)
+
+
+def save_seed_state(
+    session: Session,
+    *,
+    url: str,
+    etag: str | None,
+    checked_at: datetime,
+    synced_at: datetime | None = None,
+) -> None:
+    """Record a fetch of the seed; ``synced_at`` only when it brought a body and applied it."""
+    state = session.get(SeedState, 1)
+    if state is None:
+        state = SeedState(id=1, url=url, checked_at=checked_at)
+        session.add(state)
+    state.url = url
+    state.etag = etag
+    state.checked_at = checked_at
+    if synced_at is not None:
+        state.synced_at = synced_at
+    session.flush()
 
 
 # --- presence and closures --------------------------------------------------------------
@@ -1143,6 +1209,40 @@ def start_run(
     session.add(run)
     session.flush()
     return run.id
+
+
+def record_run(
+    session: Session,
+    *,
+    source: str,
+    target: str,
+    started_at: datetime,
+    finished_at: datetime,
+    ok: bool,
+    fetched: int = 0,
+    new: int = 0,
+    error: str | None = None,
+    error_kind: str | None = None,
+    not_modified: bool = False,
+    stats: dict[str, int] | None = None,
+) -> None:
+    """A finished run of something that isn't a poll target (the seed sync)."""
+    session.add(
+        Run(
+            source=source,
+            target=target,
+            started_at=started_at,
+            finished_at=finished_at,
+            ok=ok,
+            fetched_count=fetched,
+            new_count=new,
+            error=error[:MAX_ERROR_CHARS] if error else None,
+            error_kind=error_kind,
+            not_modified=not_modified,
+            stats=stats,
+        )
+    )
+    session.flush()
 
 
 def finish_run(
