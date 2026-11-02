@@ -229,7 +229,7 @@ The full plan, with decisions, code facts and a data snapshot, is in `/Users/ala
   - [x] the worker rebuilds its schedule within 30 s of a Sources & schedule change (`run_worker`/`_settings_changed`), keeping the lease;
   - [x] Settings tabs: Notifications (channel checkboxes, secrets, test push, color-blind), Job search, Saved filters (list only), Sources & schedule, Security, Advanced (LLM key, YAML); "Save these filters" is a form on the dashboard, Edit opens the dashboard with the filter;
   - [x] your install moved (your request): backup `data/jobpulse-before-m10.db`; profile revision 2 with `sources` (equal to the new defaults); the ntfy topic from .env now on Settings; config.yaml and .env deleted (copies `data/config-before-m10.yaml`, `data/env-before-m10`, 0600); running as one `jobpulse up` in the Terminal tab "jobpulse";
-  - [x] committed as `6792b3f` (your OK, 2026-11-02).
+  - [x] committed as `a2a2fb7` (your OK, 2026-11-02).
 
 ## Log
 
@@ -470,4 +470,4 @@ The full plan, with decisions, code facts and a data snapshot, is in `/Users/ala
   - **Checked:** a browser walkthrough on an empty scratch install: every tab, phone width without horizontal scroll, no console errors; a Sources & schedule save rebuilt the running worker's schedule (20 → 25 min) within 30 s.
   - **Your install:** rehearsed on a `.backup` copy first; then worker and web stopped, backup `data/jobpulse-before-m10.db` (integrity ok, 0011, 41,969 postings, profile revision 1), profile revision 2 written (the scoring hash didn't move, so nothing re-scored), the topic saved, config.yaml and .env deleted after copying them into `data/`; `uv run jobpulse up` started; every page answers 200; the first Simplify cycle ran normally.
   - **Tests:** 1,794 passed, 17 skipped. Rewritten on purpose: test_config (no files; Sources & schedule tests), test_cli_profile, test_web_profile (tabs, channels, sources), test_web_saved_filters (the dashboard form), test_web_security (password), CLI fixtures (`--data-dir`), and default-value expectations that now hold your values.
-  - Committed at your go-ahead ("Commit M10") as `6792b3f`.
+  - Committed at your go-ahead ("Commit M10") as `a2a2fb7`.
