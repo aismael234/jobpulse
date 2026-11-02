@@ -11,7 +11,8 @@ Personal job-posting watcher. Read PROGRESS.md first: milestone checklists, deci
 - `scripts/check.sh` — all of the above in one go
 - `uv run jobpulse poll --once --dry-run` — one poll cycle over every source (`--source` narrows it); nothing sent, nothing saved, the LLM never called
 - `uv run jobpulse --config tests/fixtures/scenarios/config.yaml poll --once --dry-run --fixtures tests/fixtures/scenarios/first_poll` — the same over recorded responses, JobSpy rows included (set `DATABASE_URL` to a scratch DB, run `db upgrade` and `profile import tests/fixtures/scenarios/import.yaml` first; `second_poll` after a live `first_poll` shows a merge)
-- `uv run jobpulse worker` — the scheduler; waits until a profile is onboarded, reads secrets at send time
+- `uv run jobpulse up [--host] [--port] [--no-migrate]` — backs up an SQLite database that is behind (into `backups/` beside it, keeping 3) and migrates it, then the dashboard with the worker in a thread (M8); a new install opens the setup wizard
+- `uv run jobpulse worker` — the scheduler; waits until a profile is onboarded (re-checking every minute), reads secrets at send time; holds the worker lease
 - `uv run jobpulse profile import [FILE] [--replace] [--write-infra PATH]` / `profile export` / `profile show` — the preferences in the database (M6); import reads an old config.yaml once
 - `uv run jobpulse web [--host] [--port]` — the dashboard on 127.0.0.1:8000
 - `uv run jobpulse companies list`, `uv run jobpulse notify test`
@@ -21,7 +22,7 @@ Personal job-posting watcher. Read PROGRESS.md first: milestone checklists, deci
 - `uv run jobpulse embeddings download` — fetch the embedding model (bge-small-en-v1.5, 64 MB) into `data/models`; nothing else ever downloads it
 - `uv run jobpulse resume set FILE` / `show [--lines]` / `clear` / `rescore [--backfill]` — the resume postings are scored against (M5b); `rescore --backfill` embeds open matches first (about 15 a second)
 - `uv run python -m jobpulse.devtools.resume_eval --database-url sqlite:///<scratch copy> --resume FILE --out DIR` — the M5a resume-similarity analysis (refuses `data/jobpulse.db`)
-- `uv run alembic upgrade head` or `uv run jobpulse db upgrade` — migrate the database (the CLI refuses to run on one that is behind)
+- `uv run alembic upgrade head` or `uv run jobpulse db upgrade` — migrate the database (the CLI refuses to run on one that is behind). The scripts live in `src/jobpulse/migrations` (package data, `script_location = jobpulse:migrations`); `db/migrate` builds its Alembic config in code, so alembic.ini is only for `alembic revision --autogenerate`
 
 ## Conventions
 
@@ -142,3 +143,11 @@ Confirmed by `JOBPULSE_LIVE=1 uv run pytest -m live` (15 passed) and read-only p
 ## When compacting
 
 Preserve the list of modified files and the test commands above.
+
+- Setup wizard (M8): `core/roles.py` (role families, title excludes, level presets), `core/skills.py` (the skill catalog), `core/resume_facts.py` (years, skills, title lines) and `core/profile_builder.py` (`build_rules(Answers)` → sections by dotted path, `SECTIONS`) are pure. The answers live in `Profile.answers` (`config.SetupAnswers`, `.to_core()`); `onboarding.apply_answers` rebuilds every section but those in `answers.custom`, and `note_custom` (the Advanced save) adds the sections that no longer match what the answers build. A profile without answers (imported) is all custom: `/setup` answers 409. The golden test (`tests/fixtures/profile/golden_rules.yaml`, the live profile's rules) pins the catalog: every family at the mid level must reproduce them, so changing a pattern or weight there changes the first install's rules.
+- `web/onboarding.py`: each step saves through `apply_answers` (a draft stays `onboarded=False`); finishing onboards and, the first time only, spawns `onboarding.apply_seed` (`WebState.spawn`) with Workday keywords from the roles (`seed.seed_keywords`). `OnboardingRedirect` (innermost middleware) sends every page but `/setup*`, `/settings*`, `/static/`, `/healthz` and `/favicon.ico` to `/setup` until onboarded. The ntfy topic is shown once, before it's saved; after that the redactor masks it like any secret. Wizard tests replace `jobpulse.web.onboarding.apply_seed`, and post multi-value fields as dicts of lists (the test client rejects lists of tuples).
+- `blocked_companies.kind` (0011): `agency` rows are agencies you marked from the card's dialog (`htmx:confirm` in `static/app.js`, the `<dialog>` in `postings.html`); `repo.blocklist(session, base, agencies=config.hide_agencies)` includes them only while `hide_agencies` is on. Every caller passes `agencies`. Seed export and `contribute` leave them out like the packaged agencies.
+- Worker lease (0011, `db/lease.py`): `run_worker` acquires it (raising `LeaseHeld`), renews it every minute, releases it on exit; a holder on this host whose pid is gone (or is our own pid, a restarted container) is free at once, others after 5 minutes. `up` acquires it before serving, with the same holder its worker thread uses. Tests pass `holder=` and `alive=`.
+- A scheduler job may return a delay (`JobFunc` → `float | None`): `runtime.run_scheduled_cycle` returns `IDLE_RECHECK_SECONDS` (60) when the cycle idled, so the first baseline starts about a minute after onboarding.
+- `up.py`: `WorkerThread` runs `run_worker` on its own loop (stop from another thread through `call_soon_threadsafe`); `create_app(worker=...)` starts and stops it in the lifespan; a worker that ends with an error sets `server.should_exit` and `run_app` returns 1. Tests replace `jobpulse.up.uvicorn.Server` with a fake that runs the lifespan through TestClient.
+- New filters (M8): `LocationRules.places`/`remote_ok` (`core.places.posting_in_place`, remote labels pass while `remote_ok`), `FilterRules.min_yearly_usd` checked in `evaluate` after freshness (`check_pay`, unlisted or non-USD pay passes), `FilterRules.dream_companies` (the poller and `rescoring` set the company part to `DREAM_PRIORITY`).

@@ -1,0 +1,35 @@
+{% extends "setup/_layout.html" %}
+{% block title %}Notifications{% endblock %}
+{% block content %}
+<h1>Notifications</h1>
+{% if notice %}<p class="notice {{ notice_tone }}" role="status">{{ notice }}</p>{% endif %}
+<form method="post" action="/setup/notifications" class="wizard-form">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <fieldset class="choices">
+    <legend>Where should new postings reach you?</legend>
+    <label class="choice"><input type="radio" name="channel" value="ntfy"{% if answers.channel == "ntfy" %} checked{% endif %}> <span><strong>ntfy</strong> <span class="hint">Free push notifications on your phone (the ntfy app) or in a browser, no account needed.</span></span></label>
+    {% if topic_source != "unset" %}
+    <p class="hint indent">Your topic is set{% if topic_source == "env" %} in .env{% endif %}. It stays hidden; it's in the ntfy app where you subscribed.</p>
+    {% elif new_topic %}
+    <input type="hidden" name="topic" value="{{ new_topic }}">
+    <p class="indent">Subscribe to this topic in the ntfy app, or open it in a browser, before you go on: once saved, it stays hidden.<br>
+      <a href="{{ ntfy_base }}/{{ new_topic }}" target="_blank" rel="noopener noreferrer"><code>{{ ntfy_base }}/{{ new_topic }}</code></a></p>
+    {% endif %}
+    <label class="choice"><input type="radio" name="channel" value="discord"{% if answers.channel == "discord" %} checked{% endif %}> <span><strong>Discord</strong> <span class="hint">A webhook into one of your channels (Channel settings → Integrations → Webhooks).</span></span></label>
+    {% if webhook_source == "unset" %}
+    <input class="indent" type="password" name="webhook" autocomplete="off" placeholder="https://discord.com/api/webhooks/…" aria-label="Discord webhook URL">
+    {% else %}
+    <p class="hint indent">A webhook is set{% if webhook_source == "env" %} in .env{% endif %}.</p>
+    {% endif %}
+    <label class="choice"><input type="radio" name="channel" value="none"{% if answers.channel == "none" %} checked{% endif %}> <span><strong>None for now</strong> <span class="hint">Postings still land on the dashboard.</span></span></label>
+  </fieldset>
+  <label class="field">Your email (optional)
+    <input type="email" name="contact_email" value="{{ contact_email }}" placeholder="you@example.com">
+  </label>
+  <p class="hint">Sent to the job-board APIs in the User-Agent, so their operators can reach you instead of blocking you. Never shown to employers.</p>
+  <div class="wizard-buttons">
+    <button type="submit" name="send" value="test" class="secondary">Save and send a test push</button>
+    <button type="submit" name="send" value="next">Continue</button>
+  </div>
+</form>
+{% endblock %}

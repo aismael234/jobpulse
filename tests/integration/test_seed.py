@@ -83,7 +83,9 @@ async def apply(
     config = config or make_config()
     with sessions() as session:
         known = repo.known_companies(session)
-        blocklist = repo.blocklist(session, company_blocklist(config))
+        blocklist = repo.blocklist(
+            session, company_blocklist(config), agencies=config.hide_agencies
+        )
     plan = await plan_seed(
         seed,
         known=known,

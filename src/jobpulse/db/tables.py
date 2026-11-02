@@ -133,14 +133,16 @@ class PostingRow(Base):
 
 
 class BlockedCompany(Base):
-    """A company blocked from the dashboard. config.yaml's ``blocklist.companies`` and these
-    rows together make the blocklist."""
+    """A company blocked from the dashboard. The profile's ``blocklist.companies`` and these
+    rows together make the blocklist. A row of kind ``agency`` is a staffing agency you
+    marked (M8): it blocks only while ``hide_agencies`` is on, like the packaged list."""
 
     __tablename__ = "blocked_companies"
 
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(Text)  # as the posting showed it
     name_key: Mapped[str] = mapped_column(String(255), unique=True)  # normalize_company(name)
+    kind: Mapped[str] = mapped_column(String(10), default="company", server_default="company")
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
 
 
@@ -347,3 +349,18 @@ class SeedState(Base):
     etag: Mapped[str | None] = mapped_column(Text)
     checked_at: Mapped[datetime]  # the last fetch, 304s included
     synced_at: Mapped[datetime | None]  # the last fetch that brought a body and applied it
+
+
+class WorkerLease(Base):
+    """The one worker allowed to poll this database (M8), one row: a second ``worker`` or
+    ``up`` on the same database refuses to start while the lease is held, so nothing is
+    pushed twice. The holder renews it every minute; a lease not renewed by ``expires_at``
+    is free."""
+
+    __tablename__ = "worker_lease"
+    __table_args__ = (CheckConstraint("id = 1", name="single_row"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=False)
+    holder: Mapped[str] = mapped_column(String(255))  # host:pid:random
+    acquired_at: Mapped[datetime]
+    expires_at: Mapped[datetime]

@@ -44,6 +44,11 @@ filters:
       SF: San Francisco, CA
       NYC: New York, NY
     unknown_location_passes: true
+    places: []                  # narrower than countries, e.g. [metro:bay-area, US-TX, US-TX/Austin]
+    remote_ok: true             # with places: remote postings pass too
+  pay:
+    min_yearly_usd: null        # e.g. 120000: hide postings whose listed US-dollar pay tops out
+                                # below it; postings without pay, or in another currency, pass
 
 scoring:
   weights:
@@ -58,6 +63,7 @@ scoring:
   priority_cap: 10              # watchlist priority is scaled to 0..1 against this
   applicant_cap: 200            # applicants scale against this: none scores 1, this many or more 0
   instant_threshold: 0.55       # every match is pushed; the LLM layer double-checks scores near this
+  dream_companies: []           # their postings get the full company_priority part, from any source
 
 notify:
   channels: [ntfy]              # ntfy and/or discord; their secrets go on Settings (or in .env)
@@ -90,8 +96,9 @@ blocklist:
   companies: []                 # e.g. [Jobot, Revature]
   boards: []                    # e.g. [greenhouse/spacex]
 
-# Block the staffing agencies jobpulse ships a list of (data/seed/agencies.json), as if they
-# were in blocklist.companies: their postings are never pushed or shown outside Applied.
+# Block the staffing agencies jobpulse ships a list of (data/seed/agencies.json), and those you
+# mark when you block a company from its card, as if they were in blocklist.companies: their
+# postings are never pushed or shown outside Applied.
 hide_agencies: true
 
 # An optional second opinion from Claude on postings whose score is within `band` of

@@ -8,7 +8,7 @@ from collections import defaultdict
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, cast
+from typing import Any, Literal, cast
 from urllib.parse import urlsplit
 
 from sqlalchemy import String, case, delete, func, or_, select, update
@@ -61,6 +61,7 @@ from jobpulse.db.tables import (
 from jobpulse.llm.base import LlmReply
 
 CHUNK = 500
+BlockKind = Literal["company", "agency"]
 MAX_ERROR_CHARS = 2000
 _ATS_KEY_PREFIXES = tuple(f"{ats}:" for ats in sorted(ATS_SOURCES))
 # When several stored rows match, the ATS row is the primary.
@@ -1084,19 +1085,32 @@ def set_statuses(session: Session, row_ids: Collection[int], status: str, *, now
 # --- the dashboard's blocklist ----------------------------------------------------------------
 
 
-def blocked_companies(session: Session) -> list[BlockedCompany]:
-    return list(session.scalars(select(BlockedCompany).order_by(BlockedCompany.name)))
+def blocked_companies(session: Session, *, kind: str | None = None) -> list[BlockedCompany]:
+    """Blocked rows by name; ``kind`` ("company" or "agency") narrows them."""
+    query = select(BlockedCompany).order_by(BlockedCompany.name)
+    if kind is not None:
+        query = query.where(BlockedCompany.kind == kind)
+    return list(session.scalars(query))
 
 
-def block_company(session: Session, name: str, *, now: datetime) -> bool:
-    """Block a company by name, compared like the config blocklist ("Acme, Inc." is "Acme");
-    ``False`` if it was already blocked here."""
+def block_company(
+    session: Session, name: str, *, now: datetime, kind: BlockKind = "company"
+) -> bool:
+    """Block a company by name, compared like the profile's blocklist ("Acme, Inc." is
+    "Acme"), or mark it a staffing agency (``kind="agency"``); ``False`` if it was already
+    there as that kind (a row of the other kind changes kind)."""
     key = normalize_company(name)
     if not key:
         raise ValueError("a company needs a name to be blocked")
-    if session.scalar(select(BlockedCompany.id).where(BlockedCompany.name_key == key)):
-        return False
-    session.add(BlockedCompany(name=" ".join(name.split()), name_key=key, created_at=now))
+    row = session.scalar(select(BlockedCompany).where(BlockedCompany.name_key == key))
+    if row is not None:
+        if row.kind == kind:
+            return False
+        row.kind = kind
+    else:
+        session.add(
+            BlockedCompany(name=" ".join(name.split()), name_key=key, kind=kind, created_at=now)
+        )
     session.flush()
     return True
 
@@ -1111,9 +1125,13 @@ def unblock_company(session: Session, name: str) -> bool:
     return result.rowcount > 0
 
 
-def blocklist(session: Session, base: Blocklist) -> Blocklist:
-    """config.yaml's blocklist plus the companies blocked from the dashboard."""
-    keys = set(session.scalars(select(BlockedCompany.name_key)))
+def blocklist(session: Session, base: Blocklist, *, agencies: bool) -> Blocklist:
+    """The profile's blocklist plus the companies blocked from the dashboard, and the
+    agencies you marked while ``agencies`` (the profile's ``hide_agencies``) is on."""
+    query = select(BlockedCompany.name_key)
+    if not agencies:
+        query = query.where(BlockedCompany.kind != "agency")
+    keys = set(session.scalars(query))
     if not keys:
         return base
     return Blocklist(companies=base.companies | keys, boards=base.boards)

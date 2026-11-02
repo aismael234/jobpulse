@@ -1,0 +1,19 @@
+{% extends "setup/_layout.html" %}
+{% block title %}Level{% endblock %}
+{% block content %}
+<h1>Level</h1>
+<form method="post" action="/setup/level" class="wizard-form">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <fieldset class="choices">
+    <legend>Which level are you looking for?</legend>
+    {% for level in levels %}
+    <label class="choice"><input type="radio" name="level" value="{{ level.key }}"{% if level.key == answers.level %} checked{% endif %}> <span><strong>{{ level.label }}</strong> <span class="hint">{{ level.description }}</span></span></label>
+    {% endfor %}
+  </fieldset>
+  <label class="field">Most years of experience a posting may ask for
+    <input type="number" name="max_years" min="0" max="40" value="{{ answers.max_years if answers.max_years is not none else "" }}" placeholder="the level's own">
+  </label>
+  <p class="hint">Blank keeps the level's own limit. Postings that don't say are kept.</p>
+  <div class="wizard-buttons"><button type="submit">Continue</button></div>
+</form>
+{% endblock %}

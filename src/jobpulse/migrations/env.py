@@ -2,7 +2,7 @@
 
 import logging
 from logging.config import fileConfig
-from typing import Any
+from typing import Any, Literal
 
 from alembic import context
 from alembic.autogenerate.api import AutogenContext
@@ -35,7 +35,7 @@ def database_url() -> str:
     return resolve_database_url(settings, infra)
 
 
-def render_item(type_: str, obj: Any, autogen_context: AutogenContext) -> str | bool:
+def render_item(type_: str, obj: Any, autogen_context: AutogenContext) -> str | Literal[False]:
     # Migrations store the plain impl type, so they never import application code.
     if type_ == "type" and isinstance(obj, UTCDateTime):
         return "sa.DateTime(timezone=True)"

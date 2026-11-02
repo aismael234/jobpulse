@@ -1,0 +1,31 @@
+{% extends "setup/_layout.html" %}
+{% block title %}Review{% endblock %}
+{% block content %}
+<h1>Review</h1>
+<dl class="review">
+  <dt><a href="/setup/roles">Roles</a></dt><dd>{{ family_labels|join(", ") or "none yet: pick at least one" }}</dd>
+  <dt><a href="/setup/roles">Skills</a></dt><dd>{% for key, choice in answers.skills.items() %}{{ skill_labels[key] }}{% if choice == "main" %} (main){% endif %}{% if not loop.last %}, {% endif %}{% else %}none{% endfor %}</dd>
+  <dt><a href="/setup/level">Level</a></dt><dd>{{ level_label }}{% if max_years is not none %}, up to {{ max_years }} years asked{% endif %}</dd>
+  <dt><a href="/setup/locations">Locations</a></dt><dd>{{ country_names|join(", ") or "anywhere" }}{% if place_labels %}: {{ place_labels|join(", ") }}{% if answers.remote_ok %}, or remote{% endif %}{% endif %}</dd>
+  <dt><a href="/setup/goals">Pay</a></dt><dd>{% if answers.min_pay %}at least ${{ answers.min_pay }}K a year{% else %}any{% endif %}</dd>
+  <dt><a href="/setup/goals">Dream companies</a></dt><dd>{{ answers.dream|join(", ") or "none" }}</dd>
+  <dt><a href="/setup/goals">Avoided</a></dt><dd>{{ answers.avoid|join(", ") or "none" }}{% if answers.hide_agencies %}; staffing agencies hidden{% endif %}</dd>
+  <dt><a href="/setup/notifications">Notifications</a></dt><dd>{{ answers.channel }}</dd>
+</dl>
+<section class="settings-block">
+  <h2>What jobpulse will search</h2>
+  <ul class="plain">
+    {% for search in planned_searches %}
+    <li>{{ search.site|capitalize }}: “{{ search.search_term }}”{% if search.location %} in {{ search.location }}{% endif %}</li>
+    {% else %}
+    <li>No LinkedIn or Indeed searches yet.</li>
+    {% endfor %}
+  </ul>
+  {% if keywords %}<p class="hint">Workday boards are searched for: {{ keywords|join(", ") }}.</p>{% endif %}
+  {% if not editing %}<p class="hint">It also starts watching about 360 company boards (Greenhouse, Lever, Ashby, Workday). The first check of each stores what's there now without pushing it, so you hear only about postings that go up from here on.</p>{% endif %}
+</section>
+<form method="post" action="/setup/review" class="wizard-form">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <div class="wizard-buttons"><button type="submit"{% if not answers.roles %} disabled{% endif %}>{% if editing %}Save{% else %}Finish setup{% endif %}</button></div>
+</form>
+{% endblock %}

@@ -1,0 +1,36 @@
+{% extends "setup/_layout.html" %}
+{% block title %}Roles and skills{% endblock %}
+{% block content %}
+<h1>Roles and skills</h1>
+<form method="post" action="/setup/roles" class="wizard-form">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <fieldset class="choices">
+    <legend>Which kinds of roles do you want? A posting's title has to fit one.</legend>
+    {% for family in families %}
+    <label class="choice"><input type="checkbox" name="roles" value="{{ family.key }}"{% if family.key in answers.roles %} checked{% endif %}> <span><strong>{{ family.label }}</strong> <span class="hint">{{ family.description }}</span></span></label>
+    {% endfor %}
+  </fieldset>
+  <fieldset class="choices">
+    <legend>Your skills. Postings that name your main skills score higher; others count half.</legend>
+    {% for group, skills in skill_groups %}
+    {% set chosen = skills|selectattr("key", "in", answers.skills)|list %}
+    <details class="skill-group"{% if chosen %} open{% endif %}>
+      <summary>{{ group }}{% if chosen %} <span class="count">{{ chosen|length }}</span>{% endif %}</summary>
+      <div class="skill-grid">
+        {% for skill in skills %}
+        {% set current = answers.skills.get(skill.key, "") %}
+        <label class="skill">{{ skill.label }}
+          <select name="skill-{{ skill.key }}" aria-label="{{ skill.label }}">
+            <option value=""{% if not current %} selected{% endif %}>—</option>
+            <option value="main"{% if current == "main" %} selected{% endif %}>Main</option>
+            <option value="also"{% if current == "also" %} selected{% endif %}>Also</option>
+          </select>
+        </label>
+        {% endfor %}
+      </div>
+    </details>
+    {% endfor %}
+  </fieldset>
+  <div class="wizard-buttons"><button type="submit">Continue</button></div>
+</form>
+{% endblock %}

@@ -58,9 +58,34 @@
 {% for row in page.rows %}
 {% include "_posting.html" %}
 {% else %}
-<p class="empty">{% if query.filtered %}No postings match these filters.{% elif view == "New" %}Nothing new to look at. Every match is pushed and lands here.{% else %}No {{ view|lower }} postings.{% endif %}</p>
+{% if progress is defined and progress and not progress.boards_checked and not progress.last_check %}
+<div class="empty on-the-way">
+  <p><strong>Postings are on the way.</strong> jobpulse watches {{ progress.boards }} company board{{ "" if progress.boards == 1 else "s" }}{% if progress.searches %} and {{ progress.searches }} LinkedIn and Indeed search{{ "" if progress.searches == 1 else "es" }}{% endif %}. The first check of each stores what's there now without pushing it, so only postings that go up from here on reach you.</p>
+  <p class="hint">No check has finished yet; the first starts within a minute of setup.</p>
+</div>
+{% elif progress is defined and progress and progress.boards_checked < progress.boards %}
+<div class="empty on-the-way">
+  <p><strong>Postings are on the way.</strong> {{ progress.boards_checked }} of {{ progress.boards }} boards checked{% if progress.searches %}, {{ progress.searches }} search{{ "" if progress.searches == 1 else "es" }} running{% endif %}. Their first check is silent; new postings after it land here and on your phone.</p>
+  <p class="hint">{% if progress.last_check %}Last check {{ progress.last_check|ago }}{% endif %}{% if next_check %}; next around {{ next_check|local }}{% endif %}.</p>
+</div>
+{% else %}
+<p class="empty">{% if query.filtered %}No postings match these filters.{% elif view == "New" %}Nothing new to look at. Every match is pushed and lands here.{% if progress is defined and progress and progress.last_check %} Last check {{ progress.last_check|ago }}{% if next_check %}, next around {{ next_check|local }}{% endif %}.{% endif %}{% else %}No {{ view|lower }} postings.{% endif %}</p>
+{% endif %}
 {% endfor %}
 </section>
+
+<dialog id="block-dialog" class="block-dialog" aria-labelledby="block-dialog-title">
+  <form method="dialog">
+    <h2 id="block-dialog-title">Block <span data-company></span>?</h2>
+    <p>Its postings are hidden here (Applied aside) and never pushed again. Is it a staffing or recruiting agency?</p>
+    <p class="hint">Agencies go on your agency list, hidden while “Hide staffing agencies” is on, instead of your block list.</p>
+    <div class="wizard-buttons">
+      <button type="submit" value="agency">Yes, an agency</button>
+      <button type="submit" value="company">No, block the company</button>
+      <button type="submit" value="cancel" class="link">Cancel</button>
+    </div>
+  </form>
+</dialog>
 
 {% if page.has_previous or page.has_next %}
 <nav class="pager" aria-label="Pages">

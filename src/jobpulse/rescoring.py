@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from jobpulse.core.detection import EvaluationContext, match_score
 from jobpulse.core.filters import FilterRules
 from jobpulse.core.models import ATS_SOURCES
-from jobpulse.core.scoring import Weights, priority_component
+from jobpulse.core.scoring import DREAM_PRIORITY, Weights, priority_component
 from jobpulse.core.similarity import ResumeMatch
 from jobpulse.db import repo
 from jobpulse.db.tables import Company, PostingRow
@@ -46,7 +46,13 @@ def rescore_matches(
             freshness=freshness,
             rules=rules,
             weights=weights,
-            company_priority=priority_component(priority, priority_cap) if company else 0.0,
+            company_priority=(
+                DREAM_PRIORITY
+                if rules.is_dream(row.company_name)
+                else priority_component(priority, priority_cap)
+                if company
+                else 0.0
+            ),
             applicant_cap=applicant_cap,
             resume=(
                 ResumeMatch(row.resume_score, row.resume_line or "")

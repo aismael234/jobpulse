@@ -274,9 +274,12 @@ def test_a_new_install_can_save_its_first_profile_here(web: Web) -> None:
     with web.sessions() as session:
         session.query(ProfileRow).delete()
         session.commit()
-    page = text_of(web, "/")
+    response = web.client.get("/", follow_redirects=False)
+    assert response.status_code == 303  # to the setup wizard
+    assert response.headers["location"] == "/setup"
+    page = text_of(web)
     assert "No profile yet, so the worker waits" in page
-    assert 'name="revision" value="0"' in text_of(web)
+    assert 'name="revision" value="0"' in page
     response = web.post(
         "/settings/profile", {"profile": "contact_email: me@example.com\n", "revision": "0"}
     )

@@ -1,12 +1,14 @@
 """Title, description and location rules. Patterns arrive compiled (case-insensitive)."""
 
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 
-from jobpulse.core.countries import ANYWHERE, label_countries
+from jobpulse.core.countries import ANYWHERE, is_remote_label, label_countries
 from jobpulse.core.dedupe import normalize_company
+from jobpulse.core.pay import yearly_usd_range
+from jobpulse.core.places import posting_in_place
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,6 +23,8 @@ class LocationRules:
     exclude: tuple[re.Pattern[str], ...] = ()
     countries: frozenset[str] = frozenset()  # ISO 3166 alpha-2 codes; empty = anywhere
     unknown_passes: bool = True
+    places: tuple[str, ...] = ()  # place keys (core.places); empty = anywhere in countries
+    remote_ok: bool = True  # with places: remote postings pass too
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +67,11 @@ class FilterRules:
     stack_saturation: float = 2.0
     locations: LocationRules = field(default_factory=LocationRules)
     blocklist: Blocklist = field(default_factory=Blocklist)
+    min_yearly_usd: float | None = None  # pay floor; unlisted or non-USD pay passes
+    dream_companies: frozenset[str] = frozenset()  # normalized names: top company priority
+
+    def is_dream(self, company: str) -> bool:
+        return bool(self.dream_companies) and normalize_company(company) in self.dream_companies
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,9 +219,18 @@ def _country_candidates(labels: Sequence[str], rules: LocationRules) -> tuple[li
     return [label for label, where in places if where is None or label in allowed], ""
 
 
+def _in_places(label: str, rules: LocationRules) -> bool:
+    if not rules.places:
+        return True
+    if is_remote_label(label):
+        return rules.remote_ok
+    return any(posting_in_place((label,), key) for key in rules.places)
+
+
 def check_locations(labels: Sequence[str], rules: LocationRules) -> LocationVerdict:
     """Passes when at least one location is in ``countries`` (when set), included (or no
-    includes) and not excluded."""
+    includes), not excluded, and in one of ``places`` (when set; a remote location counts
+    while ``remote_ok``)."""
     if not labels:
         if rules.unknown_passes:
             return LocationVerdict(True, "no location given")
@@ -224,6 +242,21 @@ def check_locations(labels: Sequence[str], rules: LocationRules) -> LocationVerd
             return LocationVerdict(False, reason)
     for label in candidates:
         included = not rules.include or any(p.search(label) for p in rules.include)
-        if included and not any(p.search(label) for p in rules.exclude):
+        if (
+            included
+            and not any(p.search(label) for p in rules.exclude)
+            and _in_places(label, rules)
+        ):
             return LocationVerdict(True, f"location ok ({label})")
     return LocationVerdict(False, f"no acceptable location in {', '.join(labels)}")
+
+
+def check_pay(compensation: Mapping[str, Any] | None, floor: float | None) -> str | None:
+    """Why the pay is under ``floor`` (US dollars a year), or ``None`` when it isn't: pay
+    that isn't listed, or isn't in US dollars, passes."""
+    if floor is None:
+        return None
+    found = yearly_usd_range(compensation)
+    if found is None or found[1] >= floor:
+        return None
+    return f"pays at most ${found[1] / 1000:,.0f}K a year (floor ${floor / 1000:,.0f}K)"

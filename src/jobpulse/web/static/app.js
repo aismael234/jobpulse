@@ -30,3 +30,42 @@ document.addEventListener("click", (event) => {
     keepalive: true,
   });
 });
+
+// The setup wizard fills the timezone from the browser when the field is empty.
+document.addEventListener("DOMContentLoaded", () => {
+  for (const input of document.querySelectorAll('input[data-autofill="timezone"]')) {
+    if (!input.value) {
+      try {
+        input.value = Intl.DateTimeFormat().resolvedOptions().timeZone || "";
+      } catch (error) {
+        // leave it empty: the profile keeps its timezone
+      }
+    }
+  }
+});
+
+// "Block company" asks first whether the company is a staffing agency (a dialog in
+// postings.html), then sends the block with kind=agency or kind=company. Without the dialog
+// (an old browser), the block goes through as a company block.
+document.addEventListener("htmx:confirm", (event) => {
+  const form = event.detail.elt.closest && event.detail.elt.closest("form[data-ask-agency]");
+  const dialog = document.getElementById("block-dialog");
+  if (!form || !dialog || typeof dialog.showModal !== "function") {
+    return;
+  }
+  event.preventDefault();
+  dialog.querySelector("[data-company]").textContent = form.dataset.askAgency;
+  dialog.returnValue = "";
+  dialog.addEventListener(
+    "close",
+    () => {
+      const choice = dialog.returnValue;
+      if (choice === "agency" || choice === "company") {
+        form.querySelector('input[name="kind"]').value = choice;
+        event.detail.issueRequest(true);
+      }
+    },
+    { once: true },
+  );
+  dialog.showModal();
+});

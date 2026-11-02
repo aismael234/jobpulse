@@ -33,8 +33,9 @@
       {% if row.notified_at %}<span class="note" title="{{ row.notified_at|local }}">pushed {{ row.notified_at|ago }}</span>{% endif %}
       {% if row.status != "New" and row.status_changed_at %}<span class="note moved" title="{{ row.status_changed_at|local }}">{{ row.status|lower }} {{ row.status_changed_at|ago }}</span>{% endif %}
       {% if row.company_name|trim %}
-      <form class="block" method="post" action="/companies/block" hx-post="/companies/block" hx-target="#posting-{{ row.id }}" hx-swap="outerHTML" hx-confirm="Block {{ row.company_name }}? Its postings are hidden here (Applied aside) and never pushed again.">
+      <form class="block" method="post" action="/companies/block" hx-post="/companies/block" hx-target="#posting-{{ row.id }}" hx-swap="outerHTML" data-ask-agency="{{ row.company_name }}">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="kind" value="company">
         <input type="hidden" name="company" value="{{ row.company_name }}">
         <input type="hidden" name="posting_id" value="{{ row.id }}">
         <input type="hidden" name="return_to" value="{{ return_to }}">

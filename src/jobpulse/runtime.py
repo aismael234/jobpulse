@@ -12,9 +12,15 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from jobpulse.config import AppConfig, InfraConfig, location_aliases
 from jobpulse.core.locations import merge_aliases
+from jobpulse.core.timeparse import utcnow
 from jobpulse.credentials import SecretStore
-from jobpulse.db import migrate
-from jobpulse.db.session import create_engine_for, display_url, make_session_factory
+from jobpulse.db import lease, migrate
+from jobpulse.db.session import (
+    create_engine_for,
+    display_url,
+    make_session_factory,
+    session_scope,
+)
 from jobpulse.discovery import Discoverer
 from jobpulse.embeddings.base import Embedder, EmbedderUnavailable, LazyEmbedder
 from jobpulse.embeddings.fastembed import DEFAULT_MODEL, FastEmbedEmbedder, model_id
@@ -48,10 +54,15 @@ WATCHLIST_SOURCES: tuple[str, ...] = ("greenhouse", "lever", "ashby", "workday")
 FEED_SOURCES: tuple[str, ...] = ("simplify",)
 BOARD_SOURCES: tuple[str, ...] = ("indeed", "linkedin")
 KNOWN_SOURCES: tuple[str, ...] = WATCHLIST_SOURCES + FEED_SOURCES + BOARD_SOURCES
+IDLE_RECHECK_SECONDS = 60.0  # until a profile is onboarded, each job checks again this soon
 
 
 class DatabaseNotReady(Exception):
     pass
+
+
+class LeaseLost(Exception):
+    """Another worker took the lease while this one ran."""
 
 
 class WorkerStalled(Exception):
@@ -66,10 +77,7 @@ def open_database(url: str) -> sessionmaker[Session]:
         raise DatabaseNotReady(
             f"{display_url(url)} has no jobpulse tables yet; run `jobpulse db upgrade` first"
         )
-    try:
-        current, head = migrate.schema_revisions(engine)
-    except FileNotFoundError:  # no alembic.ini next to this install: nothing to compare with
-        current = head = None
+    current, head = migrate.schema_revisions(engine)
     if current is not None and current != head:
         engine.dispose()
         raise DatabaseNotReady(
@@ -397,51 +405,95 @@ def _llm_lines(report: CycleReport) -> list[str]:
     return lines
 
 
-async def run_worker(*, infra: InfraConfig, store: SecretStore, database_url: str) -> None:
-    """Poll each source on its own jittered schedule until SIGINT or SIGTERM. Raises
+async def run_worker(
+    *,
+    infra: InfraConfig,
+    store: SecretStore,
+    database_url: str,
+    stop: asyncio.Event | None = None,
+    holder: lease.Holder | None = None,
+) -> None:
+    """Poll each source on its own jittered schedule until ``stop`` is set (by default, until
+    SIGINT or SIGTERM). Raises ``LeaseHeld`` when another worker polls this database, and
     ``WorkerStalled`` when a source stops finishing runs. Cycles wait (and say so) until a
-    profile is onboarded; secrets are read at send time, so none is needed to start."""
+    profile is onboarded, checking again every minute; secrets are read at send time, so
+    none is needed to start."""
     sessions = open_database(database_url)
+    me = holder or lease.Holder.here()
+    with session_scope(sessions) as session:
+        lease.acquire(session, me, now=utcnow())
     llm = LlmSource(store)
-    async with build_http(infra) as http:
-        poller = build_poller(http, infra, sessions, store, llm=llm)
+    try:
+        async with build_http(infra) as http:
+            poller = build_poller(http, infra, sessions, store, llm=llm)
 
-        async def run(job: str, sources: tuple[str, ...]) -> None:
-            report = await poller.run_cycle(sources=sources)
-            for line in render_report(report):
-                log.info("%s: %s", job, line)
+            async def run(job: str, sources: tuple[str, ...]) -> float | None:
+                return await run_scheduled_cycle(poller, job, sources)
 
-        jobs = scheduled_jobs(infra, run)
-        worker = Worker(jobs)
-        stop = asyncio.Event()
-        loop = asyncio.get_running_loop()
-        for signum in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(signum, stop.set)
-        worker.start()
-        log.info(
-            "worker started: %s", "; ".join(_describe(name, s) for name, (s, _) in jobs.items())
-        )
-        watchdog = asyncio.create_task(worker.watch())
-        stopped = asyncio.create_task(stop.wait())
-        try:
-            await asyncio.wait({watchdog, stopped}, return_when=asyncio.FIRST_COMPLETED)
-        finally:
-            worker.shutdown()
-            for task in (watchdog, stopped):
-                task.cancel()
-            await llm.aclose()
-            log.info("worker stopped")
-        if watchdog.done() and not watchdog.cancelled():
-            limit = worker.watchdog_limit or 0
-            raise WorkerStalled(
-                f"no run of {', '.join(watchdog.result())} finished in {_interval(limit)} "
-                f"({WATCHDOG_FACTOR:.0f}x the longest interval); exiting so the worker is "
-                "restarted"
+            jobs = scheduled_jobs(infra, run)
+            worker = Worker(jobs)
+            if stop is None:
+                stop = asyncio.Event()
+                loop = asyncio.get_running_loop()
+                for signum in (signal.SIGINT, signal.SIGTERM):
+                    loop.add_signal_handler(signum, stop.set)
+            worker.start()
+            log.info(
+                "worker started: %s",
+                "; ".join(_describe(name, s) for name, (s, _) in jobs.items()),
             )
+            watchdog = asyncio.create_task(worker.watch())
+            stopped = asyncio.create_task(stop.wait())
+            renewing = asyncio.create_task(_keep_lease(sessions, me))
+            try:
+                await asyncio.wait(
+                    {watchdog, stopped, renewing}, return_when=asyncio.FIRST_COMPLETED
+                )
+            finally:
+                worker.shutdown()
+                for task in (watchdog, stopped, renewing):
+                    task.cancel()
+                log.info("worker stopped")
+            if renewing.done() and not renewing.cancelled():
+                renewing.result()  # raises LeaseLost
+            if watchdog.done() and not watchdog.cancelled():
+                limit = worker.watchdog_limit or 0
+                raise WorkerStalled(
+                    f"no run of {', '.join(watchdog.result())} finished in {_interval(limit)} "
+                    f"({WATCHDOG_FACTOR:.0f}x the longest interval); exiting so the worker is "
+                    "restarted"
+                )
+    finally:
+        await llm.aclose()
+        with session_scope(sessions) as session:
+            lease.release(session, me)
+
+
+async def run_scheduled_cycle(poller: Poller, job: str, sources: tuple[str, ...]) -> float | None:
+    """One scheduled cycle, logged; how soon to run again when it idled (no onboarded
+    profile yet), so the first baseline starts about a minute after onboarding."""
+    report = await poller.run_cycle(sources=sources)
+    for line in render_report(report):
+        log.info("%s: %s", job, line)
+    return IDLE_RECHECK_SECONDS if report.idle else None
+
+
+async def _keep_lease(
+    sessions: sessionmaker[Session], me: lease.Holder, *, sleep: Sleep = asyncio.sleep
+) -> None:
+    """Renew the lease every minute; raise ``LeaseLost`` when another worker took it."""
+    while True:
+        await sleep(lease.RENEW_EVERY.total_seconds())
+        with session_scope(sessions) as session:
+            if not lease.renew(session, me, now=utcnow()):
+                raise LeaseLost(
+                    "another worker took over this database's lease; stopping so nothing is "
+                    "pushed twice"
+                )
 
 
 def scheduled_jobs(
-    config: InfraConfig, run: Callable[[str, tuple[str, ...]], Awaitable[None]]
+    config: InfraConfig, run: Callable[[str, tuple[str, ...]], Awaitable[float | None]]
 ) -> dict[str, tuple[Cadence, JobFunc]]:
     """One job per source group, each on its own cadence: the watchlist boards, the Simplify
     feed when enabled, and the job-board searches. Searches live in the profile and can be
@@ -454,8 +506,8 @@ def scheduled_jobs(
     groups.append(("job_boards", BOARD_SOURCES))
 
     def job(name: str, sources: tuple[str, ...]) -> JobFunc:
-        async def poll() -> None:
-            await run(name, sources)
+        async def poll() -> float | None:
+            return await run(name, sources)
 
         return poll
 

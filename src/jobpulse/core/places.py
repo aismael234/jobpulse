@@ -535,3 +535,18 @@ def place_options(
         for label, options in groups.items()
         if options
     )
+
+
+def place_country(key: str) -> str | None:
+    """The country a place key is in: "US-TX/Austin" → "US"; a metro area's from its table."""
+    if key.startswith(METRO_PREFIX):
+        metro = _METROS.get(key[len(METRO_PREFIX) :])
+        if metro is None:
+            return None
+        return next(iter(metro[1])).partition("-")[0]
+    return key.partition("/")[0].partition("-")[0] or None
+
+
+def metro_options() -> tuple[tuple[str, str], ...]:
+    """Every metro area as (key, label), in table order."""
+    return tuple((METRO_PREFIX + slug, label) for slug, (label, _) in _METROS.items())

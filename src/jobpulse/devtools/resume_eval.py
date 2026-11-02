@@ -602,7 +602,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         rules = FilterRules(
             **{
                 **{name: getattr(rules, name) for name in rules.__dataclass_fields__},
-                "blocklist": repo.blocklist(session, company_blocklist(config)),
+                "blocklist": repo.blocklist(
+                    session, company_blocklist(config), agencies=config.hide_agencies
+                ),
             }
         )
         labeled = load_labeled(session, rules)

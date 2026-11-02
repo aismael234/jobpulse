@@ -49,6 +49,9 @@ def freshness_component(age: timedelta, window: timedelta) -> float:
     return _clamp(1.0 - age / window)
 
 
+DREAM_PRIORITY = 1.0  # a dream company's priority part, from any source
+
+
 def priority_component(priority: int, cap: int) -> float:
     return _clamp(priority / cap) if cap > 0 else 0.0
 

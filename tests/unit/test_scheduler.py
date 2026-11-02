@@ -233,3 +233,19 @@ def test_a_worker_without_jobs_has_no_watchdog() -> None:
     worker = Worker({}, scheduler=FakeScheduler(), clock=lambda: NOW)
     assert worker.watchdog_limit is None
     assert worker.stalled() == []
+
+
+async def test_a_job_can_ask_to_run_again_sooner() -> None:
+    async def idle() -> float | None:
+        return 60.0
+
+    scheduler = FakeScheduler()
+    worker = Worker(
+        {"watchlist": (Cadence(1800, 120), idle)},
+        rng=random.Random(3),
+        scheduler=scheduler,
+        clock=lambda: NOW,
+    )
+    worker.start()
+    await worker.run_job("watchlist")
+    assert scheduler.delay_of("watchlist") == 60

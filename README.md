@@ -34,25 +34,24 @@ You need [uv](https://docs.astral.sh/uv/). It installs Python 3.12 for you.
 
 ```bash
 uv sync
-uv run jobpulse db upgrade
-uv run jobpulse web                       # the dashboard on http://127.0.0.1:8000
+uv run jobpulse up                        # http://127.0.0.1:8000
 ```
 
-Then, on the dashboard's **Settings** page:
+`jobpulse up` runs everything in one process: it backs up an SQLite database that needs an upgrade (into `data/backups/`, keeping three), migrates it, and serves the dashboard with the scheduler alongside. The first visit opens the **setup wizard**:
 
-1. Under **Profile**, paste `profile.example.yaml`, set your contact email, filters and searches, and save. Your preferences live in the database from then on.
-2. Under **Notifications**, save an ntfy topic (see "Phone notifications") and send a test push.
-3. Optionally upload your resume under **Resume**.
+1. **Resume** (optional): read on your machine to suggest roles, skills and a level; postings are scored by how close they are to it.
+2. **Roles and skills**: the kinds of roles you want (back end, full stack, ML…) and your main skills.
+3. **Level**: entry, mid, senior or staff, and the most years of experience a posting may ask for.
+4. **Locations**: countries, optionally metro areas or states, and whether remote is fine.
+5. **Pay and companies**: a pay floor, dream companies (scored as your top priority), companies to avoid, and whether to hide staffing agencies.
+6. **Notifications**: a generated ntfy topic to subscribe to, or a Discord webhook, with a test push.
+7. **Review**: the searches and rules your answers make. Finishing starts watching about 360 company boards from the built-in seed.
 
-Add companies on the **Watchlist** page, then start the worker:
+The first check of each board, search and feed is a silent baseline, so the first pushes arrive once something new is posted; until then the dashboard says postings are on the way. Change any answer later from Settings → Setup answers; anything you edit by hand under Settings → Profile (Advanced) stays as you left it.
 
-```bash
-uv run jobpulse config check
-uv run jobpulse poll --once --dry-run     # fetch and evaluate everything; save and send nothing
-uv run jobpulse worker                    # poll on schedule and push
-```
+`up` takes a lease on the database, so a second worker (`up` or `worker`) on the same database refuses to start and nothing is pushed twice. `uv run jobpulse poll --once --dry-run` fetches and evaluates everything without saving or sending.
 
-The worker and the dashboard are separate processes; run both (two terminals, or Docker below). The worker waits until a profile is saved, and reads it again at every cycle, so changes on Settings apply without a restart. The first poll of each board, search and feed is a silent baseline, so the first pushes arrive once something new is posted.
+**Two processes instead of one:** `uv run jobpulse db upgrade`, then `uv run jobpulse web` and `uv run jobpulse worker` in two terminals. Neither migrates on its own. The worker waits until a profile is saved, checking every minute, and reads it again at every cycle, so changes on Settings apply without a restart.
 
 `config.yaml` is optional: copy `config.example.yaml` only to change infrastructure (schedules, LinkedIn pacing, the database, the dashboard's port). Secrets can go in `.env` instead of Settings (`cp .env.example .env`); a value there wins.
 
@@ -228,12 +227,13 @@ Kept in the database and edited on Settings → Profile; `profile.example.yaml` 
 |---|---|
 | `contact_email` | Sent in the User-Agent so API operators can reach you. |
 | `timezone` | The dashboard's displayed times. Storage is always UTC. |
-| `filters` | Title include/exclude regexes, level words, years of experience, stack keywords, location rules and aliases. `filters.locations.countries` (for example `[US]`) keeps only postings with a location in those countries; "Remote (Global)" counts everywhere, and "Remote (EMEA)" only in EMEA. |
-| `scoring` | Score weights (including `applicants`, `resume` and `llm`), `priority_cap`, `applicant_cap`, `instant_threshold` (the center of the LLM's band). |
+| `filters` | Title include/exclude regexes, level words, years of experience, stack keywords, location rules and aliases. `filters.locations.countries` (for example `[US]`) keeps only postings with a location in those countries; "Remote (Global)" counts everywhere, and "Remote (EMEA)" only in EMEA. `filters.locations.places` (`US-TX`, `metro:bay-area`, `US-TX/Austin`) narrows them further, with remote postings kept while `remote_ok` is on. `filters.pay.min_yearly_usd` hides postings whose listed US-dollar pay tops out below it (unlisted pay passes). |
+| `scoring` | Score weights (including `applicants`, `resume` and `llm`), `priority_cap`, `applicant_cap`, `instant_threshold` (the center of the LLM's band), `dream_companies` (their postings get the full company-priority part, from any source). |
 | `notify` | `channels`, ntfy server, priority and tags; `saved_filters` limits one-message-per-posting pushes (`max_per_cycle` 10, `max_per_day` 200, `spacing_seconds` 5). |
 | `searches` | Indeed and LinkedIn searches through JobSpy. |
 | `blocklist` | Companies and boards to stay away from (companies blocked from a card are listed on the Watchlist page). |
-| `hide_agencies` | Block the staffing agencies jobpulse ships a list of (on by default). |
+| `hide_agencies` | Block the staffing agencies jobpulse ships a list of, and those you mark (on by default). "Block company" on a card asks whether the company is an agency: an agency goes on your agency list (Watchlist page) instead of the block list. |
+| `answers` | The setup wizard's answers. They build `filters`, `scoring.dream_companies`, `notify.channels`, `searches`, `blocklist.companies` and `hide_agencies`, except the sections named in `answers.custom` (edited by hand). Absent for an imported profile. |
 | `llm` | The optional LLM layer: on/off, model, effort, role, band, wanted levels, daily call cap. |
 
 Level, location and stack values in the example are placeholders; set your own. `jobpulse config check` validates config.yaml, the profile and the secrets.
@@ -259,6 +259,7 @@ Empty values count as unset. The four secrets above (ntfy topic and token, Disco
 | Command | What it does |
 |---|---|
 | `jobpulse poll --once [--dry-run] [--source NAME] [--target KEY]` | One cycle over every source (or some). A dry run sends nothing and rolls back. |
+| `jobpulse up [--host H] [--port P] [--no-migrate]` | Back up and upgrade the database, then the dashboard and the scheduler in one process. |
 | `jobpulse worker` | The scheduler: every source on its own cadence. |
 | `jobpulse web [--host H] [--port P]` | The dashboard. |
 | `jobpulse companies list` | The watchlist with origin and baseline state. |
@@ -360,6 +361,8 @@ src/jobpulse/
   web/         FastAPI app, routes, templates, static files (htmx)
   poller.py    one poll cycle          scheduler.py   cadences, watchdog
   health.py    source health alerts    discovery.py   automatic watchlist
+  migrations/  Alembic, shipped in the package so an install migrates itself
+  onboarding.py  the setup wizard's logic   up.py   `jobpulse up`
   cli.py       the jobpulse command
-migrations/    Alembic                 tests/         unit, integration, live
+tests/         unit, integration, live
 ```

@@ -38,7 +38,11 @@ from jobpulse.core.atsurls import normalize_workday_token
 from jobpulse.core.countries import country_code
 from jobpulse.core.dedupe import normalize_company
 from jobpulse.core.locations import DEFAULT_SHORT_LABELS, merge_aliases
+from jobpulse.core.places import parse_place_key
+from jobpulse.core.profile_builder import SECTIONS, Answers
+from jobpulse.core.roles import FAMILIES_BY_KEY
 from jobpulse.core.scoring import Weights
+from jobpulse.core.skills import SKILLS_BY_KEY
 from jobpulse.data import agency_names
 
 DEFAULT_CONFIG_PATH = Path("config.yaml")
@@ -163,6 +167,16 @@ def _check_company_name(value: str) -> str:
     return value
 
 
+def _to_place_key(value: str) -> str:
+    key = parse_place_key(value)
+    if key is None or ("-" not in key and "/" not in key and ":" not in key):
+        raise ValueError(
+            f"{value!r} is not a place key below a country, such as US-TX, metro:bay-area or "
+            "US-TX/Austin (countries go in countries)"
+        )
+    return key
+
+
 def _to_country_code(value: str) -> str:
     code = country_code(value)
     if code is None:
@@ -178,6 +192,7 @@ Slug = Annotated[str, Field(min_length=1, max_length=200, pattern=SLUG_PATTERN)]
 BoardRef = Annotated[str, AfterValidator(_check_board_ref)]
 CompanyName = Annotated[str, AfterValidator(_check_company_name)]
 CountryCode = Annotated[str, AfterValidator(_to_country_code)]
+PlaceKey = Annotated[str, AfterValidator(_to_place_key)]
 
 
 class _Model(BaseModel):
@@ -270,13 +285,20 @@ class LocationRules(_Model):
     include: list[Regex] = []
     exclude: list[Regex] = []
     countries: list[CountryCode] = []  # ISO codes; a posting needs a location in one of them
+    places: list[PlaceKey] = []  # when set, a posting needs a location in one of them
+    remote_ok: bool = True  # with places: a remote location passes too
     aliases: dict[str, str] = {}
     unknown_location_passes: bool = True
 
-    @field_validator("countries")
+    @field_validator("countries", "places")
     @classmethod
-    def _drop_repeated_countries(cls, value: list[str]) -> list[str]:
+    def _drop_repeats(cls, value: list[str]) -> list[str]:
         return list(dict.fromkeys(value))
+
+
+class PayRules(_Model):
+    # Postings listing US-dollar pay whose top is under this are filtered; unlisted pay passes.
+    min_yearly_usd: int | None = Field(default=None, ge=0, le=10_000_000)
 
 
 class FiltersConfig(_Model):
@@ -284,6 +306,7 @@ class FiltersConfig(_Model):
     level: LevelRules = LevelRules()
     description: DescriptionRules = DescriptionRules()
     locations: LocationRules = LocationRules()
+    pay: PayRules = PayRules()
 
 
 class ScoringWeights(_Model):
@@ -302,6 +325,7 @@ class ScoringConfig(_Model):
     priority_cap: int = Field(default=10, ge=1)
     applicant_cap: int = Field(default=200, ge=1)
     instant_threshold: float = 0.55  # the LLM layer double-checks scores within llm.band of it
+    dream_companies: list[CompanyName] = []  # their postings get the top company priority
 
 
 class NtfyConfig(_Model):
@@ -500,6 +524,66 @@ class DashboardConfig(_Model):
     port: int = Field(default=8000, ge=1, le=65535)
 
 
+class SetupAnswers(_Model):
+    """What the setup wizard asked (M8). The rules sections are built from these
+    (``onboarding.apply_answers``), except those in ``custom``: edited in Advanced, they're
+    kept as they are."""
+
+    roles: list[str] = []  # core.roles family keys
+    level: Literal["entry", "mid", "senior", "staff"] = "mid"
+    max_years: int | None = Field(default=None, ge=0, le=40)  # None: the level's own
+    countries: list[CountryCode] = ["US"]
+    places: list[PlaceKey] = []
+    remote_ok: bool = True
+    min_pay: int | None = Field(default=None, ge=0, le=10_000)  # thousands of USD a year
+    skills: dict[str, Literal["main", "also"]] = {}  # core.skills keys
+    dream: list[CompanyName] = []
+    avoid: list[CompanyName] = []
+    hide_agencies: bool = True
+    channel: Literal["ntfy", "discord", "none"] = "ntfy"
+    custom: list[str] = []  # core.profile_builder.SECTIONS edited in Advanced
+
+    def to_core(self) -> Answers:
+        return Answers(
+            roles=tuple(self.roles),
+            level=self.level,
+            max_years=self.max_years,
+            countries=tuple(self.countries),
+            places=tuple(self.places),
+            remote_ok=self.remote_ok,
+            min_pay=self.min_pay,
+            skills=dict(self.skills),
+            dream=tuple(self.dream),
+            avoid=tuple(self.avoid),
+            hide_agencies=self.hide_agencies,
+            channel=self.channel,
+        )
+
+    @field_validator("roles")
+    @classmethod
+    def _known_roles(cls, value: list[str]) -> list[str]:
+        unknown = [key for key in value if key not in FAMILIES_BY_KEY]
+        if unknown:
+            raise ValueError(f"unknown role families: {', '.join(unknown)}")
+        return list(dict.fromkeys(value))
+
+    @field_validator("skills")
+    @classmethod
+    def _known_skills(cls, value: dict[str, str]) -> dict[str, str]:
+        unknown = [key for key in value if key not in SKILLS_BY_KEY]
+        if unknown:
+            raise ValueError(f"unknown skills: {', '.join(unknown)}")
+        return value
+
+    @field_validator("custom")
+    @classmethod
+    def _known_sections(cls, value: list[str]) -> list[str]:
+        unknown = [path for path in value if path not in SECTIONS]
+        if unknown:
+            raise ValueError(f"unknown sections: {', '.join(unknown)}")
+        return list(dict.fromkeys(value))
+
+
 PROFILE_VERSION = 1
 # The preferences that moved from config.yaml into the database profile (M6).
 PROFILE_KEYS = (
@@ -512,6 +596,7 @@ PROFILE_KEYS = (
     "blocklist",
     "hide_agencies",
     "llm",
+    "answers",
 )
 MOVED_KEYS = (*PROFILE_KEYS, "watchlist")
 
@@ -571,6 +656,7 @@ class Profile(_Model):
     blocklist: BlocklistConfig = BlocklistConfig()
     hide_agencies: bool = True  # block the staffing agencies in data/seed/agencies.json
     llm: LlmConfig = LlmConfig()
+    answers: SetupAnswers | None = None  # the setup wizard's; None: imported or hand-written
 
     @field_validator("contact_email")
     @classmethod
@@ -1042,8 +1128,14 @@ def filter_rules(config: Profile) -> core_filters.FilterRules:
             exclude=_patterns(filters.locations.exclude),
             countries=frozenset(filters.locations.countries),
             unknown_passes=filters.locations.unknown_location_passes,
+            places=tuple(filters.locations.places),
+            remote_ok=filters.locations.remote_ok,
         ),
         blocklist=company_blocklist(config),
+        min_yearly_usd=filters.pay.min_yearly_usd,
+        dream_companies=frozenset(
+            name for name in map(normalize_company, config.scoring.dream_companies) if name
+        ),
     )
 
 

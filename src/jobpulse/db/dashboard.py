@@ -549,3 +549,22 @@ def open_incidents(session: Session) -> list[HealthIncident]:
             .order_by(HealthIncident.opened_at, HealthIncident.id)
         )
     )
+
+
+@dataclass(frozen=True, slots=True)
+class WatchProgress:
+    """What the empty New view says while postings are on the way (M8)."""
+
+    boards: int  # active watchlist boards
+    boards_checked: int  # of them, those whose first (silent) check is done
+    searches: int  # active LinkedIn and Indeed searches
+    last_check: datetime | None  # the latest finished run of any source
+
+
+def watch_progress(session: Session) -> WatchProgress:
+    boards = session.execute(
+        select(func.count(), func.count(Company.baseline_done_at)).where(Company.active)
+    ).one()
+    searches = session.scalar(select(func.count()).select_from(Search).where(Search.active))
+    last = session.scalar(select(func.max(Run.finished_at)))
+    return WatchProgress(boards[0], boards[1], searches or 0, last)

@@ -240,3 +240,28 @@ async def test_a_waiting_push_for_a_newly_blocked_company_is_dropped(
     assert env.notifier.sent == []
     dropped = env.posting("linkedin", "4101000031")
     assert (dropped.tier, dropped.tier_reason) == ("filtered", BLOCKED)
+
+
+async def test_a_marked_agency_is_never_pushed_while_hide_agencies_is_on(
+    env: Env, boards: ScriptedScrape
+) -> None:
+    env.add_search()
+    with env.sessions() as session:
+        repo.block_company(session, "Hire Fast", now=NOW, kind="agency")
+        session.commit()
+    rows = [jobspy_row("linkedin", external_id="4101000051", company="Hire Fast LLC")]
+    boards.queue("linkedin", jobspy_frame([]), jobspy_frame(rows))
+    poller = env.poller()
+    await poller.run_cycle(sources=["linkedin"])
+    await poller.run_cycle(sources=["linkedin"])
+    assert env.posting("linkedin", "4101000051").tier_reason == BLOCKED
+
+    env.reconfigure(hide_agencies=False)
+    rows = [
+        jobspy_row(
+            "linkedin", external_id="4101000052", company="Hire Fast LLC", title="Platform Engineer"
+        )
+    ]
+    boards.queue("linkedin", jobspy_frame(rows))
+    await env.poller().run_cycle(sources=["linkedin"])
+    assert env.posting("linkedin", "4101000052").tier == "instant"

@@ -45,6 +45,7 @@ from jobpulse.credentials import SecretStore
 from jobpulse.db import migrate, repo
 from jobpulse.db import profile as profile_db
 from jobpulse.db import resume as resume_db
+from jobpulse.db.lease import LeaseHeld
 from jobpulse.db.session import display_url, resolve_database_url, session_scope
 from jobpulse.devtools.fixtures import FixtureScraper, FixtureTransport
 from jobpulse.embeddings.base import EmbedderUnavailable
@@ -62,6 +63,7 @@ from jobpulse.resume_scoring import (
 from jobpulse.runtime import (
     KNOWN_SOURCES,
     DatabaseNotReady,
+    LeaseLost,
     WorkerStalled,
     build_embedder,
     build_http,
@@ -84,9 +86,11 @@ from jobpulse.seed import (
     plan_seed,
     render_seed,
     retirable,
+    seed_keywords,
     write_seed,
 )
 from jobpulse.sources.ats_detect import AtsDetector
+from jobpulse.up import run_app
 from jobpulse.web.app import create_app
 
 log = logging.getLogger("jobpulse")
@@ -274,20 +278,14 @@ def db_upgrade(
 ) -> None:
     """Apply migrations, up to the latest by default."""
     url = _database_url(_state(ctx))
-    try:
-        migrate.upgrade(url, revision)
-    except FileNotFoundError as exc:
-        _fail(exc)
+    migrate.upgrade(url, revision)
     typer.echo(f"{display_url(url)}: upgraded to {revision}")
 
 
 @db_app.command("current")
 def db_current(ctx: typer.Context) -> None:
     """Show the database's current migration revision."""
-    try:
-        migrate.show_current(_database_url(_state(ctx)))
-    except FileNotFoundError as exc:
-        _fail(exc)
+    migrate.show_current(_database_url(_state(ctx)))
 
 
 @app.command()
@@ -367,9 +365,9 @@ def worker(ctx: typer.Context) -> None:
         asyncio.run(
             run_worker(infra=infra, store=state.store, database_url=_database_url(state, infra))
         )
-    except DatabaseNotReady as exc:
+    except (DatabaseNotReady, LeaseHeld) as exc:
         _fail(exc)
-    except WorkerStalled as exc:
+    except (WorkerStalled, LeaseLost) as exc:
         log.error("%s", exc)
         raise typer.Exit(code=1) from None
 
@@ -383,7 +381,9 @@ def companies_list(ctx: typer.Context) -> None:
     config = _app_config(state, infra, sessions, required=False)
     with session_scope(sessions) as session:
         companies = repo.list_companies(session)
-        blocklist = repo.blocklist(session, company_blocklist(config))  # with the dashboard's
+        blocklist = repo.blocklist(  # with the dashboard's
+            session, company_blocklist(config), agencies=config.hide_agencies
+        )
     if not companies:
         typer.echo(
             "no companies yet; add boards on the Watchlist page, or run `jobpulse profile import`"
@@ -497,7 +497,9 @@ def seed_apply(
     _start_logging(state, config)
     with sessions() as session:
         known = repo.known_companies(session)
-        blocklist = repo.blocklist(session, company_blocklist(config))
+        blocklist = repo.blocklist(
+            session, company_blocklist(config), agencies=config.hide_agencies
+        )
     rules = replace(filter_rules(config), blocklist=blocklist)
 
     async def run() -> SeedPlan:
@@ -509,6 +511,7 @@ def seed_apply(
                 config=config,
                 rules=rules,
                 detector=AtsDetector(http),
+                keywords=seed_keywords(config),
             )
 
     plan = asyncio.run(run())
@@ -974,6 +977,73 @@ def web(
         _fail(exc)
     sessions = _sessions(state, infra)
     _start_logging(state, _app_config(state, infra, sessions, required=False))
+    bind_host, bind_port = _bind(infra, host, port, credentials)
+    application = create_app(
+        infra=infra, sessions=sessions, credentials=credentials, store=state.store
+    )
+    log.info(
+        "dashboard on http://%s:%d/ (basic auth %s)",
+        bind_host,
+        bind_port,
+        "on" if credentials else "off",
+    )
+    _quiet_probes()
+    uvicorn.run(application, host=bind_host, port=bind_port, log_config=None, server_header=False)
+
+
+@app.command()
+def up(
+    ctx: typer.Context,
+    host: Annotated[
+        str | None,
+        typer.Option("--host", help="Address to listen on (default: dashboard.host, 127.0.0.1)."),
+    ] = None,
+    port: Annotated[
+        int | None,
+        typer.Option("--port", help="Port (default: dashboard.port, 8000).", min=1, max=65535),
+    ] = None,
+    no_migrate: Annotated[
+        bool,
+        typer.Option("--no-migrate", help="Don't back up and upgrade the database first."),
+    ] = False,
+) -> None:
+    """Run everything in one process: back up and upgrade the database, then serve the
+    dashboard with the scheduler alongside. A new install opens the setup wizard."""
+    state = _state(ctx)
+    infra = _load_infra(state)
+    try:
+        credentials = dashboard_credentials(state.settings, env_file=state.env_file)
+    except ConfigError as exc:
+        _fail(exc)
+    url = _database_url(state, infra)
+    _start_logging(state)
+    bind_host, bind_port = _bind(infra, host, port, credentials)
+    _quiet_probes()
+    log.info(
+        "jobpulse on http://%s:%d/ (basic auth %s)",
+        bind_host,
+        bind_port,
+        "on" if credentials else "off",
+    )
+    try:
+        code = run_app(
+            infra=infra,
+            store=state.store,
+            database_url=url,
+            host=bind_host,
+            port=bind_port,
+            credentials=credentials,
+            migrate_first=not no_migrate,
+        )
+    except (DatabaseNotReady, LeaseHeld) as exc:
+        _fail(exc)
+    if code:
+        raise typer.Exit(code=code)
+
+
+def _bind(
+    infra: InfraConfig, host: str | None, port: int | None, credentials: tuple[str, str] | None
+) -> tuple[str, int]:
     bind_host = host or infra.dashboard.host
     bind_port = port or infra.dashboard.port
     if credentials is None and not _is_loopback(bind_host):
@@ -984,19 +1054,13 @@ def web(
             bind_host,
             bind_port,
         )
-    application = create_app(
-        infra=infra, sessions=sessions, credentials=credentials, store=state.store
-    )
-    log.info(
-        "dashboard on http://%s:%d/ (basic auth %s)",
-        bind_host,
-        bind_port,
-        "on" if credentials else "off",
-    )
+    return bind_host, bind_port
+
+
+def _quiet_probes() -> None:
     access_log = logging.getLogger("uvicorn.access")
     if not any(isinstance(item, _SkipProbes) for item in access_log.filters):
         access_log.addFilter(_SkipProbes())
-    uvicorn.run(application, host=bind_host, port=bind_port, log_config=None, server_header=False)
 
 
 class _SkipProbes(logging.Filter):

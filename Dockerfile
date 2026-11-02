@@ -25,13 +25,10 @@ RUN groupadd --system --gid 10001 jobpulse \
         --shell /usr/sbin/nologin jobpulse
 WORKDIR /app
 COPY --from=build /app/.venv /app/.venv
-COPY alembic.ini ./
-COPY migrations ./migrations
 # The SQLite database lives here, on the jobpulse-data volume.
 RUN mkdir -p /app/data && chown jobpulse:jobpulse /app/data
 ENV PATH="/app/.venv/bin:$PATH" \
-    PYTHONUNBUFFERED=1 \
-    JOBPULSE_ALEMBIC_INI=/app/alembic.ini
+    PYTHONUNBUFFERED=1
 USER jobpulse
 EXPOSE 8000
 CMD ["jobpulse", "--help"]

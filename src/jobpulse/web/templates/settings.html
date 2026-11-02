@@ -77,6 +77,22 @@
   {% endif %}
 </section>
 
+{% if setup_answers is defined %}
+<section class="settings-block" id="setup">
+  <h2>Setup answers</h2>
+  {% if setup_answers %}
+  <p>Roles, skills, level, locations, pay, companies and notifications come from your answers to the setup questions. <a href="/setup">Change your answers</a></p>
+  {% if setup_answers.custom %}
+  <p class="hint">Edited by hand under Profile below, so kept as they are when your answers change: {% for path in setup_answers.custom %}<code>{{ path }}</code>{% if not loop.last %}, {% endif %}{% endfor %}. Delete a name from <code>answers.custom</code> to let the answers rebuild it.</p>
+  {% endif %}
+  {% elif setup_onboarded %}
+  <p class="hint">Your profile was imported or written by hand, so every section is yours: edit it under Profile below.</p>
+  {% else %}
+  <p>No profile yet. <a href="/setup">Answer the setup questions</a> to start.</p>
+  {% endif %}
+</section>
+{% endif %}
+
 {% if profile_revision is defined %}
 <section class="settings-block" id="notifications">
   <h2>Notifications</h2>

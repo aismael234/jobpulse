@@ -10,9 +10,10 @@ Applying it (``jobpulse companies seed apply``) adds every board you don't have 
 ``seed`` company with a pending baseline: its first poll stores the jobs it has without
 notifying you. Known, blocked and paused boards are skipped, so applying twice changes
 nothing. A tombstone pauses a seed board only while nobody edited it (still active, at
-priority 0). Workday boards are searched with ``SEED_WORKDAY_KEYWORDS``, each kept only
-when it fits what a poll reads (``board_import.check_workday_keywords``); M8 derives them
-from your roles.
+priority 0). Workday boards are searched with keywords from your role families (the setup
+answers; ``SEED_WORKDAY_KEYWORDS`` without them), each kept only when it fits what a poll
+reads (``board_import.check_workday_keywords``). The setup wizard applies it once, when
+onboarding finishes.
 
 With ``seed.remote`` on, a watchlist cycle fetches the public seed once a day with its
 ETag. A body bigger than ``seed.max_bytes`` or that doesn't parse applies nothing; at most
@@ -43,6 +44,7 @@ from jobpulse.config import BOARD_REF_PATTERN, AppConfig, SeedConfig
 from jobpulse.core.atsurls import AtsRef, default_board_name
 from jobpulse.core.filters import Blocklist, FilterRules
 from jobpulse.core.models import AtsName, Region
+from jobpulse.core.profile_builder import workday_keywords
 from jobpulse.core.timeparse import utcnow
 from jobpulse.data import SEED_FILE, agency_names, read_text
 from jobpulse.db import repo
@@ -59,7 +61,8 @@ REMOTE_TARGET = "remote"  # runs.target of the remote sync
 SYNC_EVERY = timedelta(days=1)
 CONCURRENCY = 8  # validations at once (per-host limits still apply)
 MAX_NAME_CHARS = 200
-# Until M8 derives keywords from your roles: the set most of the imported boards kept.
+# For a profile without setup answers (M8 derives them from your roles): the set most of the
+# first install's imported boards kept.
 SEED_WORKDAY_KEYWORDS = (
     "software engineer",
     "full stack",
@@ -187,12 +190,22 @@ def render_seed(seed: Seed) -> str:
     )
 
 
+def seed_keywords(config: AppConfig) -> tuple[str, ...]:
+    """Workday keywords for seed boards: from the setup answers' role families, else
+    ``SEED_WORKDAY_KEYWORDS``."""
+    if config.answers is not None and (found := workday_keywords(config.answers.to_core())):
+        return found
+    return SEED_WORKDAY_KEYWORDS
+
+
 def packaged_seed() -> Seed:
     return parse_seed(read_text(SEED_FILE))
 
 
-def agency_blocklist() -> Blocklist:
-    return Blocklist.build(companies=agency_names())
+def agency_blocklist(session: Session | None = None) -> Blocklist:
+    """The packaged agencies, with those you marked on the dashboard when ``session``."""
+    marked = [row.name for row in repo.blocked_companies(session, kind="agency")] if session else []
+    return Blocklist.build(companies=[*agency_names(), *marked])
 
 
 def looks_like_agency(name: str) -> bool:
@@ -234,6 +247,7 @@ async def _check(
     config: AppConfig,
     rules: FilterRules,
     validate: bool,
+    keywords: Sequence[str],
 ) -> SeedResult:
     if validate or board.ats == "workday":
         if detector is None:
@@ -250,7 +264,7 @@ async def _check(
     check = await check_workday_keywords(
         detector,
         board.ref,
-        SEED_WORKDAY_KEYWORDS,
+        keywords,
         cap=config.workday.max_pages * PAGE_LIMIT,
         rules=rules,
     )
@@ -271,10 +285,11 @@ async def plan_seed(
     detector: AtsDetector | None,
     validate: bool = False,
     max_new: int | None = None,
+    keywords: Sequence[str] = SEED_WORKDAY_KEYWORDS,
 ) -> SeedPlan:
     """Which of the seed's boards to add. The packaged seed was validated when it was built,
-    so only Workday boards are searched (for their keywords); a remote seed is ``validate``d
-    board by board."""
+    so only Workday boards are searched (each of ``keywords``, kept when it fits what a poll
+    reads); a remote seed is ``validate``d board by board."""
     plan = SeedPlan(removed=seed.removed)
     pending: list[SeedBoard] = []
     for board in seed.boards:
@@ -298,6 +313,7 @@ async def plan_seed(
                 config=config,
                 rules=rules,
                 validate=validate,
+                keywords=keywords,
             )
 
     plan.results += await asyncio.gather(*(check(board) for board in pending))
@@ -449,6 +465,7 @@ class SeedSync:
             detector=self._detector,
             validate=True,
             max_new=settings.max_new_boards,
+            keywords=seed_keywords(config),
         )
         now = self._clock()
         outcome.boards = len(seed.boards)
@@ -535,8 +552,8 @@ async def export_seed(
     detector: AtsDetector | None = None,
 ) -> ExportReport:
     """The seed built from the watchlist, on top of ``previous``."""
-    agencies = agency_blocklist()
     with sessions() as session:
+        agencies = agency_blocklist(session)
         rows = repo.board_rows(session)
         dead = repo.failing_boards(session)
     boards: dict[Key, SeedBoard] = {}
@@ -593,8 +610,9 @@ async def export_seed(
 
 
 def contribution(session: Session, seed: Seed) -> Seed:
-    """Your active boards the seed lacks: what you added yourself, less agencies."""
-    agencies = agency_blocklist()
+    """Your active boards the seed lacks: what you added yourself, less agencies (the
+    packaged ones and those you marked)."""
+    agencies = agency_blocklist(session)
     known = seed.keys() | set(seed.removed)
     boards = [
         SeedBoard(cast(AtsName, row.ats_type), row.token, row.name, cast(Region, row.region))

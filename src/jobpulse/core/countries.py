@@ -801,3 +801,14 @@ def country_name(code: str) -> str:
 def subdivision_name(key: str) -> str | None:
     """ "US-TX" → "Texas", "CA-ON" → "Ontario"."""
     return _SUBDIVISION_NAMES.get(key)
+
+
+def subdivisions(country: str) -> tuple[tuple[str, str], ...]:
+    """A country's states or provinces the tables know, as (key, name) sorted by name."""
+    prefix = f"{country}-"
+    return tuple(
+        sorted(
+            ((key, name) for key, name in _SUBDIVISION_NAMES.items() if key.startswith(prefix)),
+            key=lambda item: item[1],
+        )
+    )

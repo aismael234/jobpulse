@@ -128,7 +128,9 @@ YEARS_SAMPLES = (
 
 
 def _migration(revision: str) -> ModuleType:
-    path = next((REPO_ROOT / "migrations" / "versions").glob(f"{revision}_*.py"))
+    path = next(
+        (REPO_ROOT / "src" / "jobpulse" / "migrations" / "versions").glob(f"{revision}_*.py")
+    )
     spec = importlib.util.spec_from_file_location(f"migration_{revision}", path)
     assert spec is not None
     assert spec.loader is not None
@@ -452,3 +454,34 @@ def test_cli_db_upgrade_uses_database_url(tmp_path: Path, db_url: str) -> None:
     )
     assert result.exit_code == 0, result.output
     assert set(inspect(create_engine(db_url)).get_table_names()) >= TABLES
+
+
+def test_0011_adds_agency_kinds_and_the_worker_lease(db_url: str) -> None:
+    config = alembic_config(db_url)
+    command.upgrade(config, "0010")
+    engine = create_engine(db_url)
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO blocked_companies (name, name_key, created_at) "
+                "VALUES ('Jobot', 'jobot', '2026-11-01')"
+            )
+        )
+    command.upgrade(config, "0011")
+    with engine.begin() as connection:
+        assert connection.execute(text("SELECT kind FROM blocked_companies")).scalar() == (
+            "company"
+        )
+    assert "worker_lease" in set(inspect(engine).get_table_names())
+    row = (
+        "INSERT INTO worker_lease (id, holder, acquired_at, expires_at) "
+        "VALUES ({id}, 'h:1:x', '2026-11-01', '2026-11-01')"
+    )
+    with engine.begin() as connection:
+        connection.execute(text(row.format(id=1)))
+    with pytest.raises(IntegrityError), engine.begin() as connection:
+        connection.execute(text(row.format(id=2)))
+    command.downgrade(config, "0010")
+    assert "worker_lease" not in set(inspect(engine).get_table_names())
+    with engine.begin() as connection:
+        assert connection.execute(text("SELECT name FROM blocked_companies")).scalar() == "Jobot"

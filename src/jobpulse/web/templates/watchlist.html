@@ -55,4 +55,27 @@
   <p class="empty">None. Block a company from any posting's card.</p>
   {% endif %}
 </section>
+
+{% if marked_agencies is defined %}
+<section class="blocked">
+  <h2>Staffing agencies you marked</h2>
+  <p class="hint">{% if hide_agencies %}Hidden like the built-in agency list while “Hide staffing agencies” is on (Settings).{% else %}Not hidden right now: “Hide staffing agencies” is off (hide_agencies on Settings).{% endif %}</p>
+  {% if marked_agencies %}
+  <ul>
+    {% for marked in marked_agencies %}
+    <li>{{ marked.name }} <span class="muted small">marked {{ marked.created_at|ago }}</span>
+      <form class="inline" method="post" action="/companies/unblock">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="company" value="{{ marked.name }}">
+        <input type="hidden" name="return_to" value="/watchlist">
+        <button type="submit">Not an agency</button>
+      </form>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="empty">None. When you block a company from its card, you're asked whether it's an agency.</p>
+  {% endif %}
+</section>
+{% endif %}
 {% endblock %}

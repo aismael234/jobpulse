@@ -1,0 +1,19 @@
+{% extends "setup/_layout.html" %}
+{% block title %}Resume{% endblock %}
+{% block content %}
+<h1>{% if editing %}Your resume{% else %}Welcome to jobpulse{% endif %}</h1>
+<p>jobpulse watches company job boards, LinkedIn, Indeed and community lists, and pushes you the postings that fit, minutes after they go up. A few questions set it up; you can change every answer later on Settings.</p>
+<section class="settings-block">
+  <h2>Start from your resume</h2>
+  <p class="hint">Optional. jobpulse reads it here, on your own machine, to suggest roles, skills and a level, and scores each posting by how close it is to your resume. Nothing is sent anywhere. PDF, DOCX, TXT or Markdown, up to 2 MB.</p>
+  {% if resume %}<p class="notice info">Stored: {{ resume.filename }}. Upload another to replace it.</p>{% endif %}
+  <form method="post" action="/setup/resume" enctype="multipart/form-data" class="wizard-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="file" name="resume" accept=".pdf,.docx,.txt,.md" aria-label="Resume file">
+    <div class="wizard-buttons">
+      <button type="submit">Upload and continue</button>
+      <a href="/setup/roles">{% if resume %}Continue{% else %}Skip: no resume{% endif %}</a>
+    </div>
+  </form>
+</section>
+{% endblock %}

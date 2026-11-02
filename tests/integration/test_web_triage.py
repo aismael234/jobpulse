@@ -9,9 +9,9 @@ import re
 from collections.abc import Callable
 from datetime import timedelta
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
-from jobpulse.db.tables import BlockedCompany
+from jobpulse.db.tables import BlockedCompany, Company, Run
 from tests.factories import NOW
 from tests.integration.conftest import Web, make_config, posting_ids
 from tests.integration.test_web_postings import card, nav_count
@@ -314,3 +314,73 @@ def test_the_watchlist_page_lists_blocked_companies(make_web: Callable[..., Web]
     response = web.post("/companies/unblock", {"company": "CyberCoders"}, htmx=False)
     assert response.status_code == 303
     assert "CyberCoders" not in html.unescape(web.page("/watchlist")).split("Blocked")[-1]
+
+
+# --- staffing agencies you mark (M8) -----------------------------------------------------------
+
+
+def test_the_block_button_asks_about_agencies(web: Web) -> None:
+    posting = web.add(title="Backend Engineer", company_name="Hire Fast LLC")
+    page = web.page("/")
+    assert 'data-ask-agency="Hire Fast LLC"' in card(page, posting)
+    assert 'name="kind" value="company"' in card(page, posting)
+    assert '<dialog id="block-dialog"' in page
+
+
+def test_marking_an_agency_hides_it_while_hide_agencies_is_on(
+    make_web: Callable[..., Web],
+) -> None:
+    web = make_web(config=make_config(hide_agencies=True))
+    first = web.add(title="Backend Engineer", company_name="Hire Fast LLC")
+    other = web.add(title="Platform Engineer", company_name="Acme")
+    response = web.post(
+        "/companies/block", {"company": "Hire Fast LLC", "posting_id": str(first), "kind": "agency"}
+    )
+    notice = re.sub(r"<[^>]+>", "", html.unescape(response.text))
+    assert "Marked Hire Fast LLC as a staffing agency · 1 posting hidden" in notice
+    assert "jobpulse:blocked" in response.headers["hx-trigger"]
+    with web.sessions() as session:
+        rows = list(session.scalars(select(BlockedCompany)))
+    assert [(row.name, row.kind) for row in rows] == [("Hire Fast LLC", "agency")]
+    assert web.ids() == [other]
+
+    page = html.unescape(web.page("/watchlist"))
+    agencies = page.split("Staffing agencies you marked")[1]
+    assert "Hire Fast LLC" in agencies
+    assert "Not an agency" in agencies
+    assert "Hire Fast LLC" not in page.split("Blocked companies")[1].split("Staffing")[0]
+
+
+def test_a_marked_agency_shows_while_hide_agencies_is_off(make_web: Callable[..., Web]) -> None:
+    web = make_web(config=make_config(hide_agencies=False))
+    first = web.add(title="Backend Engineer", company_name="Hire Fast LLC")
+    response = web.post("/companies/block", {"company": "Hire Fast LLC", "kind": "agency"})
+    assert "Agencies aren't hidden right now" in html.unescape(response.text)
+    assert "hx-trigger" not in response.headers
+    assert web.ids() == [first]
+
+
+def test_a_blocked_company_can_become_an_agency(web: Web) -> None:
+    web.post("/companies/block", {"company": "Hire Fast"})
+    web.post("/companies/block", {"company": "Hire Fast, Inc.", "kind": "agency"})
+    with web.sessions() as session:
+        assert [row.kind for row in session.scalars(select(BlockedCompany))] == ["agency"]
+
+
+# --- the empty New view (M8) ----------------------------------------------------------------
+
+
+def test_an_empty_new_view_says_postings_are_on_the_way(web: Web) -> None:
+    web.watch()  # Acme and Beta, neither checked yet
+    page = re.sub(r"\s+", " ", html.unescape(web.page("/")))
+    assert "Postings are on the way." in page
+    assert "watches 2 company boards" in page
+    with web.sessions() as session:
+        session.execute(update(Company).where(Company.token == "acme").values(baseline_done_at=NOW))
+        session.add(
+            Run(source="greenhouse", target="acme", started_at=NOW, finished_at=NOW, ok=True)
+        )
+        session.commit()
+    page = re.sub(r"\s+", " ", html.unescape(web.page("/")))
+    assert "1 of 2 boards checked" in page
+    assert "Last check" in page

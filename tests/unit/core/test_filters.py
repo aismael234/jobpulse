@@ -8,6 +8,7 @@ from jobpulse.core.filters import (
     LocationRules,
     check_description,
     check_locations,
+    check_pay,
     check_title,
     extract_years_required,
 )
@@ -277,3 +278,68 @@ def test_blocklist_boards_are_ats_and_token() -> None:
 def test_an_empty_blocklist_blocks_nothing() -> None:
     assert not Blocklist().blocks_company("Acme")
     assert not Blocklist().blocks_board("greenhouse", "acme")
+
+
+# --- M8: places, remote and the pay floor -------------------------------------------------------
+
+PLACES = LocationRules(countries=frozenset({"US"}), places=("metro:bay-area", "US-TX/Austin"))
+
+
+@pytest.mark.parametrize(
+    ("labels", "passed"),
+    [
+        (["San Francisco, CA"], True),
+        (["Austin, TX"], True),
+        (["Dallas, TX"], False),
+        (["Remote (US)"], True),
+        (["Remote"], True),
+        (["London, UK"], False),
+        (["Dallas, TX", "Sunnyvale, CA"], True),
+        ([], True),  # unknown location passes as before
+    ],
+)
+def test_places_keep_postings_in_them_and_remote(labels: list[str], passed: bool) -> None:
+    assert check_locations(labels, PLACES).passed is passed
+
+
+def test_without_remote_ok_remote_postings_fail_places() -> None:
+    rules = LocationRules(countries=frozenset({"US"}), places=("US-TX",), remote_ok=False)
+    assert not check_locations(["Remote (US)"], rules).passed
+    assert check_locations(["Houston, TX"], rules).passed
+
+
+def test_no_places_means_anywhere_in_the_countries() -> None:
+    rules = LocationRules(countries=frozenset({"US"}))
+    assert check_locations(["Dallas, TX"], rules).passed
+
+
+@pytest.mark.parametrize(
+    ("compensation", "floor", "filtered"),
+    [
+        (
+            {"min": 120000, "max": 140000, "currency": "USD", "interval": "per-year-salary"},
+            150000,
+            True,
+        ),
+        (
+            {"min": 140000, "max": 160000, "currency": "USD", "interval": "per-year-salary"},
+            150000,
+            False,
+        ),
+        ({"min": 50, "max": 60, "currency": "USD", "interval": "hourly"}, 150000, True),
+        ({"min": 100000, "max": 120000, "currency": "EUR"}, 150000, False),  # not USD: passes
+        (None, 150000, False),  # unlisted: passes
+        ({"min": 1, "max": 2, "currency": "USD"}, None, False),  # no floor
+    ],
+)
+def test_pay_floor(
+    compensation: dict[str, object] | None, floor: int | None, filtered: bool
+) -> None:
+    assert (check_pay(compensation, floor) is not None) is filtered
+
+
+def test_dream_companies_compare_like_the_blocklist() -> None:
+    rules = FilterRules(dream_companies=frozenset({"stripe"}))
+    assert rules.is_dream("Stripe, Inc.")
+    assert not rules.is_dream("Stripes Co")
+    assert not FilterRules().is_dream("Stripe")

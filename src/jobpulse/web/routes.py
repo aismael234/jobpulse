@@ -9,7 +9,7 @@ import json
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any, Literal
 from urllib.parse import parse_qsl, urlsplit
@@ -64,6 +64,7 @@ from jobpulse.db.session import session_scope
 from jobpulse.db.tables import Company, PostingRow, SavedFilter
 from jobpulse.notify.base import NotifierError
 from jobpulse.notify.live import NO_CHANNEL, LiveNotifier, send_test
+from jobpulse.onboarding import note_custom
 from jobpulse.resume_files import MAX_BYTES as MAX_RESUME_BYTES
 from jobpulse.resume_files import ResumeFileError, read_resume_bytes
 from jobpulse.resume_scoring import restore_stack
@@ -149,15 +150,17 @@ def _profile_notice(snapshot: Snapshot) -> str | None:
         return f"{snapshot.problem}. The last good profile is in use; fix it on Settings."
     if not snapshot.onboarded:
         return (
-            "No profile yet, so the worker waits: run `jobpulse profile import` to bring in "
-            "config.yaml's preferences, or save one on Settings (Advanced)."
+            "No profile yet, so the worker waits: answer the setup questions (/setup), run "
+            "`jobpulse profile import` to bring in an old config.yaml's preferences, or save "
+            "one on Settings (Advanced)."
         )
     return None
 
 
 def _blocklist(request: Request, session: Session) -> Blocklist:
     """The profile's blocklist with the companies blocked from the dashboard."""
-    return repo.blocklist(session, _state(request).current().blocklist)
+    snapshot = _state(request).current()
+    return repo.blocklist(session, snapshot.blocklist, agencies=snapshot.config.hide_agencies)
 
 
 def _hidden(request: Request, session: Session) -> frozenset[str]:
@@ -179,6 +182,9 @@ def postings_page(request: Request) -> HTMLResponse:
     with state.sessions() as session:
         hidden = _hidden(request, session)
         page = dashboard.list_postings(session, query, now=now, hidden=hidden)
+        empty_new = query.status == "New" and not page.rows and not query.filtered
+        progress = dashboard.watch_progress(session) if empty_new else None
+        cadence = timedelta(minutes=state.infra.schedules.watchlist.every_minutes)
         return render(
             request,
             "postings.html",
@@ -192,6 +198,10 @@ def postings_page(request: Request) -> HTMLResponse:
                 "max_applicants_choices": MAX_APPLICANTS_CHOICES,
                 "contract_choices": CONTRACT_CHOICES,
                 "reposted_box": query.status == "New",
+                "progress": progress,
+                "next_check": progress.last_check + cadence
+                if progress is not None and progress.last_check is not None
+                else None,
                 **_saved_context(session, query, page.rows, now=now, hidden=hidden),
                 "moved_sort": MOVED_SORT_LABELS.get(query.status),
                 "bulk_views": BULK_VIEWS,
@@ -455,7 +465,9 @@ def _watchlist_page(
                 "detection": detection,
                 "added": _blank(request.query_params.get("added")),
                 "config_blocked": _state(request).current().config.blocklist.companies,
-                "dashboard_blocked": repo.blocked_companies(session),
+                "dashboard_blocked": repo.blocked_companies(session, kind="company"),
+                "marked_agencies": repo.blocked_companies(session, kind="agency"),
+                "hide_agencies": _state(request).current().config.hide_agencies,
             },
             session=session,
             status_code=status_code,
@@ -666,16 +678,21 @@ def block_company(
     company: Annotated[str, Form()] = "",
     posting_id: Annotated[str, Form()] = "",
     return_to: Annotated[str, Form()] = "",
+    kind: Annotated[str, Form()] = "company",
 ) -> Response:
     """Block a company from its card: hidden from the dashboard (Applied aside) at once, and
-    from the worker's next cycle never pushed, polled or discovered."""
+    from the worker's next cycle never pushed, polled or discovered. ``kind=agency`` (the
+    card's dialog asks) marks it a staffing agency instead: hidden the same way, but only
+    while hide_agencies is on."""
     state = _state(request)
     name = " ".join(company.split())
     if not normalize_company(name):
         raise HTTPException(status_code=400, detail="the posting has no company to block")
+    agency = kind == "agency"
+    hides = not agency or state.current().config.hide_agencies
     with session_scope(state.sessions) as session:
-        repo.block_company(session, name, now=state.clock())
-        hidden = dashboard.company_postings(session, name)
+        repo.block_company(session, name, now=state.clock(), kind="agency" if agency else "company")
+        hidden = dashboard.company_postings(session, name) if hides else 0
         if not _htmx(request):
             return RedirectResponse(safe_return_to(return_to), status_code=303)
         card_id = posting_id if posting_id.isdigit() else ""
@@ -688,11 +705,13 @@ def block_company(
                 "posting_id": card_id,
                 "counts": _counts(request, session),
                 "oob_counts": True,
+                "agency": agency,
+                "hides": hides,
             },
         )
-    # static/app.js takes the company's other cards off the page
-    event = {"company": company_key(name), "keep": f"posting-{card_id}"}
-    response.headers["HX-Trigger"] = json.dumps({"jobpulse:blocked": event})
+    if hides:  # static/app.js takes the company's other cards off the page
+        event = {"company": company_key(name), "keep": f"posting-{card_id}"}
+        response.headers["HX-Trigger"] = json.dumps({"jobpulse:blocked": event})
     return response
 
 
@@ -800,6 +819,8 @@ def _profile_sections(state: Any, session: Session, snapshot: Snapshot) -> dict[
         "profile_text": profile_yaml(split(snapshot.config)[1]),
         "profile_revision": snapshot.revision,
         "profile_errors": [],
+        "setup_answers": snapshot.config.answers,
+        "setup_onboarded": snapshot.onboarded,
     }
 
 
@@ -1024,7 +1045,7 @@ def save_profile(
     state = _state(request)
     with session_scope(state.sessions) as session:
         try:
-            parsed = parse_profile_yaml(profile)
+            parsed = note_custom(parse_profile_yaml(profile))
             profile_db.save(
                 session,
                 parsed,

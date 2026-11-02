@@ -1,10 +1,11 @@
 """The dashboard application: templates, static files, security middleware and routes."""
 
+import asyncio
 from collections.abc import AsyncIterator, Callable, Iterable
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import jinja2
 from fastapi import FastAPI, Request
@@ -24,7 +25,7 @@ from jobpulse.runtime import build_http
 from jobpulse.seed import REMOTE_TARGET
 from jobpulse.seed import SOURCE as SEED_SOURCE
 from jobpulse.sources.ats_detect import AtsDetector
-from jobpulse.web import routes
+from jobpulse.web import onboarding, routes
 from jobpulse.web.security import (
     BasicAuthMiddleware,
     CsrfCookieMiddleware,
@@ -36,6 +37,14 @@ from jobpulse.web.views import FILTERS
 HERE = Path(__file__).parent
 TEMPLATES_DIR = HERE / "templates"
 STATIC_DIR = HERE / "static"
+
+
+class Background(Protocol):
+    """Something the dashboard runs alongside itself: ``jobpulse up``'s worker thread."""
+
+    def start(self) -> None: ...
+
+    def stop(self) -> None: ...
 
 
 def _redactor(registry: SecretRegistry) -> Callable[[Any], Any]:
@@ -76,11 +85,13 @@ def create_app(
     store: SecretStore | None = None,
     http_factory: Callable[[], HttpClient] | None = None,
     clock: Callable[[], datetime] = utcnow,
+    worker: Background | None = None,
 ) -> FastAPI:
     """The dashboard. ``credentials`` (user, password) turn on basic auth; ``store`` resolves
     the secrets Settings shows and saves, and its registry's values are masked in every
     rendered value; ``http_factory`` builds the client the watchlist page detects boards
-    with and test pushes go through (default: the same client the poller uses)."""
+    with and test pushes go through (default: the same client the poller uses);
+    ``worker`` starts with the app and stops with it (``jobpulse up``)."""
     store = store if store is not None else SecretStore()
     store.registry.add(credentials[1:] if credentials else ())
     state = WebState(
@@ -99,9 +110,15 @@ def create_app(
         state.http = http
         state.detector = AtsDetector(http)
         state._snapshot = None  # the first page sets the User-Agent from the profile
+        if worker is not None:
+            worker.start()
         try:
             yield
         finally:
+            if worker is not None:
+                await asyncio.to_thread(worker.stop)
+            for task in list(state.tasks):
+                task.cancel()
             await http.aclose()
 
     app = FastAPI(
@@ -114,6 +131,8 @@ def create_app(
     # Starlette's base class, so unknown paths (404) get the same plain answer.
     app.add_exception_handler(HTTPException, _http_error)  # type: ignore[arg-type]
     # Starlette runs the last-added middleware first: headers wrap auth, which wraps CSRF.
+    # Innermost: the wizard redirect runs after auth and once the CSRF cookie is set.
+    app.add_middleware(onboarding.OnboardingRedirect)
     app.add_middleware(CsrfCookieMiddleware)
     if credentials is not None:
         app.add_middleware(BasicAuthMiddleware, username=credentials[0], password=credentials[1])

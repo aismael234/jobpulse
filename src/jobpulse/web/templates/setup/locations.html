@@ -1,0 +1,33 @@
+{% extends "setup/_layout.html" %}
+{% block title %}Locations{% endblock %}
+{% block content %}
+<h1>Locations</h1>
+<form method="post" action="/setup/locations" class="wizard-form">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <label class="field">Countries
+    <input type="text" name="countries" value="{{ answers.countries|join(", ") }}" placeholder="US, CA" required>
+  </label>
+  <p class="hint">ISO codes or English names, comma-separated. A posting needs a location in one of them; postings without a location are kept.</p>
+  <fieldset class="choices">
+    <legend>Only these areas (optional; none means anywhere in your countries)</legend>
+    <div class="skill-grid">
+      {% for key, label in metros %}
+      <label class="check"><input type="checkbox" name="places" value="{{ key }}"{% if key in answers.places %} checked{% endif %}> {{ label }}</label>
+      {% endfor %}
+    </div>
+    <label class="field">US states
+      <select name="places" multiple size="6" aria-label="US states">
+        {% for key, name in states %}
+        <option value="{{ key }}"{% if key in answers.places %} selected{% endif %}>{{ name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+  </fieldset>
+  <label class="check"><input type="checkbox" name="remote_ok" value="1"{% if answers.remote_ok %} checked{% endif %}> Remote postings are fine too</label>
+  <label class="field">Your timezone
+    <input type="text" name="timezone" value="" placeholder="America/Los_Angeles" data-autofill="timezone">
+  </label>
+  <p class="hint">For the times shown on the dashboard. Filled in from your browser.</p>
+  <div class="wizard-buttons"><button type="submit">Continue</button></div>
+</form>
+{% endblock %}

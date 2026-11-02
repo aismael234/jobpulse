@@ -54,7 +54,7 @@ from jobpulse.core.models import (
 )
 from jobpulse.core.palette import phone_bullet
 from jobpulse.core.reposts import REPOST_AFTER, repost_reason
-from jobpulse.core.scoring import priority_component
+from jobpulse.core.scoring import DREAM_PRIORITY, priority_component
 from jobpulse.core.similarity import ResumeMatch, Vector
 from jobpulse.core.timeparse import utcnow
 from jobpulse.db import profile as profile_db
@@ -93,7 +93,10 @@ from jobpulse.sources.maintenance import Sleep
 log = logging.getLogger(__name__)
 
 Inserted = tuple[int, Posting, str]  # (row id, posting, fingerprint)
-NOT_ONBOARDED = "no profile yet: run `jobpulse profile import`, or save one on Settings"
+NOT_ONBOARDED = (
+    "no profile yet: answer the setup questions on the dashboard (/setup), run `jobpulse "
+    "profile import`, or save one on Settings"
+)
 LLM_CAP_WINDOW = timedelta(hours=24)  # llm.max_calls_per_day counts calls in this window
 PUSH_CAP_WINDOW = timedelta(hours=24)  # notify.saved_filters.max_per_day counts this window
 
@@ -268,7 +271,9 @@ class Poller:
                 return report
             repo.sync_searches(session, self._config.searches, now=now)
             # Companies blocked from the dashboard count from the next cycle, without a restart.
-            self._blocklist = repo.blocklist(session, self._config_blocklist)
+            self._blocklist = repo.blocklist(
+                session, self._config_blocklist, agencies=self._config.hide_agencies
+            )
             self._rules = replace(self._rules, blocklist=self._blocklist)
             targets = self._targets(session, sources, target_key)
             unit.checkpoint()
@@ -1131,6 +1136,8 @@ class Poller:
             if isinstance(target, CompanyTarget)
             else 0.0
         )
+        if self._rules.is_dream(survivor.posting.company_name):
+            priority = DREAM_PRIORITY
         return EvaluationContext(
             now=self._clock(),
             first_seen_at=survivor.first_seen_at,

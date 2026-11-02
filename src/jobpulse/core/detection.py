@@ -10,6 +10,7 @@ from jobpulse.core.filters import (
     FilterRules,
     check_description,
     check_locations,
+    check_pay,
     check_title,
     title_match,
 )
@@ -167,6 +168,8 @@ def evaluate(posting: Posting, ctx: EvaluationContext) -> Decision:
             return Decision(tier="filtered", reason=location.reason)
     if not is_fresh(posting, first_seen_at=ctx.first_seen_at, now=ctx.now, freshness=ctx.freshness):
         return _stale(posting, ctx)
+    if (low_pay := check_pay(posting.compensation, ctx.rules.min_yearly_usd)) is not None:
+        return Decision(tier="filtered", reason=low_pay)
     description = check_description(posting.description_text, ctx.rules)
     if not description.passed:
         return Decision(

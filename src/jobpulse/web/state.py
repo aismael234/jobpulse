@@ -1,8 +1,10 @@
 """The dashboard's state: everything the routes need, kept on ``app.state.web``."""
 
-from collections.abc import Callable
+import asyncio
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from fastapi.templating import Jinja2Templates
@@ -50,6 +52,7 @@ class WebState:
     detector: AtsDetector | None = None
     http: HttpClient | None = None
     feeds: list[tuple[str, str]] = field(default_factory=list)
+    tasks: set["asyncio.Task[Any]"] = field(default_factory=set)  # background work (the seed)
     _profiles: ProfileReader = field(default_factory=ProfileReader)
     _snapshot: Snapshot | None = None
 
@@ -77,3 +80,10 @@ class WebState:
         if self.http is not None:
             self.http.set_user_agent(build_user_agent(config.contact_email))
         return snapshot
+
+    def spawn(self, work: Coroutine[Any, Any, Any]) -> "asyncio.Task[Any]":
+        """Run ``work`` in the background, keeping a reference until it ends."""
+        task = asyncio.get_running_loop().create_task(work)
+        self.tasks.add(task)
+        task.add_done_callback(self.tasks.discard)
+        return task

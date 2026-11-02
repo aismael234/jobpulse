@@ -28,7 +28,8 @@ MIN_DELAY_SECONDS = 1.0
 WATCHDOG_FACTOR = 3.0
 WATCHDOG_CHECK_SECONDS = 60.0
 
-JobFunc = Callable[[], Awaitable[None]]
+# A job may return how many seconds to wait before its next run (``None``: its cadence).
+JobFunc = Callable[[], Awaitable[float | None]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,8 +130,10 @@ class Worker:
             self._schedule(name, self._next_run(schedule, first=True))
         self._scheduler.start()
 
-    def _next_run(self, schedule: Cadence, *, first: bool) -> datetime:
+    def _next_run(self, schedule: Cadence, *, first: bool, hint: float | None = None) -> datetime:
         now = self._clock()
+        if hint is not None:
+            return now + timedelta(seconds=max(MIN_DELAY_SECONDS, hint))
         if first:
             stagger = min(self._first_run_max_delay, schedule.interval_seconds)
             return now + timedelta(seconds=self._rng.uniform(0.0, stagger))
@@ -151,15 +154,16 @@ class Worker:
 
     async def run_job(self, name: str) -> None:
         schedule, job = self._jobs[name]
+        hint: float | None = None
         try:
-            await job()
+            hint = await job()
         except Exception:
             # Never let an exception reach APScheduler: 3.11.3 can stop scheduling for good.
             log.exception("scheduled job %s failed", name)
         finally:
             self._last_finished[name] = self._monotonic()
             if not self._stopping:
-                self._schedule(name, self._next_run(schedule, first=False))
+                self._schedule(name, self._next_run(schedule, first=False, hint=hint))
 
     def shutdown(self) -> None:
         self._stopping = True

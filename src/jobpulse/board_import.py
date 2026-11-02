@@ -261,7 +261,9 @@ async def import_boards(
 
     with sessions() as session:
         known = repo.known_companies(session)
-        blocklist = repo.blocklist(session, company_blocklist(config))
+        blocklist = repo.blocklist(
+            session, company_blocklist(config), agencies=config.hide_agencies
+        )
 
     for link in pages.values():
         refs = await detector.refs_in_page(link.url)
