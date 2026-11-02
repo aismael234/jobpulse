@@ -8,7 +8,7 @@ A link counts when it names a Greenhouse, Lever, Ashby or Workday board by itsel
 ``gh_jid`` link on a company's own site, whose page is read once per host to find the
 Greenhouse board. LinkedIn and Indeed links are left to your searches, and other links are
 never fetched. Each board not yet on the watchlist is checked like a pasted URL: the
-blocklist (config.yaml's and the dashboard's) first, then one validation call. Boards bigger
+blocklist (the profile's and the dashboard's) first, then one validation call. Boards bigger
 than ``discovery.max_board_jobs`` are left out, as discovery leaves them.
 
 Workday boards are searched with the keywords you give. Each keyword is searched once here

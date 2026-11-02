@@ -444,16 +444,12 @@ def test_0010_adds_the_seed_state_table(db_url: str) -> None:
     assert "seed_state" not in set(inspect(engine).get_table_names())
 
 
-def test_cli_db_upgrade_uses_database_url(tmp_path: Path, db_url: str) -> None:
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text("contact_email: dev@example.com\n", encoding="utf-8")
-    result = CliRunner().invoke(
-        app,
-        ["--config", str(config_path), "--env-file", str(tmp_path / ".env"), "db", "upgrade"],
-        env={"DATABASE_URL": db_url},
-    )
+def test_cli_db_upgrade_creates_the_database_in_the_data_folder(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    result = CliRunner().invoke(app, ["--data-dir", str(data), "db", "upgrade"])
     assert result.exit_code == 0, result.output
-    assert set(inspect(create_engine(db_url)).get_table_names()) >= TABLES
+    engine = create_engine(f"sqlite:///{data / 'jobpulse.db'}")
+    assert set(inspect(engine).get_table_names()) >= TABLES
 
 
 def test_0011_adds_agency_kinds_and_the_worker_lease(db_url: str) -> None:

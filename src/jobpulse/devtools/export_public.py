@@ -2,9 +2,9 @@
 
 The tree comes from ``git archive`` (so paths marked ``export-ignore`` in .gitattributes, such
 as PROGRESS.md, stay private) and is scanned before anything is copied: secret-shaped values,
-email addresses outside example domains, home-directory paths, plus literal strings from a
-gitignored patterns file and the secrets in ``.env``. A finding names the file and line, never
-the value, and leaves the public clone untouched. Nothing is committed or pushed.
+email addresses outside example domains, home-directory paths, plus literal strings from the
+gitignored patterns file (your name, email, ntfy topic...). A finding names the file and line,
+never the value, and leaves the public clone untouched. Nothing is committed or pushed.
 
     uv run python -m jobpulse.devtools.export_public ../jobpulse-public [--ref HEAD]
 """
@@ -21,14 +21,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 PATTERNS_FILE = Path(".export-private-patterns")
-ENV_SECRETS = (
-    "NTFY_TOPIC",
-    "NTFY_TOKEN",
-    "DISCORD_WEBHOOK_URL",
-    "LLM_API_KEY",
-    "DASHBOARD_PASSWORD",
-)
-MIN_LITERAL = 6
 
 RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     # What the wizard and the README generate: token_urlsafe(24) after the prefix.
@@ -55,21 +47,12 @@ class Finding:
     kind: str
 
 
-def literals(patterns_file: Path, env_file: Path) -> tuple[str, ...]:
-    """The patterns file's lines (no blanks or # comments), then the secrets set in ``env_file``."""
-    found: list[str] = []
-    if patterns_file.is_file():
-        for line in patterns_file.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if line and not line.startswith("#"):
-                found.append(line)
-    if env_file.is_file():
-        for line in env_file.read_text(encoding="utf-8").splitlines():
-            name, sep, value = line.partition("=")
-            value = value.strip().strip("'\"")
-            if sep and name.strip() in ENV_SECRETS and len(value) >= MIN_LITERAL:
-                found.append(value)
-    return tuple(found)
+def literals(patterns_file: Path) -> tuple[str, ...]:
+    """The patterns file's lines, without blanks and # comments."""
+    if not patterns_file.is_file():
+        return ()
+    lines = (line.strip() for line in patterns_file.read_text(encoding="utf-8").splitlines())
+    return tuple(line for line in lines if line and not line.startswith("#"))
 
 
 def scan(root: Path, *, literals: Sequence[str]) -> list[Finding]:
@@ -137,9 +120,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("dest", type=Path, help="a clone of the public repository")
     parser.add_argument("--ref", default="HEAD", help="the commit to export (default: HEAD)")
     parser.add_argument("--patterns", type=Path, default=PATTERNS_FILE)
-    parser.add_argument("--env-file", type=Path, default=Path(".env"))
     args = parser.parse_args(argv)
-    return export(Path.cwd(), args.ref, args.dest, literals=literals(args.patterns, args.env_file))
+    return export(Path.cwd(), args.ref, args.dest, literals=literals(args.patterns))
 
 
 if __name__ == "__main__":

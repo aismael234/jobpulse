@@ -20,6 +20,13 @@ JobSpy doesn't go through httpx, so its results come from a ``jobspy`` section::
         file: jobspy/linkedin_backend.json   # {"rows": [...], "errors": {}, "warnings": {}}
 
 A search with no matching entry raises, which the adapter records as a failed run.
+
+An ``infra`` section overrides how the worker runs for the recording, on top of the stored
+settings (``fixture_infra``), for what Settings can't set::
+
+    infra:
+      linkedin: {delay_min_seconds: 0, delay_max_seconds: 0}   # nothing to be polite to
+      discovery: {max_page_fetches_per_cycle: 0}
 """
 
 import json
@@ -30,12 +37,26 @@ from typing import Any
 import httpx
 import yaml
 
+from jobpulse.config import InfraConfig
+
 _CONTENT_TYPES = {".json": "application/json", ".html": "text/html", ".txt": "text/plain"}
 
 
 def _load_routes(directory: Path) -> dict[str, Any]:
     spec = yaml.safe_load((directory / "routes.yaml").read_text(encoding="utf-8")) or {}
     return spec if isinstance(spec, dict) else {}
+
+
+def fixture_infra(directory: Path, infra: InfraConfig) -> InfraConfig:
+    """``infra`` with the recording's ``infra`` overrides (nested sections merge)."""
+    overrides = _load_routes(directory).get("infra") or {}
+    data = infra.model_dump()
+    for section, values in overrides.items():
+        if isinstance(values, dict) and isinstance(data.get(section), dict):
+            data[section] = {**data[section], **values}
+        else:
+            data[section] = values
+    return InfraConfig.model_validate(data)
 
 
 class FixtureScraper:

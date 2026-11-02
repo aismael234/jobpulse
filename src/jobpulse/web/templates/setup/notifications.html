@@ -9,7 +9,7 @@
     <legend>Where should new postings reach you?</legend>
     <label class="choice"><input type="radio" name="channel" value="ntfy"{% if answers.channel == "ntfy" %} checked{% endif %}> <span><strong>ntfy</strong> <span class="hint">Free push notifications on your phone (the ntfy app) or in a browser, no account needed.</span></span></label>
     {% if topic_source != "unset" %}
-    <p class="hint indent">Your topic is set{% if topic_source == "env" %} in .env{% endif %}. It stays hidden; it's in the ntfy app where you subscribed.</p>
+    <p class="hint indent">Your topic is set. It stays hidden; it's in the ntfy app where you subscribed.</p>
     {% elif new_topic %}
     <input type="hidden" name="topic" value="{{ new_topic }}">
     <p class="indent">Subscribe to this topic in the ntfy app, or open it in a browser, before you go on: once saved, it stays hidden.<br>
@@ -19,7 +19,7 @@
     {% if webhook_source == "unset" %}
     <input class="indent" type="password" name="webhook" autocomplete="off" placeholder="https://discord.com/api/webhooks/…" aria-label="Discord webhook URL">
     {% else %}
-    <p class="hint indent">A webhook is set{% if webhook_source == "env" %} in .env{% endif %}.</p>
+    <p class="hint indent">A webhook is set.</p>
     {% endif %}
     <label class="choice"><input type="radio" name="channel" value="none"{% if answers.channel == "none" %} checked{% endif %}> <span><strong>None for now</strong> <span class="hint">Postings still land on the dashboard.</span></span></label>
   </fieldset>

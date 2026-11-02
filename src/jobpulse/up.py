@@ -5,10 +5,12 @@ file, keeping three), migrates, takes the worker lease, and serves the dashboard
 worker in its own thread. The poller's database phases are synchronous and big boards take
 seconds to parse, so the worker runs its own event loop rather than sharing uvicorn's. A
 watchdog stall, or a lost lease, makes the process exit with code 1 so a supervisor restarts
-it. ``worker`` and ``web`` stay as separate commands and never migrate on their own.
+it. Everything else comes from the database: the profile, its Sources & schedule
+settings and the secrets, all edited on the dashboard.
 """
 
 import asyncio
+import ipaddress
 import logging
 import os
 import sqlite3
@@ -23,7 +25,7 @@ from sqlalchemy.engine import make_url
 
 from jobpulse.config import InfraConfig
 from jobpulse.core.timeparse import utcnow
-from jobpulse.credentials import SecretStore
+from jobpulse.credentials import SecretStore, password_hash
 from jobpulse.db import lease, migrate
 from jobpulse.db.session import create_engine_for, session_scope
 from jobpulse.runtime import open_database, run_worker
@@ -32,6 +34,15 @@ log = logging.getLogger(__name__)
 
 KEEP_BACKUPS = 3
 STOP_TIMEOUT_SECONDS = 30.0
+
+
+def is_loopback(host: str) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def sqlite_path(database_url: str) -> Path | None:
@@ -99,13 +110,15 @@ class WorkerThread:
     def __init__(
         self,
         *,
-        infra: InfraConfig,
         store: SecretStore,
         database_url: str,
         holder: lease.Holder,
+        data_dir: Path | None = None,
+        base: InfraConfig | None = None,
         on_exit: Callable[[BaseException | None], None] = lambda error: None,
     ) -> None:
-        self._infra = infra
+        self._data_dir = data_dir
+        self._base = base
         self._store = store
         self._database_url = database_url
         self._holder = holder
@@ -132,9 +145,10 @@ class WorkerThread:
         try:
             loop.run_until_complete(
                 run_worker(
-                    infra=self._infra,
                     store=self._store,
                     database_url=self._database_url,
+                    data_dir=self._data_dir,
+                    base=self._base,
                     stop=stop,
                     holder=self._holder,
                 )
@@ -158,12 +172,11 @@ class WorkerThread:
 
 def run_app(
     *,
-    infra: InfraConfig,
     store: SecretStore,
     database_url: str,
     host: str,
     port: int,
-    credentials: tuple[str, str] | None,
+    data_dir: Path | None = None,
     migrate_first: bool = True,
 ) -> int:
     """Serve the dashboard with the worker in a thread until SIGINT or SIGTERM; the exit
@@ -177,6 +190,16 @@ def run_app(
     me = lease.Holder.here()
     with session_scope(sessions) as session:
         lease.acquire(session, me, now=utcnow())
+        protected = password_hash(session) is not None
+    log.info("jobpulse on http://%s:%d/ (password %s)", host, port, "on" if protected else "off")
+    if not protected and not is_loopback(host):
+        log.warning(
+            "the dashboard listens on %s with no password: anyone who can reach port %d can "
+            "use it. Set one on Settings → Security, or publish the port on 127.0.0.1 only "
+            "(as the Docker instructions do)",
+            host,
+            port,
+        )
     server: uvicorn.Server | None = None
 
     def worker_ended(error: BaseException | None) -> None:
@@ -184,11 +207,13 @@ def run_app(
             server.should_exit = True
 
     worker = WorkerThread(
-        infra=infra, store=store, database_url=database_url, holder=me, on_exit=worker_ended
+        store=store,
+        database_url=database_url,
+        holder=me,
+        data_dir=data_dir,
+        on_exit=worker_ended,
     )
-    application = create_app(
-        infra=infra, sessions=sessions, credentials=credentials, store=store, worker=worker
-    )
+    application = create_app(sessions=sessions, store=store, worker=worker)
     server = uvicorn.Server(
         uvicorn.Config(application, host=host, port=port, log_config=None, server_header=False)
     )

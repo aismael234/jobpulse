@@ -5,15 +5,19 @@ from pathlib import Path
 
 import pytest
 import time_machine
-from sqlalchemy import create_engine, func, select, table
+from sqlalchemy import create_engine, func, select, table, text
 from typer.testing import CliRunner
 
 from jobpulse.cli import app
 from tests.factories import FIXTURES, NOW
 
 SCENARIOS = FIXTURES / "scenarios"
-CONFIG = SCENARIOS / "config.yaml"  # infrastructure
-IMPORT = SCENARIOS / "import.yaml"  # preferences and watchlist, as an old config.yaml had them
+PROFILE = SCENARIOS / "profile.yaml"  # the recordings' infra overrides are in routes.yaml
+WATCHLIST = (
+    ("Acme", "greenhouse", "acme", 5),
+    ("Beta", "lever", "beta", 0),
+    ("Gamma", "ashby", "gamma", 0),
+)
 
 runner = CliRunner()
 
@@ -29,12 +33,21 @@ def cli(
 ) -> tuple[list[str], str]:
     time_machine.move_to(NOW, tick=False)
     db_url = f"sqlite:///{tmp_path / 'jobpulse.db'}"
-    monkeypatch.setenv("DATABASE_URL", db_url)
-    base = ["--config", str(CONFIG), "--env-file", str(tmp_path / ".env")]
+    base = ["--data-dir", str(tmp_path)]
     upgraded = runner.invoke(app, [*base, "db", "upgrade"])
     assert upgraded.exit_code == 0, upgraded.output
-    imported = runner.invoke(app, [*base, "profile", "import", str(IMPORT)])
+    imported = runner.invoke(app, [*base, "profile", "import", str(PROFILE)])
     assert imported.exit_code == 0, imported.output
+    with create_engine(db_url).begin() as connection:
+        for name, ats, token, priority in WATCHLIST:  # as the Watchlist page adds them
+            connection.execute(
+                text(
+                    "insert into companies (name, ats_type, token, region, priority, active, "
+                    "source_of_discovery, created_at, updated_at) values (:n, :a, :t, 'us', :p, "
+                    "1, 'dashboard', '2026-10-20 00:00:00', '2026-10-20 00:00:00')"
+                ),
+                {"n": name, "a": ats, "t": token, "p": priority},
+            )
     return base, db_url
 
 
@@ -114,14 +127,8 @@ def test_dry_run_merges_a_linkedin_copy_onto_its_greenhouse_row(
     ) in output
 
 
-def test_poll_without_a_migrated_database_says_what_to_run(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'empty.db'}")
-    result = runner.invoke(
-        app,
-        ["--config", str(CONFIG), "--env-file", str(tmp_path / ".env"), "poll", "--dry-run"],
-    )
+def test_poll_without_a_migrated_database_says_what_to_run(tmp_path: Path) -> None:
+    result = runner.invoke(app, ["--data-dir", str(tmp_path), "poll", "--dry-run"])
     assert result.exit_code == 2
     assert "jobpulse db upgrade" in result.output
 
@@ -134,11 +141,8 @@ def test_a_source_option_polls_only_that_source(cli: tuple[list[str], str]) -> N
     assert "linkedin/backend-sf" not in output
 
 
-def test_poll_on_an_outdated_schema_says_what_to_run(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'old.db'}")
-    base = ["--config", str(CONFIG), "--env-file", str(tmp_path / ".env")]
+def test_poll_on_an_outdated_schema_says_what_to_run(tmp_path: Path) -> None:
+    base = ["--data-dir", str(tmp_path)]
     assert runner.invoke(app, [*base, "db", "upgrade", "0001"]).exit_code == 0
     result = runner.invoke(app, [*base, "poll", "--dry-run"])
     assert result.exit_code == 2
@@ -158,7 +162,7 @@ def test_companies_list_marks_blocked_companies(cli: tuple[list[str], str], tmp_
     poll(base, "first_poll")  # discovery adds Delta
     blocking = tmp_path / "blocking.yaml"
     blocking.write_text(
-        IMPORT.read_text(encoding="utf-8") + "blocklist: {companies: [Delta]}\n", encoding="utf-8"
+        PROFILE.read_text(encoding="utf-8") + "blocklist: {companies: [Delta]}\n", encoding="utf-8"
     )
     imported = runner.invoke(app, [*base, "profile", "import", str(blocking), "--replace"])
     assert imported.exit_code == 0, imported.output
@@ -170,7 +174,7 @@ def test_companies_list_marks_blocked_companies(cli: tuple[list[str], str], tmp_
     assert all("blocked" not in line for line in listed.output.splitlines() if " acme " in line)
 
 
-def test_the_imported_watchlist_is_listed_and_owned_by_the_dashboard(
+def test_the_watchlist_is_listed_and_owned_by_the_dashboard(
     cli: tuple[list[str], str],
 ) -> None:
     base, _ = cli

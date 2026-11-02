@@ -1,0 +1,9 @@
+# The profile for the recorded scenarios (first_poll, second_poll), in the shape `jobpulse
+# profile export` writes; the watchlist (Acme, Beta, Gamma) is added by test_cli_poll.py.
+contact_email: dev@example.com
+notify: {channels: []}
+filters:
+  title:
+    include: ['\bbackend\b']
+searches:
+  - {name: backend-sf, site: linkedin, search_term: backend engineer, location: "San Francisco, CA"}

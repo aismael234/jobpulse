@@ -1,7 +1,7 @@
 """Item 17: one small real board per ATS, plus the spec's VERIFY probes.
 
 Skipped unless JOBPULSE_LIVE=1:  JOBPULSE_LIVE=1 uv run pytest -m live -v
-The User-Agent carries the contact_email from ./config.yaml when it exists.
+The User-Agent carries $JOBPULSE_CONTACT_EMAIL when it is set.
 """
 
 import pytest

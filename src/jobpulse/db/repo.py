@@ -16,7 +16,7 @@ from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
-from jobpulse.config import SearchEntry, SimplifyConfig, WatchlistEntry
+from jobpulse.config import SearchEntry, SimplifyConfig
 from jobpulse.core.applicants import ApplicantCount
 from jobpulse.core.assessment import LEVELS, Assessment
 from jobpulse.core.atsurls import gh_jid
@@ -111,75 +111,9 @@ def _chunks[T](items: Sequence[T]) -> Iterator[Sequence[T]]:
 DASHBOARD_ORIGIN = "dashboard"  # companies.source_of_discovery of rows the dashboard owns
 
 
-def _company_params(entry: WatchlistEntry) -> dict[str, Any] | None:
-    return {"keywords": list(entry.keywords)} if entry.keywords else None
-
-
 def _keywords(params: dict[str, Any] | None) -> tuple[str, ...]:
     words = (params or {}).get("keywords")
     return tuple(str(word) for word in words) if isinstance(words, list) else ()
-
-
-def import_watchlist(
-    session: Session, entries: Sequence[WatchlistEntry], *, now: datetime
-) -> SyncReport:
-    """Idempotent import of config.yaml's watchlist (``jobpulse profile import``), upserted on
-    (ats_type, token). From M6 the dashboard owns every company: entries become ``dashboard``
-    rows, and rows config.yaml used to own (``config``) become ``dashboard`` rows too, so
-    the Watchlist page can change them. A Workday board whose keywords changed finds a
-    different set of jobs, so it starts a new silent baseline."""
-    by_key = {(c.ats_type, c.token.lower()): c for c in session.scalars(select(Company))}
-    added: list[str] = []
-    updated: list[str] = []
-    for entry in entries:
-        key: tuple[str, str] = (entry.ats, entry.token.lower())
-        label = f"{entry.ats}/{entry.token}"
-        company = by_key.get(key)
-        if company is None:
-            company = Company(
-                name=entry.name,
-                ats_type=entry.ats,
-                token=entry.token,
-                region=entry.region,
-                priority=entry.priority,
-                active=entry.active,
-                source_of_discovery=DASHBOARD_ORIGIN,
-                params=_company_params(entry),
-                created_at=now,
-                updated_at=now,
-            )
-            session.add(company)
-            by_key[key] = company
-            added.append(label)
-            continue
-        wanted: dict[str, Any] = {
-            "name": entry.name,
-            "region": entry.region,
-            "priority": entry.priority,
-            "active": entry.active,
-            "source_of_discovery": DASHBOARD_ORIGIN,
-            "params": _company_params(entry),
-        }
-        if _keywords(company.params) != tuple(entry.keywords):
-            company.baseline_done_at = None
-        if any(getattr(company, field) != value for field, value in wanted.items()):
-            for field, value in wanted.items():
-                setattr(company, field, value)
-            company.updated_at = now
-            updated.append(label)
-    for company in by_key.values():
-        if company.source_of_discovery == "config":
-            company.source_of_discovery = DASHBOARD_ORIGIN
-            company.updated_at = now
-            updated.append(f"{company.ats_type}/{company.token}")
-    session.flush()
-    return SyncReport(tuple(added), tuple(updated))
-
-
-def import_blocklist(session: Session, names: Sequence[str], *, now: datetime) -> list[str]:
-    """config.yaml's blocked company names as dashboard blocks (unblockable on the Watchlist
-    page); the names that weren't blocked there yet."""
-    return [name for name in names if block_company(session, name, now=now)]
 
 
 def list_companies(session: Session) -> list[CompanyOverview]:

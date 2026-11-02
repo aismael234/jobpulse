@@ -12,10 +12,8 @@ from io import StringIO
 import httpx
 import pytest
 import respx
-from pydantic import SecretStr
 from sqlalchemy import update
 
-from jobpulse.config import Settings
 from jobpulse.credentials import SecretStore
 from jobpulse.db import profile as profile_db
 from jobpulse.db import resume as resume_db
@@ -34,7 +32,7 @@ Experience
 """
 
 
-def text_of(web: Web, path: str = "/settings") -> str:
+def text_of(web: Web, path: str = "/settings/notifications") -> str:
     return html.unescape(web.page(path))
 
 
@@ -61,22 +59,19 @@ def revision(web: Web) -> int:
 # --- secrets -------------------------------------------------------------------------------
 
 
-def test_each_secret_shows_where_it_comes_from(make_web: Callable[..., Web]) -> None:
-    store = SecretStore(Settings(_env_file=None, ntfy_topic=SecretStr(TOPIC)))
-    web = make_web(store=store)
+def test_each_secret_says_whether_it_is_set(web: Web) -> None:
     page = text_of(web)
-    pinned = secret_row(page, "ntfy topic")
-    assert "set in .env" in pinned
-    assert "<form" not in pinned  # .env wins: nothing to change here
-    assert "not set" in secret_row(page, "Discord webhook URL")
-    assert TOPIC not in page
+    for label in ("ntfy topic", "ntfy access token", "Discord webhook URL"):
+        assert "not set" in secret_row(page, label)
+    assert "Anthropic API key" not in page  # under Advanced
+    assert "not set" in secret_row(text_of(web, "/settings/advanced"), "Anthropic API key")
 
 
 def test_a_saved_secret_is_used_and_masked_from_then_on(web: Web) -> None:
     response = web.post("/settings/secrets/ntfy_topic", {"value": f"  {TOPIC} "}, htmx=False)
     assert response.status_code == 303
     page = text_of(web)
-    assert "set here" in secret_row(page, "ntfy topic")
+    assert "not set" not in secret_row(page, "ntfy topic")
     assert TOPIC not in page
     # Anything that happens to contain it is masked too, without a restart.
     web.add(title=f"Backend Engineer {TOPIC}")
@@ -90,13 +85,6 @@ def test_a_bad_secret_is_refused_without_echoing_it(web: Web) -> None:
     assert "24–64 characters" in html.unescape(response.text)
     assert 'value="short"' not in response.text
     assert web.post("/settings/secrets/nope", {"value": TOPIC}).status_code == 400
-
-
-def test_a_secret_pinned_in_env_cant_be_changed_here(make_web: Callable[..., Web]) -> None:
-    web = make_web(store=SecretStore(Settings(_env_file=None, ntfy_topic=SecretStr(TOPIC))))
-    response = web.post("/settings/secrets/ntfy_topic", {"value": OTHER_TOPIC}, htmx=False)
-    assert response.status_code == 400
-    assert ".env" in html.unescape(response.text)
 
 
 def test_a_saved_secret_can_be_cleared(web: Web) -> None:
@@ -158,7 +146,7 @@ def test_a_failed_test_push_is_reported(
 def test_an_uploaded_resume_is_stored_without_its_contact_lines(web: Web) -> None:
     response = upload(web, "resume.txt", RESUME)
     assert response.status_code == 303
-    assert response.headers["location"] == "/settings#resume"
+    assert response.headers["location"] == "/settings/search"
     with web.sessions() as session:
         stored = resume_db.get(session)
     assert stored is not None
@@ -167,7 +155,7 @@ def test_an_uploaded_resume_is_stored_without_its_contact_lines(web: Web) -> Non
         "Led a React rewrite of the billing dashboard",
     )
     assert stored.rescored_at is None  # the worker embeds and re-scores next cycle
-    page = text_of(web)
+    page = text_of(web, "/settings/search")
     assert "resume.txt, uploaded" in page
     assert "Led a React rewrite of the billing dashboard" in page
     assert "jane@example.com" not in page
@@ -216,16 +204,16 @@ def test_deleting_the_resume_puts_matches_back_on_stack_keywords(web: Web) -> No
 
 
 def test_the_editor_shows_the_profile_as_yaml(web: Web) -> None:
-    page = text_of(web)
+    page = text_of(web, "/settings/advanced")
     assert f'name="revision" value="{revision(web)}"' in page
     assert "contact_email: dev@example.com" in page
     assert "instant_threshold: 0.5" in page
-    assert "freshness_hours" not in page  # infrastructure stays in config.yaml
+    assert "sources:" in page  # Sources & schedule, as YAML too
 
 
 def editor_text(web: Web) -> str:
     found = re.search(
-        r'<textarea name="profile"[^>]*>(.*?)</textarea>', web.page("/settings"), re.S
+        r'<textarea name="profile"[^>]*>(.*?)</textarea>', web.page("/settings/advanced"), re.S
     )
     assert found is not None
     return html.unescape(found.group(1))
@@ -277,14 +265,14 @@ def test_a_new_install_can_save_its_first_profile_here(web: Web) -> None:
     response = web.client.get("/", follow_redirects=False)
     assert response.status_code == 303  # to the setup wizard
     assert response.headers["location"] == "/setup"
-    page = text_of(web)
+    page = text_of(web, "/settings/advanced")
     assert "No profile yet, so the worker waits" in page
     assert 'name="revision" value="0"' in page
     response = web.post(
         "/settings/profile", {"profile": "contact_email: me@example.com\n", "revision": "0"}
     )
     assert response.status_code == 200  # HTMX: HX-Redirect back to Settings
-    assert response.headers["HX-Redirect"] == "/settings#profile"
+    assert response.headers["HX-Redirect"] == "/settings/advanced"
     assert "No profile yet" not in text_of(web, "/")
 
 
@@ -299,3 +287,96 @@ def test_an_invalid_stored_profile_shows_a_banner(web: Web) -> None:
     page = text_of(web, "/")
     assert "the stored profile is invalid" in page
     assert "fix it on Settings" in page
+
+
+# --- tabs, channels, and Sources & schedule (M10) ---------------------------------------------
+
+
+def test_settings_is_split_into_tabs(web: Web) -> None:
+    first = text_of(web, "/settings")
+    assert "Where pushes go" in first  # Notifications is the first tab
+    for tab, heading in (
+        ("notifications", "Where pushes go"),
+        ("search", "What you're looking for"),
+        ("filters", "No saved filters"),
+        ("sources", "How often"),
+        ("security", "Dashboard password"),
+        ("advanced", "LLM second opinion"),
+    ):
+        page = text_of(web, f"/settings/{tab}")
+        assert heading in page, tab
+        assert f'<a href="/settings/{tab}" aria-current="page">' in page
+    assert web.client.get("/settings/nope").status_code == 404
+
+
+def test_channels_are_ticked_on_and_off(web: Web) -> None:
+    page = text_of(web)
+    assert 'name="ntfy" value="1" checked' not in page  # the test profile pushes nowhere
+    response = web.post(
+        "/settings/channels",
+        {"ntfy": "1", "discord": "1", "revision": str(revision(web))},
+        htmx=False,
+    )
+    assert response.status_code == 303
+    assert response.headers["location"] == "/settings/notifications"
+    with web.sessions() as session:
+        profile = profile_db.get(session).profile
+    assert profile is not None
+    assert profile.notify.channels == ["ntfy", "discord"]
+    stale = web.post("/settings/channels", {"ntfy": "1", "revision": "0"}, htmx=False)
+    assert stale.status_code == 409
+
+
+def sources_form(**changes: str) -> dict[str, str]:
+    form = {
+        "check_every_minutes": "20",
+        "search_every_minutes": "30",
+        "freshness_hours": "48",
+        "linkedin_pause_min_seconds": "15",
+        "linkedin_pause_max_seconds": "30",
+        "linkedin_job_pages": "1",
+        "linkedin_job_pages_per_hour": "40",
+        "simplify_feed": "1",
+        "discovery": "1",
+        "discovery_max_companies": "1500",
+        "health_alerts": "1",
+        "resume_matching": "1",
+    }
+    form.update(changes)
+    return {key: value for key, value in form.items() if value != ""}
+
+
+def test_sources_and_schedule_show_and_save(web: Web) -> None:
+    page = text_of(web, "/settings/sources")
+    assert 'name="check_every_minutes" min="5" max="240" value="20"' in page
+    assert 'name="seed_updates" value="1">' in page  # off
+    form = sources_form(check_every_minutes="45", simplify_feed="", seed_updates="1")
+    response = web.post("/settings/sources", {**form, "revision": str(revision(web))}, htmx=False)
+    assert response.status_code == 303
+    assert response.headers["location"] == "/settings/sources"
+    with web.sessions() as session:
+        profile = profile_db.get(session).profile
+    assert profile is not None
+    assert profile.sources.check_every_minutes == 45
+    assert profile.sources.simplify_feed is False
+    assert profile.sources.seed_updates is True
+    assert profile.filters.title.include  # the rest of the profile is untouched
+    page = text_of(web, "/settings/sources")
+    assert 'value="45"' in page
+    # The Health page follows: the Simplify feed is gone, the seed sync is listed.
+    health = text_of(web, "/health")
+    assert "new-grad" not in health
+    assert "remote" in health
+
+
+def test_bad_sources_settings_are_named_and_kept_in_the_form(web: Web) -> None:
+    before = revision(web)
+    form = sources_form(linkedin_pause_min_seconds="40", check_every_minutes="1")
+    response = web.post("/settings/sources", {**form, "revision": str(before)}, htmx=False)
+    assert response.status_code == 400
+    page = html.unescape(response.text)
+    assert "<code>check_every_minutes</code>" in page
+    assert 'name="check_every_minutes" min="5" max="240" value="1"' in page
+    assert revision(web) == before
+    stale = web.post("/settings/sources", {**sources_form(), "revision": "0"}, htmx=False)
+    assert stale.status_code == 409

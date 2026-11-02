@@ -1,6 +1,6 @@
 """Dashboard security: basic auth, the CSRF token, and response headers.
 
-- Basic auth is on when both ``DASHBOARD_USER`` and ``DASHBOARD_PASSWORD`` are set. Every path
+- Basic auth is on while a dashboard password is saved (Settings → Security). Every path
   needs it except ``/healthz``, which says only "ok". Credentials are compared in constant
   time.
 - CSRF: each browser gets a random token in a ``SameSite=Strict``, ``HttpOnly`` cookie. Pages
@@ -16,11 +16,14 @@ import hashlib
 import hmac
 import re
 import secrets
+from collections.abc import Callable
 
 from fastapi import HTTPException, Request
 from starlette.datastructures import Headers, MutableHeaders
 from starlette.responses import PlainTextResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
+
+from jobpulse.credentials import password_matches
 
 CSRF_COOKIE = "jobpulse_csrf"
 CSRF_HEADER = "X-CSRF-Token"
@@ -65,18 +68,25 @@ def same_secret(given: str | bytes, expected: str | bytes) -> bool:
 
 
 class BasicAuthMiddleware:
-    """HTTP basic auth on every path but ``/healthz``."""
+    """HTTP basic auth on every path but ``/healthz`` while a dashboard password is set
+    (Settings → Security). Any user name works; only the password counts. ``password_hash``
+    reads the stored hash on each request, so setting or clearing it applies at once; a
+    header that matched is remembered (as a digest) until the hash changes, so scrypt runs
+    once per browser, not per request."""
 
-    def __init__(self, app: ASGIApp, *, username: str, password: str) -> None:
+    MAX_REMEMBERED = 64
+
+    def __init__(self, app: ASGIApp, *, password_hash: Callable[[], str | None]) -> None:
         self.app = app
-        self._username = username
-        self._password = password
+        self._password_hash = password_hash
+        self._verified: tuple[str, set[bytes]] = ("", set())
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http" or scope["path"] in AUTH_EXEMPT_PATHS:
             await self.app(scope, receive, send)
             return
-        if self._authorized(Headers(scope=scope).get("authorization")):
+        stored = self._password_hash()
+        if stored is None or self._authorized(Headers(scope=scope).get("authorization"), stored):
             await self.app(scope, receive, send)
             return
         response = PlainTextResponse(
@@ -86,7 +96,7 @@ class BasicAuthMiddleware:
         )
         await response(scope, receive, send)
 
-    def _authorized(self, header: str | None) -> bool:
+    def _authorized(self, header: str | None, stored: str) -> bool:
         if not header:
             return False
         scheme, _, encoded = header.partition(" ")
@@ -96,13 +106,19 @@ class BasicAuthMiddleware:
             decoded = base64.b64decode(encoded.strip(), validate=True)
         except (binascii.Error, ValueError):
             return False
-        user, colon, password = decoded.partition(b":")
+        _user, colon, password = decoded.partition(b":")
         if not colon:
             return False
-        # Both comparisons always run, so timing says nothing about which part was wrong.
-        user_ok = same_secret(user, self._username)
-        password_ok = same_secret(password, self._password)
-        return user_ok and password_ok
+        key = hashlib.sha256(decoded).digest()
+        known_hash, verified = self._verified
+        if known_hash == stored and key in verified:
+            return True
+        if not password_matches(password.decode("utf-8", "replace"), stored):
+            return False
+        if known_hash != stored or len(verified) >= self.MAX_REMEMBERED:
+            self._verified = (stored, set())
+        self._verified[1].add(key)
+        return True
 
 
 class CsrfCookieMiddleware:

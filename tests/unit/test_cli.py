@@ -1,6 +1,5 @@
 from pathlib import Path
 
-import pytest
 from typer.testing import CliRunner
 
 from jobpulse.cli import app
@@ -16,14 +15,15 @@ def write(path: Path, text: str) -> Path:
 def test_help_lists_every_command() -> None:
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0, result.output
-    for name in ("poll", "worker", "web", "companies", "db", "config", "profile", "resume"):
+    for name in ("up", "poll", "companies", "db", "profile", "resume", "password", "--data-dir"):
         assert name in result.output
     assert "digest" not in result.output  # every match is pushed; there's no digest
+    for gone in ("worker", "web ", "config", "--env-file"):
+        assert gone not in result.output
 
 
-@pytest.mark.parametrize(("command", "option"), [("web", "--host")])
-def test_m3_commands_replace_their_placeholders(command: str, option: str) -> None:
-    result = runner.invoke(app, [command, "--help"])
+def test_up_takes_a_host_and_port() -> None:
+    result = runner.invoke(app, ["up", "--help"])
     assert result.exit_code == 0, result.output
-    assert option in result.output
-    assert "arrives in" not in result.output
+    assert "--host" in result.output
+    assert "--port" in result.output

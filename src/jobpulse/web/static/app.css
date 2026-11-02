@@ -301,3 +301,18 @@ button[type="submit"].secondary { background: var(--surface); color: var(--accen
 .block-dialog::backdrop { background: rgb(0 0 0 / 0.4); }
 .block-dialog h2 { margin-top: 0; }
 .on-the-way p { margin: 0.4rem 0; }
+
+/* Settings tabs and forms. */
+.tabs { display: flex; flex-wrap: wrap; gap: 0.25rem; margin: 0 0 1rem; border-bottom: 1px solid var(--border); }
+.tabs a { padding: 0.45rem 0.8rem; color: var(--muted); border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.tabs a:hover { color: var(--text); text-decoration: none; }
+.tabs a[aria-current="page"] { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+.stack { display: flex; flex-direction: column; gap: 0.5rem; align-items: flex-start; }
+.settings-form { display: grid; gap: 1rem; max-width: 760px; }
+.field-row { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; }
+.field-row input[type="number"] { width: 5.5rem; }
+.field-row input[type="password"] { width: 16rem; max-width: 100%; }
+.save-filters-form { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; margin-top: 0.5rem; }
+.save-filters-form input[name="label"] { flex: 0 1 14rem; }
+details.save-filters { margin: 0.25rem 0 0.5rem; }
+details.save-filters summary { color: var(--muted); font-size: 0.9rem; cursor: pointer; }

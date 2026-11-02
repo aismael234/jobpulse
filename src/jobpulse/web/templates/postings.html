@@ -30,12 +30,37 @@
     </select>
     <button type="submit">Filter</button>
     <a class="reset" href="/?view={{ view|lower }}">Clear</a>
-    <a class="save-filters" href="{{ save_url }}">Save these filters</a>
   </div>
   <div class="row">
     {% include "_filter_fields.html" %}
   </div>
 </form>
+{% if save_form is defined %}
+<details class="save-filters"{% if save_form.editing %} open{% endif %}>
+  <summary>{% if save_form.editing %}Editing the saved filter {{ save_form.editing.label }}{% else %}Save these filters{% endif %}</summary>
+  {% if save_form.full %}
+  <p class="hint">You have {{ save_form.max }} saved filters, one per color. Delete one on Settings to add another.</p>
+  {% else %}
+  <form class="save-filters-form" method="post" action="{{ save_form.action }}" hx-post="{{ save_form.action }}" hx-swap="none">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    {% for name, value in save_form.params.items() %}<input type="hidden" name="{{ name }}" value="{{ value }}">{% endfor %}
+    <input type="text" name="label" value="{{ save_form.label }}" placeholder="Name, e.g. Austin backend" aria-label="Name" maxlength="60" required>
+    <fieldset class="colors">
+      <legend>Color</legend>
+      {% for swatch in swatches %}
+      {% set index = loop.index0 %}
+      {% if index in save_form.free_slots %}
+      <label class="color-choice"><input type="radio" name="slot" value="{{ index }}"{% if save_form.slot == index %} checked{% endif %}>{% with label = swatch.name %}{% with slot = index %}{% include "_bullet.html" %}{% endwith %}{% endwith %}</label>
+      {% endif %}
+      {% endfor %}
+    </fieldset>
+    <button type="submit">{% if save_form.editing %}Save changes{% else %}Save{% endif %}</button>
+    {% if save_form.editing %}<a class="reset" href="/settings/filters">Cancel</a>{% endif %}
+  </form>
+  <p class="hint">It keeps the filters above (change them first, then save). Once you have a saved filter, only matches that fit one are pushed, one message each.</p>
+  {% endif %}
+</details>
+{% endif %}
 
 <div class="summary" id="summary">
   <p>{{ page.total }} posting{{ "" if page.total == 1 else "s" }}{% if page.total > page.page_size %}, page {{ page.page }}{% endif %}</p>

@@ -1,6 +1,12 @@
 # The next poll: Greenhouse has one new backend job, Lever and Ashby are unchanged, the feed
 # answers 304, Delta (added by discovery) has its first poll, and LinkedIn shows a copy of an
 # Acme job next to one new LinkedIn-only job, whose public job page is read.
+# How the worker runs for this recording, on top of the stored settings: discovery may
+# validate Delta's board only (the routes answer for it) and fetch no pages, and LinkedIn
+# needs no pause.
+infra:
+  discovery: {max_validations_per_cycle: 1, max_page_fetches_per_cycle: 0}
+  linkedin: {delay_min_seconds: 0, delay_max_seconds: 0}
 routes:
   - url: https://boards-api.greenhouse.io/v1/boards/acme/jobs
     file: acme_jobs.json

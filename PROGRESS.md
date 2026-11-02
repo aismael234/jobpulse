@@ -222,6 +222,15 @@ The full plan, with decisions, code facts and a data snapshot, is in `/Users/ala
   - [x] committed as `5311b8d` (your OK, 2026-11-02);
   - [ ] publish: `brew install gh` and your `gh auth login`; create `aismael234/jobpulse` (public), export, push, tag `v1.0.0`, make the GHCR package public; then `seed.remote` on. Each with your OK at the time.
 
+- [ ] **M10 — Settings only: no config.yaml, no .env** (your request, 2026-11-02, after M9's commit). Your answers: about 10 plain-language settings, the rest fixed, your values as the new defaults; SQLite only; one process (`up`), `worker`/`web` removed; Settings in tabs, the saved-filter editor on the dashboard.
+  - [x] `Profile.sources` (Settings → Sources & schedule) and `config.infra_for`; `InfraConfig` is internal (no `database_url`, no `dashboard`), defaults = your old config.yaml (20/20/30 min, LinkedIn 15–30 s, 1,500 discovered companies, 20 validations a cycle);
+  - [x] secrets only in the database; the dashboard password on Settings → Security as a scrypt hash, `jobpulse password clear`;
+  - [x] `--data-dir` (default ./data) and `--log-level` on every command; `up --host --port`; `worker`, `web`, `config check`, legacy `profile import` gone (`profile import FILE` now restores an export); Postgres and psycopg dropped;
+  - [x] the worker rebuilds its schedule within 30 s of a Sources & schedule change (`run_worker`/`_settings_changed`), keeping the lease;
+  - [x] Settings tabs: Notifications (channel checkboxes, secrets, test push, color-blind), Job search, Saved filters (list only), Sources & schedule, Security, Advanced (LLM key, YAML); "Save these filters" is a form on the dashboard, Edit opens the dashboard with the filter;
+  - [x] your install moved (your request): backup `data/jobpulse-before-m10.db`; profile revision 2 with `sources` (equal to the new defaults); the ntfy topic from .env now on Settings; config.yaml and .env deleted (copies `data/config-before-m10.yaml`, `data/env-before-m10`, 0600); running as one `jobpulse up` in the Terminal tab "jobpulse";
+  - [x] committed as `6792b3f` (your OK, 2026-11-02).
+
 ## Log
 
 - **2026-10-23** — Planning. Probed the Greenhouse, Lever and Ashby APIs and the Simplify feed (findings in CLAUDE.md). Installed uv 0.13.5 (Homebrew); CPython 3.12.15, SQLite 3.53.1. Started M0.
@@ -456,3 +465,9 @@ The full plan, with decisions, code facts and a data snapshot, is in `/Users/ala
   - **Privacy scan** of what the export would publish: 0 findings (secret shapes, non-example emails, home paths, your patterns file, the secrets in `.env`).
   - **Tests:** 1,821 passed, 17 skipped (from 1,794). Changed on purpose: the compose tests (one service), the User-Agent version, the golden test's name and fixture, the wizard test posts `job_boards`.
   - Committed at your go-ahead ("Commit M9") as `5311b8d`. Live DB untouched (0011); no migration.
+- **2026-11-02** — M10 built (your request after M9's commit: no config.yaml or .env, everything on Settings, import your values, delete config.yaml; your four answers above).
+  - **Code:** `config.SourceSettings`/`infra_for`, `credentials` (DB only, password hash), `runtime.stored_infra`, `run_worker` with `_run_schedule`/`_settings_changed`, `db.session.database_url(data_dir)`, `up.is_loopback` and the password-aware bind warning, `web/routes.py` Settings rewritten as tabs (`SETTINGS_TABS`, `_save_profile_part`, `/settings/channels`, `/settings/sources`, `/settings/password[/clear]`), the dashboard's save form (`_saved_context`'s `save_form`), `BasicAuthMiddleware(password_hash=...)`, `devtools.fixtures.fixture_infra` (a recording's `infra:` overrides; scenarios' config.yaml and import.yaml became routes.yaml sections and `profile.yaml`), `export_public` reads only the patterns file. Removed: `load_config`, `read_config_lenient`, `load_legacy_config`, `LegacyConfig`, `WatchlistEntry`, `Settings` (pydantic-settings), `dashboard_credentials`, `repo.import_watchlist`/`import_blocklist`, `config.example.yaml`, `.env.example`, `test_cli_web.py`.
+  - **Checked:** a browser walkthrough on an empty scratch install: every tab, phone width without horizontal scroll, no console errors; a Sources & schedule save rebuilt the running worker's schedule (20 → 25 min) within 30 s.
+  - **Your install:** rehearsed on a `.backup` copy first; then worker and web stopped, backup `data/jobpulse-before-m10.db` (integrity ok, 0011, 41,969 postings, profile revision 1), profile revision 2 written (the scoring hash didn't move, so nothing re-scored), the topic saved, config.yaml and .env deleted after copying them into `data/`; `uv run jobpulse up` started; every page answers 200; the first Simplify cycle ran normally.
+  - **Tests:** 1,794 passed, 17 skipped. Rewritten on purpose: test_config (no files; Sources & schedule tests), test_cli_profile, test_web_profile (tabs, channels, sources), test_web_saved_filters (the dashboard form), test_web_security (password), CLI fixtures (`--data-dir`), and default-value expectations that now hold your values.
+  - Committed at your go-ahead ("Commit M10") as `6792b3f`.

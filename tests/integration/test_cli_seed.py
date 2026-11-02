@@ -28,13 +28,9 @@ class Cli:
     def __init__(self, tmp_path: Path, db_url: str) -> None:
         self.tmp_path = tmp_path
         self.db_url = db_url
-        self.config = tmp_path / "config.yaml"
-        self.config.write_text("", encoding="utf-8")
-        self.env = tmp_path / ".env"
-        self.env.write_text("", encoding="utf-8")
 
     def run(self, *args: str) -> tuple[int, str, str]:
-        base = ["--config", str(self.config), "--env-file", str(self.env)]
+        base = ["--data-dir", str(self.tmp_path)]
         result = runner.invoke(app, [*base, *args])
         return result.exit_code, result.stdout, result.stderr
 
@@ -84,10 +80,8 @@ class Cli:
 
 
 @pytest.fixture
-def cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Cli:
-    db_url = f"sqlite:///{tmp_path / 'jobpulse.db'}"
-    monkeypatch.setenv("DATABASE_URL", db_url)
-    cli = Cli(tmp_path, db_url)
+def cli(tmp_path: Path) -> Cli:
+    cli = Cli(tmp_path, f"sqlite:///{tmp_path / 'jobpulse.db'}")
     cli.ok("db", "upgrade")
     profile = tmp_path / "profile.yaml"
     profile.write_text(textwrap.dedent(PROFILE), encoding="utf-8")

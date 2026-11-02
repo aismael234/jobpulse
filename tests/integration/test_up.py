@@ -1,5 +1,6 @@
 """M8: `jobpulse up` backs up and upgrades the database, holds the worker lease, runs the
-worker in a thread beside the dashboard, and exits with code 1 when the worker stalls."""
+worker in a thread beside the dashboard, and exits with code 1 when the worker stalls; the
+worker rebuilds its schedule when Settings → Sources & schedule changes (M10)."""
 
 import asyncio
 import os
@@ -13,11 +14,14 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import inspect
+from typer.testing import CliRunner
 
-from jobpulse.config import InfraConfig
+from jobpulse.cli import app
+from jobpulse.config import InfraConfig, Profile, SourceSettings
 from jobpulse.core.timeparse import utcnow
-from jobpulse.credentials import SecretStore
+from jobpulse.credentials import SecretStore, set_password
 from jobpulse.db import lease, migrate
+from jobpulse.db import profile as profile_db
 from jobpulse.db.session import create_engine_for, make_session_factory, session_scope
 from jobpulse.db.tables import WorkerLease
 from jobpulse.poller import Poller
@@ -138,11 +142,7 @@ def test_a_second_worker_refuses_to_start(migrated: str) -> None:
     with session_scope(open_database(migrated)) as session:
         lease.acquire(session, OTHER, now=utcnow())
     with pytest.raises(lease.LeaseHeld):
-        asyncio.run(
-            run_worker(
-                infra=InfraConfig(database_url=migrated), store=SecretStore(), database_url=migrated
-            )
-        )
+        asyncio.run(run_worker(store=SecretStore(), database_url=migrated))
 
 
 def test_a_worker_takes_the_lease_and_gives_it_back(migrated: str) -> None:
@@ -150,7 +150,6 @@ def test_a_worker_takes_the_lease_and_gives_it_back(migrated: str) -> None:
         stop = asyncio.Event()
         stop.set()
         await run_worker(
-            infra=InfraConfig(database_url=migrated),
             store=SecretStore(),
             database_url=migrated,
             stop=stop,
@@ -164,7 +163,7 @@ def test_a_worker_takes_the_lease_and_gives_it_back(migrated: str) -> None:
 async def test_an_idle_cycle_asks_to_run_again_within_a_minute(migrated: str) -> None:
     engine = create_engine_for(migrated)
     poller = Poller(
-        infra=InfraConfig(database_url=migrated),
+        infra=InfraConfig(),
         sessions=make_session_factory(engine),
         adapters={},
         notifier=None,
@@ -178,7 +177,6 @@ async def test_an_idle_cycle_asks_to_run_again_within_a_minute(migrated: str) ->
 def test_the_worker_thread_starts_and_stops(migrated: str) -> None:
     ended: list[BaseException | None] = []
     worker = WorkerThread(
-        infra=InfraConfig(database_url=migrated),
         store=SecretStore(),
         database_url=migrated,
         holder=ME,
@@ -226,14 +224,7 @@ def test_a_stalled_worker_makes_up_exit_with_code_1(
         raise WorkerStalled("no run of watchlist finished in 90 min")
 
     monkeypatch.setattr("jobpulse.up.run_worker", stalls)
-    code = run_app(
-        infra=InfraConfig(database_url=db_url),
-        store=SecretStore(),
-        database_url=db_url,
-        host="127.0.0.1",
-        port=8000,
-        credentials=None,
-    )
+    code = run_app(store=SecretStore(), database_url=db_url, host="127.0.0.1", port=8000)
     assert started.is_set()
     assert code == 1
     assert lease_row(db_url) is None
@@ -243,11 +234,96 @@ def test_up_refuses_while_another_worker_holds_the_lease(migrated: str) -> None:
     with session_scope(open_database(migrated)) as session:
         lease.acquire(session, OTHER, now=utcnow())
     with pytest.raises(lease.LeaseHeld):
-        run_app(
-            infra=InfraConfig(database_url=migrated),
+        run_app(store=SecretStore(), database_url=migrated, host="127.0.0.1", port=8000)
+
+
+def test_up_warns_about_an_open_dashboard_only_without_a_password(
+    db_url: str,
+    fake_server: None,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("INFO", logger="jobpulse.up")
+    monkeypatch.setattr("jobpulse.up.run_worker", stalls_once := _stalls())
+    run_app(store=SecretStore(), database_url=db_url, host="0.0.0.0", port=8000)
+    assert "listens on 0.0.0.0 with no password" in caplog.text
+    assert stalls_once.calls == 1
+    caplog.clear()
+    with session_scope(open_database(db_url)) as session:
+        set_password(session, "a-long-pass-1", now=utcnow())
+    run_app(store=SecretStore(), database_url=db_url, host="0.0.0.0", port=8000)
+    assert "no password" not in caplog.text
+    assert "(password on)" in caplog.text
+
+
+class _stalls:
+    """A run_worker that ends at once, so run_app returns."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def __call__(self, **kwargs: Any) -> None:
+        self.calls += 1
+        raise WorkerStalled("stop")
+
+
+def test_the_up_command_takes_the_data_folder_host_and_port(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, Any] = {}
+
+    def fake_run_app(**kwargs: Any) -> int:
+        seen.update(kwargs)
+        return 0
+
+    monkeypatch.setattr("jobpulse.cli.run_app", fake_run_app)
+    data = tmp_path / "somewhere"
+    result = CliRunner().invoke(
+        app, ["--data-dir", str(data), "up", "--host", "0.0.0.0", "--port", "9000"]
+    )
+    assert result.exit_code == 0, result.output
+    assert seen["database_url"] == f"sqlite:///{data / 'jobpulse.db'}"
+    assert (seen["host"], seen["port"], seen["data_dir"]) == ("0.0.0.0", 9000, data)
+    assert seen["migrate_first"] is True
+
+
+async def test_the_worker_rebuilds_its_schedule_when_sources_change(
+    migrated: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level("INFO", logger="jobpulse.runtime")
+    sessions = open_database(migrated)
+    stop = asyncio.Event()
+    task = asyncio.create_task(
+        run_worker(
             store=SecretStore(),
             database_url=migrated,
-            host="127.0.0.1",
-            port=8000,
-            credentials=None,
+            stop=stop,
+            holder=ME,
+            settings_check_seconds=0.02,
         )
+    )
+
+    async def logged(text: str) -> None:
+        for _ in range(250):
+            if text in caplog.text:
+                return
+            await asyncio.sleep(0.02)
+        raise AssertionError(f"never logged {text!r}")
+
+    await logged("watchlist every 20 min")
+    with session_scope(sessions) as session:  # a profile change that isn't a source setting
+        profile_db.save(session, Profile(timezone="America/Chicago"), now=utcnow())
+    await asyncio.sleep(0.1)
+    assert "rebuilding the schedule" not in caplog.text
+    with session_scope(sessions) as session:
+        profile_db.save(
+            session,
+            Profile(sources=SourceSettings(check_every_minutes=45, simplify_feed=False)),
+            now=utcnow(),
+        )
+    await logged("rebuilding the schedule")
+    await logged("watchlist every 45 min")
+    assert "simplify every" not in caplog.text.split("rebuilding the schedule")[1]
+    stop.set()
+    await asyncio.wait_for(task, 5)
+    assert lease_row(migrated) is None

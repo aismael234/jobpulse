@@ -1,5 +1,5 @@
 """The worker lease (M8): one row naming the worker allowed to poll this database, so a
-second ``worker`` or ``up`` on it refuses to start and nothing is pushed twice. Like
+second ``up`` (or ``poll``) on it refuses to start and nothing is pushed twice. Like
 ``repo``, everything here leaves the transaction to the caller.
 
 The holder renews the lease every minute; one not renewed by ``expires_at`` is free. A

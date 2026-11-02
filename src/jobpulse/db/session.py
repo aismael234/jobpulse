@@ -9,18 +9,14 @@ from sqlalchemy import Engine, create_engine, event
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session, sessionmaker
 
-from jobpulse.config import DEFAULT_DATABASE_URL, InfraConfig, Settings
-
 SQLITE_BUSY_TIMEOUT_MS = 30_000
+DEFAULT_DATA_DIR = Path("data")
+DATABASE_FILE = "jobpulse.db"
 
 
-def resolve_database_url(settings: Settings, config: InfraConfig | None) -> str:
-    """``DATABASE_URL`` beats ``database_url`` in config.yaml, which beats the default."""
-    if settings.database_url:
-        return settings.database_url
-    if config is not None:
-        return config.database_url
-    return DEFAULT_DATABASE_URL
+def database_url(data_dir: Path) -> str:
+    """The SQLite database in ``data_dir`` (``--data-dir``, default ./data)."""
+    return f"sqlite:///{data_dir / DATABASE_FILE}"
 
 
 def display_url(url: str) -> str:

@@ -26,7 +26,7 @@ from jobpulse.core.locations import merge_aliases, normalize_locations
 from jobpulse.core.models import FetchResult, Posting, Target
 from jobpulse.core.similarity import resume_lines
 from jobpulse.core.timeparse import utcnow
-from jobpulse.credentials import SecretStore
+from jobpulse.credentials import SecretStore, set_password
 from jobpulse.db import profile as profile_db
 from jobpulse.db import resume as resume_db
 from jobpulse.db import saved_filters
@@ -686,18 +686,22 @@ def make_web(
         def build(
             *,
             config: AppConfig | None = None,
-            credentials: tuple[str, str] | None = None,
+            password: str | None = None,
             secrets: Sequence[str] = (),
             store: SecretStore | None = None,
         ) -> Web:
-            """``secrets``: values masked in every page, as if they were in .env."""
+            """``secrets``: values masked in every page, as if saved on Settings earlier;
+            ``password``: the dashboard password, saved as Settings → Security does."""
             config = config or make_config()
             save_profile(database, config)
+            if password is not None:
+                with database() as session:
+                    set_password(session, password, now=NOW)
+                    session.commit()
             store = store or SecretStore(registry=SecretRegistry(secrets))
             app = create_app(
                 infra=config,
                 sessions=database,
-                credentials=credentials,
                 store=store,
                 http_factory=dashboard_http_client,
             )

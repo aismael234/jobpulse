@@ -41,9 +41,6 @@ dependencies = [
 Homepage = "https://github.com/aismael234/jobpulse"
 Issues = "https://github.com/aismael234/jobpulse/issues"
 
-[project.optional-dependencies]
-postgres = ["psycopg[binary]>=3.2"]
-
 [project.scripts]
 jobpulse = "jobpulse.cli:app"
 

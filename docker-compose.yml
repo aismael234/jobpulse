@@ -1,38 +1,26 @@
 # jobpulse with Docker Compose: one container runs the dashboard and the scheduler.
 #
-#   docker compose up -d                      # SQLite, in the jobpulse-data volume
-#   docker compose --profile postgres up -d   # with Postgres: set POSTGRES_PASSWORD and
-#                                             # DATABASE_URL in .env (see .env.example)
+#   docker compose up -d
 #   docker compose logs -f jobpulse
 #
-# Then open http://127.0.0.1:8000/ and follow the setup wizard. The dashboard is published on
-# 127.0.0.1 only; reach it remotely through a VPN such as Tailscale, or set DASHBOARD_USER and
-# DASHBOARD_PASSWORD in .env before publishing it more widely.
-#
-# Infrastructure settings (schedules, pacing, database) all have defaults. To change them, copy
-# config.example.yaml to config.yaml and add this under the service's volumes:
-#     - ./config.yaml:/app/config.yaml:ro
+# Then open http://127.0.0.1:8000/ and follow the setup wizard; everything else is on the
+# dashboard's Settings page. The database (with your profile, resume and saved secrets) lives
+# in the jobpulse-data volume. The dashboard is published on 127.0.0.1 only; reach it
+# remotely through a VPN such as Tailscale, or set a password on Settings → Security first.
 
 services:
   jobpulse:
     image: ghcr.io/aismael234/jobpulse:latest
     build: .
-    command: ["jobpulse", "up", "--host", "0.0.0.0"]
+    command: ["jobpulse", "--data-dir", "/app/data", "up", "--host", "0.0.0.0"]
     # The watchdog exits non-zero when a source stops finishing runs; this starts it again.
     restart: unless-stopped
     # The scheduler may be inside a LinkedIn request: give it time to finish and release its lease.
     stop_grace_period: 60s
-    env_file:
-      - path: .env
-        required: false
     volumes:
       - jobpulse-data:/app/data
     ports:
       - "127.0.0.1:8000:8000"
-    depends_on:
-      postgres:
-        condition: service_healthy
-        required: false
     healthcheck:
       test:
         - CMD
@@ -44,22 +32,5 @@ services:
       retries: 3
       start_period: 30s
 
-  postgres:
-    image: postgres:17-alpine
-    profiles: ["postgres"]
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: jobpulse
-      POSTGRES_DB: jobpulse
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U jobpulse -d jobpulse"]
-      interval: 5s
-      timeout: 3s
-      retries: 20
-
 volumes:
   jobpulse-data:
-  postgres-data:

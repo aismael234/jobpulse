@@ -1,6 +1,8 @@
-"""Configuration: infrastructure from ``config.yaml`` and preferences from the database
-profile, both validated with Pydantic; secrets from ``.env`` via pydantic-settings, or from
-Settings (``credentials``).
+"""Configuration, all of it from the dashboard: preferences are the database profile
+(``Profile``, edited by the setup wizard and Settings), and how the worker runs
+(``InfraConfig``) is fixed defaults plus the profile's Settings → Sources & schedule
+(``infra_for``). Secrets are saved on Settings too (``credentials``). There is no config
+file and no ``.env``.
 
 Every problem is reported as a ``ConfigError`` (or, for the profile, a ``ProfileError``)
 that names a dotted field path such as ``filters.title.include[3].pattern``, so a typo is
@@ -15,7 +17,6 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any, Literal, Self
-from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
@@ -24,18 +25,14 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
-    SecretStr,
     ValidationError,
-    ValidationInfo,
     field_validator,
     model_validator,
 )
 from pydantic_core import ErrorDetails, PydanticCustomError
-from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from jobpulse.core import filters as core_filters
 from jobpulse.core.assessment import Level
-from jobpulse.core.atsurls import normalize_workday_token
 from jobpulse.core.countries import country_code
 from jobpulse.core.dedupe import normalize_company
 from jobpulse.core.locations import DEFAULT_SHORT_LABELS, merge_aliases
@@ -46,9 +43,6 @@ from jobpulse.core.scoring import Weights
 from jobpulse.core.skills import SKILLS_BY_KEY
 from jobpulse.data import agency_names
 
-DEFAULT_CONFIG_PATH = Path("config.yaml")
-DEFAULT_ENV_FILE = Path(".env")
-DEFAULT_DATABASE_URL = "sqlite:///data/jobpulse.db"
 DEFAULT_MODELS_DIR = Path("data/models")
 SIMPLIFY_NEW_GRAD_URL = (
     "https://raw.githubusercontent.com/SimplifyJobs/New-Grad-Positions/dev/.github/scripts/"
@@ -83,9 +77,9 @@ DEFAULT_HOST_LIMITS = {
     "www.linkedin.com": 1,
 }
 DEFAULT_CADENCES: dict[str, dict[str, float]] = {
-    "watchlist": {"every_minutes": 30, "jitter_seconds": 120},
-    "simplify": {"every_minutes": 30, "jitter_seconds": 120},
-    "job_boards": {"every_minutes": 75, "jitter_seconds": 900},
+    "watchlist": {"every_minutes": 20, "jitter_seconds": 120},
+    "simplify": {"every_minutes": 20, "jitter_seconds": 120},
+    "job_boards": {"every_minutes": 30, "jitter_seconds": 900},
 }
 
 AtsType = Literal["greenhouse", "lever", "ashby", "workday"]
@@ -102,21 +96,15 @@ class FieldError:
 
 
 class ConfigError(Exception):
-    """Invalid configuration. ``str()`` lists every problem with its field path and file."""
+    """Missing or invalid settings. ``str()`` lists every problem with its field."""
 
-    def __init__(
-        self,
-        path: Path,
-        errors: list[FieldError],
-        heading: str = "invalid configuration in {path}",
-    ) -> None:
-        super().__init__(path, errors)
-        self.path = path
+    def __init__(self, errors: list[FieldError], heading: str = "invalid settings") -> None:
+        super().__init__(errors)
         self.errors = errors
         self.heading = heading
 
     def __str__(self) -> str:
-        lines = [self.heading.format(path=self.path) + ":"]
+        lines = [self.heading + ":"]
         for error in self.errors:
             lines.append(
                 f"  - {error.field}: {error.message}" if error.field else f"  - {error.message}"
@@ -363,46 +351,6 @@ class NotifyConfig(_Model):
     saved_filters: SavedFilterPushes = SavedFilterPushes()
 
 
-class WatchlistEntry(_Model):
-    name: str = Field(min_length=1)
-    ats: AtsType
-    token: str = Field(min_length=1, max_length=200)
-    region: Region = "us"
-    priority: int = Field(default=0, ge=0)
-    active: bool = True
-    keywords: list[str] = []  # Workday only: each one is searched (searchText)
-
-    @field_validator("token")
-    @classmethod
-    def _token_fits_the_ats(cls, value: str, info: ValidationInfo) -> str:
-        """A Workday board is ``tenant.wdN/site`` (its URL works too); the others are slugs."""
-        value = value.strip()
-        if info.data.get("ats") == "workday":
-            token = normalize_workday_token(value)
-            if token is None:
-                raise ValueError(
-                    f"{value!r} isn't a Workday board: use tenant.wdN/site, e.g. "
-                    "nvidia.wd5/NVIDIAExternalCareerSite, or paste the board's URL"
-                )
-            return token
-        if not re.fullmatch(SLUG_PATTERN, value):
-            raise ValueError(
-                f"{value!r} isn't a board token: letters, digits, '.', '_' and '-' only"
-            )
-        return value
-
-    @field_validator("keywords")
-    @classmethod
-    def _keywords_for_workday(cls, value: list[str], info: ValidationInfo) -> list[str]:
-        if not value:
-            return value
-        if info.data.get("ats") != "workday":
-            raise ValueError("keywords apply to Workday boards only (ats: workday)")
-        if any(not keyword.strip() for keyword in value):
-            raise ValueError("keywords must not be blank")
-        return clean_keywords(value)
-
-
 class SearchEntry(_Model):
     name: Slug
     site: SearchSite
@@ -417,8 +365,8 @@ class SearchEntry(_Model):
 
 
 class LinkedInPacing(_Model):
-    delay_min_seconds: float = Field(default=4.0, ge=0)
-    delay_max_seconds: float = Field(default=8.0, ge=0)
+    delay_min_seconds: float = Field(default=15.0, ge=0)
+    delay_max_seconds: float = Field(default=30.0, ge=0)
     cooldown_minutes: float = Field(default=30.0, ge=0)
     job_pages: bool = True
     max_job_pages_per_hour: int = Field(default=40, ge=1, le=1000)
@@ -490,8 +438,8 @@ class DiscoveryConfig(_Model):
     enabled: bool = True
     require_match: bool = True
     max_board_jobs: int | None = Field(default=1000, ge=1)
-    max_auto_companies: int | None = Field(default=50, ge=0)
-    max_validations_per_cycle: int = Field(default=10, ge=0, le=100)
+    max_auto_companies: int | None = Field(default=1500, ge=0)
+    max_validations_per_cycle: int = Field(default=20, ge=0, le=100)
     max_page_fetches_per_cycle: int = Field(default=5, ge=0, le=50)
 
 
@@ -526,11 +474,6 @@ class HealthConfig(_Model):
 
 class RetentionConfig(_Model):
     runs_days: int | None = Field(default=30, ge=1)  # None keeps every run
-
-
-class DashboardConfig(_Model):
-    host: str = "127.0.0.1"
-    port: int = Field(default=8000, ge=1, le=65535)
 
 
 class SetupAnswers(_Model):
@@ -596,27 +539,12 @@ class SetupAnswers(_Model):
 
 
 PROFILE_VERSION = 1
-# The preferences that moved from config.yaml into the database profile (M6).
-PROFILE_KEYS = (
-    "contact_email",
-    "timezone",
-    "filters",
-    "scoring",
-    "notify",
-    "searches",
-    "blocklist",
-    "hide_agencies",
-    "llm",
-    "answers",
-)
-MOVED_KEYS = (*PROFILE_KEYS, "watchlist")
 
 
 class InfraConfig(_Model):
-    """config.yaml: how jobpulse runs. Every key is optional, and so is the file; your
-    preferences are the database profile (``Profile``)."""
+    """How jobpulse runs. The defaults are fixed; what Settings → Sources & schedule
+    changes comes from the profile (``infra_for``). Not a file: there is no config.yaml."""
 
-    database_url: str = DEFAULT_DATABASE_URL
     http: HttpConfig = HttpConfig()
     schedules: SchedulesConfig = SchedulesConfig()
     detection: DetectionConfig = DetectionConfig()
@@ -627,7 +555,6 @@ class InfraConfig(_Model):
     health: HealthConfig = HealthConfig()
     maintenance: MaintenanceConfig = MaintenanceConfig()
     retention: RetentionConfig = RetentionConfig()
-    dashboard: DashboardConfig = DashboardConfig()
     embeddings: EmbeddingsConfig = Field(default_factory=EmbeddingsConfig)
     seed: SeedConfig = SeedConfig()
 
@@ -653,6 +580,33 @@ class InfraConfig(_Model):
         return self
 
 
+class SourceSettings(_Model):
+    """Settings → Sources & schedule: the few knobs worth turning. The worker rebuilds its
+    schedule when they change (``infra_for``); everything else about how it runs is fixed."""
+
+    check_every_minutes: int = Field(default=20, ge=5, le=240)  # company boards and the feed
+    search_every_minutes: int = Field(default=30, ge=15, le=240)  # LinkedIn and Indeed
+    freshness_hours: int = Field(default=48, ge=24, le=168)  # older postings are never pushed
+    linkedin_pause_min_seconds: int = Field(default=15, ge=2, le=300)
+    linkedin_pause_max_seconds: int = Field(default=30, ge=2, le=300)
+    linkedin_job_pages: bool = True  # read each LinkedIn match's page: description, applicants
+    linkedin_job_pages_per_hour: int = Field(default=40, ge=1, le=200)
+    simplify_feed: bool = True  # the SimplifyJobs New-Grad list
+    discovery: bool = True  # add boards linked from the feed and searches automatically
+    discovery_max_companies: int = Field(default=1500, ge=0, le=10_000)
+    seed_updates: bool = False  # the public seed, once a day (off until the repo is public)
+    health_alerts: bool = True
+    resume_matching: bool = True  # the local embedding model, about 200 MB of memory
+
+    @model_validator(mode="after")
+    def _pause_ordered(self) -> Self:
+        if self.linkedin_pause_min_seconds > self.linkedin_pause_max_seconds:
+            raise ValueError(
+                "linkedin_pause_min_seconds must not exceed linkedin_pause_max_seconds"
+            )
+        return self
+
+
 class Profile(_Model):
     """Your preferences: stored in the database, edited on Settings, and read by the worker
     at the start of every cycle."""
@@ -667,6 +621,7 @@ class Profile(_Model):
     blocklist: BlocklistConfig = BlocklistConfig()
     hide_agencies: bool = True  # block the staffing agencies in data/seed/agencies.json
     llm: LlmConfig = LlmConfig()
+    sources: SourceSettings = SourceSettings()
     answers: SetupAnswers | None = None  # the setup wizard's; None: imported or hand-written
 
     @field_validator("contact_email")
@@ -705,50 +660,8 @@ class Profile(_Model):
 
 
 class AppConfig(InfraConfig, Profile):
-    """What the rest of jobpulse reads: config.yaml's infrastructure with the profile
+    """What the rest of jobpulse reads: how the worker runs (``infra_for``) with the profile
     (``compose``)."""
-
-
-class LegacyConfig(AppConfig):
-    """A config.yaml from before M6, preferences and watchlist included: what `jobpulse
-    profile import` reads."""
-
-    watchlist: list[WatchlistEntry] = []
-
-    @field_validator("watchlist")
-    @classmethod
-    def _unique_companies(cls, value: list[WatchlistEntry]) -> list[WatchlistEntry]:
-        seen: dict[tuple[str, str], int] = {}
-        for index, entry in enumerate(value):
-            key = (entry.ats, entry.token.lower())
-            if key in seen:
-                raise ValueError(
-                    f"watchlist[{index}] is a duplicate of watchlist[{seen[key]}] "
-                    f"({entry.ats}/{entry.token.lower()})"
-                )
-            seen[key] = index
-        return value
-
-    @model_validator(mode="after")
-    def _blocklist_spares_the_watchlist(self) -> Self:
-        names = {normalize_company(name): i for i, name in enumerate(self.blocklist.companies)}
-        boards = {board.lower(): i for i, board in enumerate(self.blocklist.boards)}
-        for index, entry in enumerate(self.watchlist):
-            if not entry.active:
-                continue
-            board = f"{entry.ats}/{entry.token}".lower()
-            name = normalize_company(entry.name)
-            if board in boards:
-                field = f"blocklist.boards[{boards[board]}]"
-            elif name in names:
-                field = f"blocklist.companies[{names[name]}]"
-            else:
-                continue
-            raise ValueError(
-                f"{field} blocks watchlist[{index}] ({entry.name}), which is active; remove one "
-                "of them, or set active: false on the watchlist entry"
-            )
-        return self
 
 
 def scoring_hash(profile: Profile) -> str:
@@ -757,6 +670,41 @@ def scoring_hash(profile: Profile) -> str:
     jobpulse that adds one doesn't re-score every open match."""
     data = profile.model_dump(mode="json", include={"filters", "scoring"}, exclude_defaults=True)
     return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
+
+
+def infra_for(
+    profile: Profile | None, *, data_dir: Path | None = None, base: InfraConfig | None = None
+) -> InfraConfig:
+    """How the worker runs for ``profile``: ``base`` (the fixed defaults) with Settings →
+    Sources & schedule applied. The embedding model is looked for in ``data_dir``/models
+    unless ``JOBPULSE_MODELS_DIR`` says otherwise (the Docker image bakes it elsewhere)."""
+    sources = (profile or Profile()).sources
+    data = (base or InfraConfig()).model_dump(include=set(InfraConfig.model_fields))
+    if data_dir is not None and not os.environ.get("JOBPULSE_MODELS_DIR"):
+        data["embeddings"]["cache_dir"] = data_dir / "models"
+    for job, minutes in (
+        ("watchlist", sources.check_every_minutes),
+        ("simplify", sources.check_every_minutes),
+        ("job_boards", sources.search_every_minutes),
+    ):
+        cadence = data["schedules"][job]
+        cadence["every_minutes"] = minutes
+        cadence["jitter_seconds"] = min(cadence["jitter_seconds"], minutes * 60 / 2)
+    data["detection"]["freshness_hours"] = sources.freshness_hours
+    data["linkedin"].update(
+        delay_min_seconds=sources.linkedin_pause_min_seconds,
+        delay_max_seconds=sources.linkedin_pause_max_seconds,
+        job_pages=sources.linkedin_job_pages,
+        max_job_pages_per_hour=sources.linkedin_job_pages_per_hour,
+    )
+    data["simplify"]["enabled"] = sources.simplify_feed
+    data["discovery"].update(
+        enabled=sources.discovery, max_auto_companies=sources.discovery_max_companies
+    )
+    data["seed"]["remote"] = sources.seed_updates
+    data["health"]["enabled"] = sources.health_alerts
+    data["embeddings"]["enabled"] = sources.resume_matching
+    return InfraConfig.model_validate(data)
 
 
 def compose(infra: InfraConfig, profile: Profile) -> AppConfig:
@@ -774,112 +722,6 @@ def split(config: AppConfig) -> tuple[InfraConfig, Profile]:
         **{name: getattr(config, name) for name in Profile.model_fields}
     )
     return infra, profile
-
-
-class Settings(BaseSettings):
-    """Secrets and deployment overrides from the environment and ``.env``."""
-
-    model_config = SettingsConfigDict(
-        env_file=DEFAULT_ENV_FILE, env_file_encoding="utf-8", env_ignore_empty=True, extra="ignore"
-    )
-
-    ntfy_topic: SecretStr | None = None
-    ntfy_token: SecretStr | None = None
-    discord_webhook_url: SecretStr | None = None
-    llm_api_key: SecretStr | None = None
-    dashboard_user: str | None = None
-    dashboard_password: SecretStr | None = None
-    database_url: str | None = None
-    jobpulse_config: Path | None = None
-    log_level: str = "INFO"
-
-    def secret_values(self) -> list[str]:
-        """Every secret string, for log redaction."""
-        values = [
-            secret.get_secret_value()
-            for secret in (
-                self.ntfy_topic,
-                self.ntfy_token,
-                self.discord_webhook_url,
-                self.llm_api_key,
-                self.dashboard_password,
-            )
-            if secret is not None
-        ]
-        if self.database_url and (password := urlsplit(self.database_url).password):
-            values.append(password)
-        return values
-
-
-MOVED_TO_SETTINGS = (
-    "moved to the database: edit it on Settings, or run `jobpulse profile import` once"
-)
-MOVED_TO_WATCHLIST = (
-    "moved to the database: edit it on the Watchlist page, or run `jobpulse profile import` once"
-)
-
-
-def load_config(path: Path, *, missing_ok: bool = False) -> InfraConfig:
-    """Read and validate ``config.yaml``, which holds infrastructure only; raise
-    ``ConfigError`` naming every bad field. A preference key (``filters``, ``watchlist``…)
-    is an error per key that says where it went. ``missing_ok``: no file means defaults."""
-    data = _read_yaml(path, missing_ok=missing_ok)
-    errors = [
-        FieldError(key, MOVED_TO_WATCHLIST if key == "watchlist" else MOVED_TO_SETTINGS)
-        for key in data
-        if key in MOVED_KEYS
-    ]
-    rest = {key: value for key, value in data.items() if key not in MOVED_KEYS}
-    try:
-        config = InfraConfig.model_validate(rest)
-    except ValidationError as exc:
-        errors += describe_errors(exc)
-    if errors:
-        raise ConfigError(path, errors)
-    return config
-
-
-def read_config_lenient(path: Path, *, missing_ok: bool = True) -> InfraConfig:
-    """Like ``load_config``, but preference keys from before M6 are dropped unread, so
-    ``db upgrade`` and ``profile import`` work on an old config.yaml."""
-    data = _read_yaml(path, missing_ok=missing_ok)
-    try:
-        return InfraConfig.model_validate(
-            {key: value for key, value in data.items() if key not in MOVED_KEYS}
-        )
-    except ValidationError as exc:
-        raise ConfigError(path, describe_errors(exc)) from None
-
-
-def load_legacy_config(path: Path) -> LegacyConfig:
-    """A config.yaml from before M6, preferences and watchlist included, validated whole."""
-    data = _read_yaml(path, missing_ok=False)
-    try:
-        return LegacyConfig.model_validate(data)
-    except ValidationError as exc:
-        raise ConfigError(path, describe_errors(exc)) from None
-
-
-def _read_yaml(path: Path, *, missing_ok: bool) -> dict[str, Any]:
-    try:
-        text = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        if missing_ok:
-            return {}
-        raise ConfigError(
-            path, [FieldError("", "file not found (copy config.example.yaml to config.yaml)")]
-        ) from None
-    try:
-        data = yaml.safe_load(text)
-    except yaml.YAMLError as exc:
-        raise ConfigError(path, [FieldError("", _yaml_problem(exc))]) from None
-    if data is None:
-        return {}
-    if not isinstance(data, dict):
-        raise ConfigError(
-            path, [FieldError("", "the top level must be a mapping of section names to values")]
-        )
-    return data
 
 
 class ProfileError(ValueError):
@@ -945,22 +787,6 @@ def profile_yaml(profile: Profile) -> str:
     )
 
 
-def load_settings(env_file: Path | None) -> Settings:
-    """Load secrets from the environment and ``env_file`` (a missing file is fine)."""
-    try:
-        return Settings(_env_file=env_file)
-    except ValidationError as exc:
-        errors = [
-            FieldError(_format_location(e["loc"]).upper(), _describe(e)) for e in exc.errors()
-        ]
-        raise ConfigError(env_file or Path("<environment>"), errors) from None
-
-
-def resolve_config_path(cli_value: Path | None, settings: Settings) -> Path:
-    """``--config`` beats ``JOBPULSE_CONFIG``, which beats ``./config.yaml``."""
-    return cli_value or settings.jobpulse_config or DEFAULT_CONFIG_PATH
-
-
 def secret_problem(name: str, value: str) -> str | None:
     """Why a secret's value can't be used (``None`` when it can); never echoes the value."""
     if name == "ntfy_topic" and not NTFY_TOPIC_PATTERN.fullmatch(value):
@@ -974,10 +800,10 @@ def secret_problem(name: str, value: str) -> str | None:
 
 
 def require_secrets(
-    config: AppConfig, secrets: Mapping[str, str | None], *, env_file: Path, llm: bool = False
+    config: AppConfig, secrets: Mapping[str, str | None], *, llm: bool = False
 ) -> None:
-    """Check the secrets (``.env`` or Settings, resolved: ``credentials.SecretStore``) that
-    the enabled notification channels need, and with ``llm`` the LLM layer's key when the
+    """Check the secrets saved on Settings (``credentials.SecretStore``) that the enabled
+    notification channels need, and with ``llm`` the LLM layer's key when the
     layer is on (a live poll).
 
     Only commands that send call this; the worker starts without them and waits. Error
@@ -987,50 +813,23 @@ def require_secrets(
     if llm and config.llm.enabled and not secrets.get("llm_api_key"):
         errors.append(
             FieldError(
-                "LLM_API_KEY",
-                "not set, but llm.enabled is true; add your Anthropic API key on Settings or "
-                "in .env",
+                "Anthropic API key",
+                "not set, but the LLM layer is on; add it on Settings → Advanced",
             )
         )
-    for channel, name in (("ntfy", "ntfy_topic"), ("discord", "discord_webhook_url")):
+    for channel, name, label in (
+        ("ntfy", "ntfy_topic", "ntfy topic"),
+        ("discord", "discord_webhook_url", "Discord webhook URL"),
+    ):
         if channel not in config.notify.channels:
             continue
         value = secrets.get(name)
         if not value:
-            errors.append(
-                FieldError(name.upper(), f"not set, but notify.channels includes {channel!r}")
-            )
+            errors.append(FieldError(label, f"not set, but notifications go to {channel}"))
         elif problem := secret_problem(name, value):
-            errors.append(FieldError(name.upper(), problem))
+            errors.append(FieldError(label, problem))
     if errors:
-        raise ConfigError(
-            env_file,
-            errors,
-            heading="missing or invalid secrets (set them on Settings, or in {path})",
-        )
-
-
-def dashboard_credentials(settings: Settings, *, env_file: Path) -> tuple[str, str] | None:
-    """(user, password) for the dashboard's basic auth when both are set, ``None`` when
-    neither is. Setting only one is an error, so auth is never silently off."""
-    user = settings.dashboard_user or ""
-    password = settings.dashboard_password.get_secret_value() if settings.dashboard_password else ""
-    if user and password:
-        return user, password
-    if not user and not password:
-        return None
-    missing = "DASHBOARD_PASSWORD" if user else "DASHBOARD_USER"
-    raise ConfigError(
-        env_file,
-        [
-            FieldError(
-                missing,
-                "not set; set both DASHBOARD_USER and DASHBOARD_PASSWORD to turn on the "
-                "dashboard's basic auth, or neither to run it without (on 127.0.0.1 only)",
-            )
-        ],
-        heading="missing or invalid secrets (set them in {path} or the environment)",
-    )
+        raise ConfigError(errors, heading="missing or invalid secrets (set them on Settings)")
 
 
 def config_warnings(config: AppConfig) -> list[str]:
@@ -1083,7 +882,7 @@ def _format_location(location: tuple[int | str, ...]) -> str:
 
 
 def describe_errors(exc: ValidationError) -> list[FieldError]:
-    """Each validation error with its dotted field path, as config.yaml and Settings show
+    """Each validation error with its dotted field path, as Settings shows
     them."""
     return [FieldError(_format_location(e["loc"]), _describe(e)) for e in exc.errors()]
 

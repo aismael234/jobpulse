@@ -6,11 +6,10 @@ from datetime import timedelta
 from typing import Any
 
 import pytest
-from pydantic import SecretStr
 from sqlalchemy.orm import Session, sessionmaker
 
-from jobpulse.config import AppConfig, Settings
-from jobpulse.credentials import SecretStore
+from jobpulse.config import AppConfig
+from jobpulse.credentials import Secrets, SecretStore
 from jobpulse.db import resume as resume_db
 from jobpulse.llm.claude import ClaudeClient
 from jobpulse.llm.prompt import build_request
@@ -24,9 +23,22 @@ def config(**llm: Any) -> AppConfig:
     return AppConfig.model_validate({"llm": {"enabled": True, **llm}})
 
 
+class KeyedStore(SecretStore):
+    """A store whose Anthropic key is saved on its first read, as if typed on Settings."""
+
+    def __init__(self, key: str) -> None:
+        super().__init__()
+        self._pending: str | None = key
+
+    def resolve(self, session: Session) -> Secrets:
+        if self._pending is not None:
+            self.save(session, "llm_api_key", self._pending, now=NOW)
+            self._pending = None
+        return super().resolve(session)
+
+
 def store(key: str | None = "sk-ant-test-0123456789") -> SecretStore:
-    """Secrets from these values alone, never from the repository's own .env."""
-    return SecretStore(Settings(_env_file=None, llm_api_key=SecretStr(key) if key else None))
+    return KeyedStore(key) if key else SecretStore()
 
 
 @pytest.fixture

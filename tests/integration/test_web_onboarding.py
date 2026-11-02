@@ -256,12 +256,12 @@ def test_an_imported_profile_never_sees_the_wizard(web: Web) -> None:
     assert web.client.get("/setup", follow_redirects=False).status_code == 409
     assert web.client.get("/setup/roles", follow_redirects=False).status_code == 409
     assert post_form(web, "/setup/roles", {"roles": "backend"}).status_code == 409
-    assert "imported or written by hand" in page_text(web, "/settings")
+    assert "imported or written by hand" in page_text(web, "/settings/search")
 
 
 def test_answers_can_change_from_settings_without_a_new_seed(fresh: Web) -> None:
     onboarded_with_answers(fresh, SetupAnswers(roles=["backend"]))
-    assert "Change your answers" in page_text(fresh, "/settings")
+    assert "Change your answers" in page_text(fresh, "/settings/search")
     assert fresh.client.get("/setup", follow_redirects=False).headers["location"] == (
         "/setup/roles"
     )
@@ -288,7 +288,7 @@ def test_a_section_edited_in_advanced_stays_when_the_answers_change(fresh: Web) 
     assert edited is not None
     assert edited.answers is not None
     assert edited.answers.custom == ["filters.title"]
-    assert "filters.title" in page_text(fresh, "/settings")
+    assert "filters.title" in page_text(fresh, "/settings/search")
 
     post_form(fresh, "/setup/roles", {"roles": ["frontend"]})
     after = stored(fresh).profile

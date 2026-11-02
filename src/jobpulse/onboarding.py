@@ -4,7 +4,7 @@ profile sections, the resume's prefill, and the board seed applied once onboardi
 The answers live in the profile (``Profile.answers``). Each change rebuilds every section
 ``core.profile_builder.build_rules`` writes, except those listed in ``answers.custom``:
 sections you edited in Advanced stay as you left them. A profile without answers (imported
-from config.yaml, or written by hand) is all custom: the wizard never touches it.
+or written by hand) is all custom: the wizard never touches it.
 """
 
 import logging

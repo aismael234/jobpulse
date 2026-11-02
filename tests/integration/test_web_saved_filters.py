@@ -1,6 +1,7 @@
-"""M5.1 on the dashboard: Settings creates, edits, switches and deletes up to 8 labeled filters
-(one per color), says which push mode is on, flags a filter that no longer reads back, and has
-a color-blind mode. The postings page gets a button per saved filter with a badge of new
+"""M5.1 on the dashboard: the filter bar's "Save these filters" form creates and edits up to 8
+labeled filters (one per color); Settings → Saved filters lists, switches and deletes them,
+says which push mode is on and flags a filter that no longer reads back; and there's a
+color-blind mode. The postings page gets a button per saved filter with a badge of new
 matches since it was last opened, and bullets on the cards that fit."""
 
 import html
@@ -42,17 +43,17 @@ def form(label: str = "Austin contract", slot: str = "0", **params: str) -> dict
 
 
 def test_settings_says_which_push_mode_is_on(web: Web) -> None:
-    page = html.unescape(web.page("/settings"))
-    assert "No saved filters: every match is pushed, one message per cycle." in page
+    page = html.unescape(web.page("/settings/filters"))
+    assert "No saved filters: every match is pushed, one message per check." in page
 
     first = add_filter(web, "Austin", 0, place="US-TX")
-    page = html.unescape(web.page("/settings"))
+    page = html.unescape(web.page("/settings/filters"))
     assert "Only matches that fit an active saved filter are pushed, one message each." in page
 
     with web.sessions() as session:
         saved_filters.set_active(session, first, False, now=NOW)
         session.commit()
-    page = html.unescape(web.page("/settings"))
+    page = html.unescape(web.page("/settings/filters"))
     assert "Every saved filter is off: nothing is pushed." in page
 
 
@@ -61,7 +62,9 @@ def test_creating_a_filter_keeps_every_field_written_out(web: Web) -> None:
         "/settings/filters", form(place="US-TX", contract="only", q=" python "), htmx=False
     )
     assert response.status_code == 303
-    assert response.headers["location"] == "/settings"
+    # Back to the dashboard, showing what the new filter keeps.
+    assert response.headers["location"].startswith("/?")  # New, the default view
+    assert "contract=only" in response.headers["location"]
     [row] = saved(web)
     assert row.label == "Austin contract"
     assert row.slot == 0
@@ -88,6 +91,8 @@ def test_a_label_and_a_free_color_are_required_and_eight_is_the_most(web: Web) -
     assert taken.status_code == 400
     assert "color is taken" in html.unescape(taken.text)
     assert web.post("/settings/filters", form(slot="9"), htmx=False).status_code == 400
+    shown = web.post("/settings/filters", form(label="Other", slot="0"))  # HTMX: in the notice
+    assert shown.headers["HX-Retarget"] == "#notice"
     for slot in range(1, 8):
         add_filter(web, f"F{slot}", slot)
     full = web.post("/settings/filters", form(label="Ninth", slot="3"), htmx=False)
@@ -124,19 +129,42 @@ def test_switching_off_and_on_and_deleting(web: Web) -> None:
     assert saved(web) == []
 
 
-def test_settings_is_prefilled_from_the_dashboard_filters(web: Web) -> None:
-    page = web.page("/settings", contract="only", q="python", max_applicants="50")
-    assert re.search(r'<option value="only"\s+selected>', page)
-    assert re.search(r'<option value="50"\s+selected>', page)
+def save_form(page: str) -> str:
+    found = re.search(r'<details class="save-filters".*?</details>', page, re.S)
+    assert found is not None
+    return found.group(0)
+
+
+def test_the_save_form_carries_the_dashboard_filters(web: Web) -> None:
+    page = save_form(web.page("/", contract="only", q="python", max_applicants="50", sort="fresh"))
+    assert 'action="/settings/filters"' in page
+    assert 'name="contract" value="only"' in page
     assert 'name="q" value="python"' in page
+    assert 'name="max_applicants" value="50"' in page
+    assert 'name="sort"' not in page or 'name="sort" value="fresh"' not in page
+    assert re.search(r'name="slot" value="0"\s+checked', page)  # the first free color
 
 
-def test_editing_a_filter_shows_its_values(web: Web) -> None:
+def test_edit_opens_the_dashboard_with_the_filter_and_its_name(web: Web) -> None:
     filter_id = add_filter(web, "Austin", 3, place="US-TX", contract="hide")
-    page = web.page("/settings", edit=str(filter_id))
-    assert 'name="label" value="Austin"' in page
-    assert re.search(r'<option value="hide"\s+selected>', page)
-    assert re.search(r'name="slot" value="3"\s+checked', page)
+    listing = html.unescape(web.page("/settings/filters"))
+    edit = re.search(r'<a href="([^"]+)">Edit</a>', listing)
+    assert edit is not None
+    assert "place=US-TX" in edit.group(1)
+    assert f"editing={filter_id}" in edit.group(1)
+    page = html.unescape(web.client.get(edit.group(1)).text)
+    form_html = save_form(page)
+    assert '<details class="save-filters" open>' in form_html
+    assert f'action="/settings/filters/{filter_id}"' in form_html
+    assert 'name="label" value="Austin"' in form_html
+    assert re.search(r'name="slot" value="3"\s+checked', form_html)
+    assert 'name="contract" value="hide"' in form_html
+
+
+def test_eight_filters_fill_the_form(web: Web) -> None:
+    for slot in range(8):
+        add_filter(web, f"F{slot}", slot)
+    assert "You have 8 saved filters" in html.unescape(save_form(web.page("/")))
 
 
 def test_a_filter_that_no_longer_reads_back_is_flagged(web: Web) -> None:
@@ -146,7 +174,7 @@ def test_a_filter_that_no_longer_reads_back_is_flagged(web: Web) -> None:
         assert row is not None
         row.params = {**row.params, "exp": "2-4"}
         session.commit()
-    page = html.unescape(web.page("/settings"))
+    page = html.unescape(web.page("/settings/filters"))
     assert "no longer valid" in page
     assert "Old" not in re.sub(
         r"<section class=\"saved\".*?</section>", "", web.page("/"), flags=re.S
@@ -159,7 +187,7 @@ def test_color_blind_mode_adds_shapes(web: Web) -> None:
     response = web.post("/settings/color-blind", {"color_blind": "1"}, htmx=False)
     assert response.status_code == 303
     assert "▲" in web.page("/")
-    assert "▲" in web.page("/settings")
+    assert "▲" in web.page("/settings/filters")
     web.post("/settings/color-blind", {}, htmx=False)
     assert "▲" not in web.page("/")
 
@@ -208,11 +236,3 @@ def test_cards_show_the_bullets_of_the_filters_they_fit(web: Web) -> None:
     assert card(page, both).count('class="bullet slot-') == 2
     assert card(page, one).count('class="bullet slot-') == 1
     assert 'class="bullet slot-' not in card(page, none)
-
-
-def test_save_these_filters_opens_settings_prefilled(web: Web) -> None:
-    web.add()
-    page = html.unescape(web.page("/", contract="only", sort="fresh"))
-    link = re.search(r'<a class="save-filters" href="([^"]+)"', page)
-    assert link is not None
-    assert link.group(1) == "/settings?contract=only"

@@ -1,7 +1,8 @@
-"""Dashboard security: basic auth on and off, the CSRF token on every POST, response headers,
-and secrets never rendered."""
+"""Dashboard security: the password (Settings → Security) on and off, the CSRF token on every
+POST, response headers, and secrets never rendered."""
 
 import base64
+import html
 import re
 from collections.abc import Callable
 from datetime import timedelta
@@ -10,6 +11,7 @@ import pytest
 from fastapi import APIRouter
 from fastapi.routing import APIRoute
 
+from jobpulse.db import secrets as secret_rows
 from jobpulse.db.tables import Run
 from jobpulse.web import routes
 from tests.factories import NOW
@@ -27,23 +29,24 @@ def basic(user: str, password: str) -> dict[str, str]:
 # --- basic auth -------------------------------------------------------------------------
 
 
-def test_without_credentials_the_dashboard_is_open(web: Web) -> None:
+def test_without_a_password_the_dashboard_is_open(web: Web) -> None:
     for path in ("/", "/?view=saved", "/health", "/watchlist", "/static/htmx.min.js"):
         assert web.client.get(path).status_code == 200, path
 
 
-def test_basic_auth_guards_every_page_and_file(make_web: Callable[..., Web]) -> None:
-    client = make_web(credentials=(USER, PASSWORD)).client
+def test_the_password_guards_every_page_and_file(make_web: Callable[..., Web]) -> None:
+    client = make_web(password=PASSWORD).client
 
     for path in ("/", "/health", "/watchlist", "/static/htmx.min.js", "/static/app.css"):
         refused = client.get(path)
         assert refused.status_code == 401, path
         assert refused.headers["www-authenticate"].startswith('Basic realm="jobpulse"')
         assert client.get(path, headers=basic(USER, PASSWORD)).status_code == 200, path
+    # Any user name: only the password counts.
+    assert client.get("/", headers=basic("someone", PASSWORD)).status_code == 200
 
     for headers in (
         basic(USER, "wrong"),
-        basic("someone", PASSWORD),
         basic(USER, PASSWORD + "x"),
         {"Authorization": "Basic not-base64!!"},
         {"Authorization": "Bearer " + PASSWORD},
@@ -53,25 +56,63 @@ def test_basic_auth_guards_every_page_and_file(make_web: Callable[..., Web]) -> 
 
 
 def test_the_liveness_probe_needs_no_password(make_web: Callable[..., Web]) -> None:
-    client = make_web(credentials=(USER, PASSWORD)).client
+    client = make_web(password=PASSWORD).client
     response = client.get("/healthz")
     assert response.status_code == 200
     assert response.text == "ok"
 
 
 def test_posts_need_the_password_too(make_web: Callable[..., Web]) -> None:
-    web = make_web(credentials=(USER, PASSWORD))
+    web = make_web(password=PASSWORD)
     posting = web.add(title="Backend Engineer")
     response = web.client.post(f"/postings/{posting}/status", data={"status": "Saved"})
     assert response.status_code == 401
     assert web.row(posting).status == "New"
 
 
-def test_the_password_is_never_rendered(make_web: Callable[..., Web]) -> None:
-    web = make_web(credentials=(USER, PASSWORD), secrets=[PASSWORD])
-    for path in ("/", "/health", "/watchlist"):
+def test_the_password_is_stored_as_a_hash_and_never_rendered(
+    make_web: Callable[..., Web],
+) -> None:
+    web = make_web(password=PASSWORD)
+    with web.sessions() as session:
+        stored = secret_rows.get_all(session)["dashboard_password"]
+    assert stored.startswith("scrypt$")
+    assert PASSWORD not in stored
+    for path in ("/", "/health", "/watchlist", "/settings/security"):
         response = web.client.get(path, headers=basic(USER, PASSWORD))
         assert PASSWORD not in response.text
+
+
+def test_the_password_is_set_and_cleared_on_settings_and_applies_at_once(web: Web) -> None:
+    page = web.client.get("/settings/security").text
+    assert "Off: anyone who can reach this page can use it." in html.unescape(page)
+    mismatch = web.client.post(
+        "/settings/password",
+        data={"password": PASSWORD, "confirm": "other-pass-1", "csrf_token": web.token},
+    )
+    assert mismatch.status_code == 400
+    assert "the two passwords don't match" in html.unescape(mismatch.text)
+    short = web.client.post(
+        "/settings/password",
+        data={"password": "short", "confirm": "short", "csrf_token": web.token},
+    )
+    assert short.status_code == 400
+    saved = web.client.post(
+        "/settings/password",
+        data={"password": PASSWORD, "confirm": PASSWORD, "csrf_token": web.token},
+        follow_redirects=False,
+    )
+    assert saved.status_code == 303
+    assert web.client.get("/").status_code == 401
+    assert web.client.get("/", headers=basic("", PASSWORD)).status_code == 200
+    cleared = web.client.post(
+        "/settings/password/clear",
+        data={"csrf_token": web.token},
+        headers=basic("", PASSWORD),
+        follow_redirects=False,
+    )
+    assert cleared.status_code == 303
+    assert web.client.get("/").status_code == 200
 
 
 # --- CSRF -----------------------------------------------------------------------------------
@@ -168,17 +209,21 @@ def test_every_post_route_checks_the_token(web: Web) -> None:
         "/postings/bulk-status",
         "/postings/{posting_id}/status",
         "/saved-filters/{filter_id}/viewed",
+        "/settings/channels",
         "/settings/color-blind",
         "/settings/filters",
         "/settings/filters/{filter_id}",
         "/settings/filters/{filter_id}/active",
         "/settings/filters/{filter_id}/delete",
         "/settings/notify/test",
+        "/settings/password",
+        "/settings/password/clear",
         "/settings/profile",
         "/settings/resume",
         "/settings/resume/clear",
         "/settings/secrets/{name}",
         "/settings/secrets/{name}/clear",
+        "/settings/sources",
         "/setup/notifications",
         "/setup/resume",
         "/setup/review",
@@ -299,7 +344,7 @@ def test_pages_answer_head_like_get(web: Web, path: str, content_type: str) -> N
 
 
 def test_head_requests_need_the_password_too(make_web: Callable[..., Web]) -> None:
-    client = make_web(credentials=(USER, PASSWORD)).client
+    client = make_web(password=PASSWORD).client
     assert client.head("/").status_code == 401
     assert client.head("/", headers=basic(USER, PASSWORD)).status_code == 200
     assert client.head("/healthz").status_code == 200

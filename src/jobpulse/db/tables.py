@@ -326,9 +326,9 @@ class ProfileRow(Base):
 
 
 class SecretRow(Base):
-    """A secret saved on Settings: an ntfy topic, a Discord webhook, an API key. The same
-    secret in ``.env`` wins. Plain text, like ``.env``: keep the database and its backups
-    private."""
+    """A secret saved on Settings: an ntfy topic, a Discord webhook, an API key, in plain
+    text (keep the database and its backups private); and the dashboard password's scrypt
+    hash (``credentials.PASSWORD_ROW``)."""
 
     __tablename__ = "secrets"
 
@@ -352,8 +352,8 @@ class SeedState(Base):
 
 
 class WorkerLease(Base):
-    """The one worker allowed to poll this database (M8), one row: a second ``worker`` or
-    ``up`` on the same database refuses to start while the lease is held, so nothing is
+    """The one worker allowed to poll this database (M8), one row: a second ``up`` on the
+    same database refuses to start while the lease is held, so nothing is
     pushed twice. The holder renews it every minute; a lease not renewed by ``expires_at``
     is free."""
 

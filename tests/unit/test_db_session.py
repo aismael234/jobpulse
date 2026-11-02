@@ -6,8 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import StatementError
 from sqlalchemy.orm import Session
 
-from jobpulse.config import AppConfig, Settings
-from jobpulse.db.session import create_engine_for, resolve_database_url
+from jobpulse.db.session import DEFAULT_DATA_DIR, create_engine_for, database_url
 from jobpulse.db.tables import Base, Company
 
 
@@ -64,13 +63,6 @@ def test_sqlite_parent_directory_is_created(tmp_path: Path) -> None:
     assert (tmp_path / "nested" / "dir" / "jobpulse.db").exists()
 
 
-def test_database_url_precedence(tmp_path: Path) -> None:
-    config = AppConfig.model_validate(
-        {"contact_email": "dev@example.com", "database_url": "sqlite:///from-config.db"}
-    )
-    env_file = tmp_path / ".env"
-    env_file.write_text("DATABASE_URL=sqlite:///from-env.db\n", encoding="utf-8")
-
-    assert resolve_database_url(Settings(_env_file=env_file), config) == "sqlite:///from-env.db"
-    assert resolve_database_url(Settings(_env_file=None), config) == "sqlite:///from-config.db"
-    assert resolve_database_url(Settings(_env_file=None), None) == "sqlite:///data/jobpulse.db"
+def test_the_database_lives_in_the_data_folder(tmp_path: Path) -> None:
+    assert database_url(DEFAULT_DATA_DIR) == "sqlite:///data/jobpulse.db"
+    assert database_url(tmp_path) == f"sqlite:///{tmp_path}/jobpulse.db"

@@ -1,7 +1,7 @@
 """Location normalization: split multi-city strings, recognize remote forms, apply aliases.
 
 Labels are plain strings such as "San Francisco, CA", "Remote (US)" or "Remote". The alias
-table is deliberately small; ``filters.locations.aliases`` in config.yaml extends it.
+table is deliberately small; ``filters.locations.aliases`` in the profile extends it.
 """
 
 import re

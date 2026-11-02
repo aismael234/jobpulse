@@ -17,6 +17,7 @@ from urllib.parse import parse_qsl, urlsplit
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.types import DecoratedCallable
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -25,7 +26,9 @@ from jobpulse.config import (
     FieldError,
     InfraConfig,
     ProfileError,
+    SourceSettings,
     clean_keywords,
+    describe_errors,
     filter_rules,
     parse_profile_yaml,
     profile_yaml,
@@ -44,7 +47,14 @@ from jobpulse.core.dedupe import normalize_company
 from jobpulse.core.filters import Blocklist
 from jobpulse.core.palette import SWATCHES
 from jobpulse.core.similarity import resume_lines
-from jobpulse.credentials import SECRET_LABELS, SECRET_NAMES, SecretError
+from jobpulse.credentials import (
+    MIN_PASSWORD_CHARS,
+    SECRET_LABELS,
+    SecretError,
+    clear_password,
+    password_hash,
+    set_password,
+)
 from jobpulse.db import dashboard, repo, saved_filters
 from jobpulse.db import profile as profile_db
 from jobpulse.db import resume as resume_db
@@ -150,9 +160,8 @@ def _profile_notice(snapshot: Snapshot) -> str | None:
         return f"{snapshot.problem}. The last good profile is in use; fix it on Settings."
     if not snapshot.onboarded:
         return (
-            "No profile yet, so the worker waits: answer the setup questions (/setup), run "
-            "`jobpulse profile import` to bring in an old config.yaml's preferences, or save "
-            "one on Settings (Advanced)."
+            "No profile yet, so the worker waits: answer the setup questions (/setup), or "
+            "save one on Settings (Advanced)."
         )
     return None
 
@@ -184,7 +193,7 @@ def postings_page(request: Request) -> HTMLResponse:
         page = dashboard.list_postings(session, query, now=now, hidden=hidden)
         empty_new = query.status == "New" and not page.rows and not query.filtered
         progress = dashboard.watch_progress(session) if empty_new else None
-        cadence = timedelta(minutes=state.infra.schedules.watchlist.every_minutes)
+        cadence = timedelta(minutes=state.current().config.schedules.watchlist.every_minutes)
         return render(
             request,
             "postings.html",
@@ -202,7 +211,14 @@ def postings_page(request: Request) -> HTMLResponse:
                 "next_check": progress.last_check + cadence
                 if progress is not None and progress.last_check is not None
                 else None,
-                **_saved_context(session, query, page.rows, now=now, hidden=hidden),
+                **_saved_context(
+                    session,
+                    query,
+                    page.rows,
+                    now=now,
+                    hidden=hidden,
+                    editing=request.query_params.get("editing", ""),
+                ),
                 "moved_sort": MOVED_SORT_LABELS.get(query.status),
                 "bulk_views": BULK_VIEWS,
                 "link": link,
@@ -231,10 +247,12 @@ def _saved_context(
     *,
     now: datetime,
     hidden: frozenset[str],
+    editing: str = "",
 ) -> dict[str, Any]:
     """The saved-filter buttons above the filters, the bullets on this page's cards, and the
-    "Save these filters" link."""
-    filters = [saved for saved in saved_filters.list_filters(session) if saved.query is not None]
+    "Save these filters" form (``editing``: a saved filter's id, to update it instead)."""
+    every = saved_filters.list_filters(session)
+    filters = [saved for saved in every if saved.query is not None]
     counts = saved_filters.new_match_counts(session, filters, now=now, hidden=hidden)
     shown = filter_params(query)
     buttons = [
@@ -251,12 +269,24 @@ def _saved_context(
         session, filters, [row.id for row in rows], now=now, status=query.status
     )
     plain = replace(query, status="New", sort="score", page=1, pushed=None)
+    row = session.get(SavedFilter, int(editing)) if editing.isdigit() else None
+    taken = {saved.row.slot for saved in every if row is None or saved.row.id != row.id}
+    free = [index for index in range(len(SWATCHES)) if index not in taken]
     return {
         "saved_buttons": buttons,
         "bullets": bullets,
         "color_blind": saved_filters.color_blind(session),
         "swatches": SWATCHES,
-        "save_url": "/settings" + link(plain)[1:],
+        "save_form": {
+            "action": f"/settings/filters/{row.id}" if row is not None else "/settings/filters",
+            "editing": row,
+            "label": row.label if row is not None else "",
+            "slot": row.slot if row is not None else (free[0] if free else None),
+            "free_slots": free,
+            "full": row is None and len(every) >= saved_filters.MAX_FILTERS,
+            "max": saved_filters.MAX_FILTERS,
+            "params": filter_params(plain),
+        },
     }
 
 
@@ -390,9 +420,10 @@ def change_status(
 @page("/health", response_class=HTMLResponse)
 def health_page(request: Request) -> HTMLResponse:
     state = _state(request)
+    snapshot = state.current()
     with state.sessions() as session:
         targets = dashboard.known_targets(
-            session, blocklist=_blocklist(request, session), feeds=state.feeds
+            session, blocklist=_blocklist(request, session), feeds=snapshot.feeds
         )
         return render(
             request,
@@ -401,8 +432,8 @@ def health_page(request: Request) -> HTMLResponse:
                 "view": "health",
                 "targets": dashboard.health_overview(session, now=state.clock(), targets=targets),
                 "incidents": dashboard.open_incidents(session),
-                "failures_needed": state.infra.health.consecutive_failures,
-                "quiet_hours": f"{state.infra.health.zero_hours:g}",
+                "failures_needed": snapshot.config.health.consecutive_failures,
+                "quiet_hours": f"{snapshot.config.health.zero_hours:g}",
             },
             session=session,
         )
@@ -525,7 +556,7 @@ async def _detect(request: Request, url: str) -> Detection:
         validation=validation,
         name=name,
         tone="success",
-        warning=_size_warning(state.infra, ref, validation.job_count),
+        warning=_size_warning(state.current().config, ref, validation.job_count),
     )
 
 
@@ -736,59 +767,89 @@ def set_active(request: Request, company_id: int, active: Annotated[str, Form()]
         return _company_response(request, session, company_id)
 
 
-# --- settings: saved filters ----------------------------------------------------------------
+# --- settings ------------------------------------------------------------------------------
+
+SETTINGS_TABS: tuple[tuple[str, str], ...] = (
+    ("notifications", "Notifications"),
+    ("search", "Job search"),
+    ("filters", "Saved filters"),
+    ("sources", "Sources & schedule"),
+    ("security", "Security"),
+    ("advanced", "Advanced"),
+)
+TAB_NAMES = frozenset(name for name, _ in SETTINGS_TABS)
+NOTIFY_SECRETS = ("ntfy_topic", "ntfy_token", "discord_webhook_url")
+SECRET_TABS = {name: "notifications" for name in NOTIFY_SECRETS} | {"llm_api_key": "advanced"}
+SECRET_STATES = {"settings": "set", "unset": "not set"}
 
 
 def _settings_page(
     request: Request,
     session: Session,
+    tab: str,
     *,
-    query: PostingQuery,
-    editing: SavedFilter | None = None,
-    label: str = "",
-    slot: int | None = None,
-    error: str | None = None,
     status_code: int = 200,
     extra: dict[str, Any] | None = None,
 ) -> HTMLResponse:
+    """One tab of Settings; every tab's context is cheap, so all of it is built."""
     state = _state(request)
     snapshot = state.current()
+    secrets = state.store.resolve(session)
     filters = saved_filters.list_filters(session)
-    taken = {saved.row.slot for saved in filters if editing is None or saved.row.id != editing.id}
-    free = [index for index in range(len(SWATCHES)) if index not in taken]
-    if slot is None:
-        slot = editing.slot if editing is not None else (free[0] if free else None)
+
+    def secret_rows(names: tuple[str, ...]) -> list[dict[str, str]]:
+        return [
+            {
+                "name": name,
+                "label": SECRET_LABELS[name],
+                "source": secrets.sources[name],
+                "state": SECRET_STATES[secrets.sources[name]],
+            }
+            for name in names
+        ]
+
     return render(
         request,
         "settings.html",
         {
             "view": "settings",
+            "tab": tab,
+            "tabs": SETTINGS_TABS,
+            "notice": None,
+            "notice_tone": "info",
+            "errors": [],
+            # Notifications
+            "notify_secrets": secret_rows(NOTIFY_SECRETS),
+            "channels": snapshot.config.notify.channels,
+            "color_blind": saved_filters.color_blind(session),
+            "swatches": SWATCHES,
+            # Job search
+            "setup_answers": snapshot.config.answers,
+            "setup_onboarded": snapshot.onboarded,
+            "resume": resume_db.get(session),
+            # Saved filters
             "filters": filters,
             "summaries": {
                 saved.row.id: filter_summary(saved.query)
                 for saved in filters
                 if saved.query is not None
             },
-            "query": query,
-            "editing": editing,
-            "label": label or (editing.label if editing is not None else ""),
-            "slot": slot,
-            "free_slots": free,
-            "full": editing is None and len(filters) >= saved_filters.MAX_FILTERS,
-            "max_filters": saved_filters.MAX_FILTERS,
-            "error": error,
-            "color_blind": saved_filters.color_blind(session),
-            "swatches": SWATCHES,
-            "places": dashboard.place_choices(
-                session, now=state.clock(), hidden=_hidden(request, session)
-            ),
-            "sources": KNOWN_SOURCES,
-            "experience_choices": EXPERIENCE_CHOICES,
-            "max_applicants_choices": MAX_APPLICANTS_CHOICES,
-            "contract_choices": CONTRACT_CHOICES,
-            "reposted_box": True,
+            "edit_links": {
+                saved.row.id: link(replace(saved.query, status="New", sort="score", page=1))
+                + f"&editing={saved.row.id}"
+                for saved in filters
+                if saved.query is not None
+            },
             "per_cycle": snapshot.config.notify.saved_filters.max_per_cycle,
-            **_profile_sections(state, session, snapshot),
+            # Sources & schedule
+            "sources_form": snapshot.config.sources.model_dump(),
+            # Security
+            "password_set": password_hash(session) is not None,
+            "min_password": MIN_PASSWORD_CHARS,
+            # Advanced
+            "advanced_secrets": secret_rows(("llm_api_key",)),
+            "profile_text": profile_yaml(split(snapshot.config)[1]),
+            "profile_revision": snapshot.revision,
             **(extra or {}),
         },
         session=session,
@@ -796,177 +857,64 @@ def _settings_page(
     )
 
 
-def _profile_sections(state: Any, session: Session, snapshot: Snapshot) -> dict[str, Any]:
-    """Notifications, resume and the profile editor (M6). Secret values never reach a page:
-    only where each one comes from."""
-    secrets = state.store.resolve(session)
-    return {
-        "secrets": [
-            {
-                "name": name,
-                "label": SECRET_LABELS[name],
-                "source": secrets.sources[name],
-                "state": SECRET_STATES[secrets.sources[name]],
-            }
-            for name in SECRET_NAMES
-        ],
-        "channels": snapshot.config.notify.channels,
-        "notice": None,
-        "notice_tone": "info",
-        "secret_error": None,
-        "resume": resume_db.get(session),
-        "resume_error": None,
-        "profile_text": profile_yaml(split(snapshot.config)[1]),
-        "profile_revision": snapshot.revision,
-        "profile_errors": [],
-        "setup_answers": snapshot.config.answers,
-        "setup_onboarded": snapshot.onboarded,
-    }
+def _back_to_settings(request: Request, tab: str) -> Response:
+    target = f"/settings/{tab}"
+    if _htmx(request):
+        return Response(headers={"HX-Redirect": target})
+    return RedirectResponse(target, status_code=303)
 
 
-def _readable_params(row: SavedFilter) -> dict[str, str]:
-    """A saved filter's parameters for its edit form, even one that no longer reads back."""
-    params = row.params if isinstance(row.params, dict) else {}
-    return {key: value for key, value in params.items() if isinstance(value, str)}
+def _settings_error(
+    request: Request, session: Session, tab: str, status_code: int, **extra: Any
+) -> HTMLResponse:
+    return _settings_page(request, session, tab, status_code=status_code, extra=extra)
 
 
 @page("/settings", response_class=HTMLResponse)
 def settings_page(request: Request) -> HTMLResponse:
-    """Saved filters: the push mode, each filter with its switch, and the form, prefilled
-    from the dashboard's filters (``/settings?contract=only``) or a filter (``?edit=3``)."""
     with _state(request).sessions() as session:
-        editing = None
-        edit = request.query_params.get("edit", "")
-        if edit.isdigit():
-            editing = session.get(SavedFilter, int(edit))
-        source = _readable_params(editing) if editing is not None else request.query_params
-        return _settings_page(request, session, query=parse_query(source), editing=editing)
+        return _settings_page(request, session, SETTINGS_TABS[0][0])
 
 
-async def _filter_form(
-    request: Request,
-) -> tuple[str, int, dict[str, str], PostingQuery]:
-    """Label, color slot (-1 when unreadable) and filters from a Settings form post."""
-    form = await request.form()
-    values = {key: value for key, value in form.items() if isinstance(value, str)}
-    query = parse_query({key: value for key, value in values.items() if key != "view"})
-    slot_text = values.get("slot", "").strip()
-    slot = int(slot_text) if slot_text.isdigit() else -1
-    return values.get("label", ""), slot, filter_params(query), query
+@page("/settings/{tab}", response_class=HTMLResponse)
+def settings_tab(request: Request, tab: str) -> HTMLResponse:
+    if tab not in TAB_NAMES:
+        raise HTTPException(status_code=404, detail="no such settings page")
+    with _state(request).sessions() as session:
+        return _settings_page(request, session, tab)
 
 
-@actions.post("/settings/filters", response_class=HTMLResponse)
-async def create_saved_filter(request: Request) -> Response:
-    label, slot, params, query = await _filter_form(request)
+def _save_profile_part(
+    request: Request, session: Session, revision: str, update: dict[str, Any]
+) -> None:
+    """Store the profile with ``update`` applied; ``StaleProfile`` when it moved on since
+    the page was loaded. A profile not onboarded yet stays a draft."""
     state = _state(request)
-    with session_scope(state.sessions) as session:
-        try:
-            saved_filters.create(session, label=label, slot=slot, params=params, now=state.clock())
-        except SavedFilterError as exc:
-            session.rollback()
-            return _settings_page(
-                request, session, query=query, label=label, slot=slot, error=str(exc),
-                status_code=400,
-            )  # fmt: skip
-    return RedirectResponse("/settings", status_code=303)
-
-
-@actions.post("/settings/filters/{filter_id}", response_class=HTMLResponse)
-async def update_saved_filter(request: Request, filter_id: int) -> Response:
-    label, slot, params, query = await _filter_form(request)
-    state = _state(request)
-    with session_scope(state.sessions) as session:
-        if session.get(SavedFilter, filter_id) is None:
-            raise HTTPException(status_code=404, detail="no such saved filter")
-        try:
-            saved_filters.update(
-                session, filter_id, label=label, slot=slot, params=params, now=state.clock()
-            )
-        except SavedFilterError as exc:
-            session.rollback()
-            return _settings_page(
-                request, session, query=query, editing=session.get(SavedFilter, filter_id),
-                label=label, slot=slot, error=str(exc), status_code=400,
-            )  # fmt: skip
-    return RedirectResponse("/settings", status_code=303)
-
-
-@actions.post("/settings/filters/{filter_id}/active")
-def switch_saved_filter(
-    request: Request, filter_id: int, active: Annotated[str, Form()] = ""
-) -> Response:
-    state = _state(request)
-    with session_scope(state.sessions) as session:
-        try:
-            saved_filters.set_active(
-                session, filter_id, active.strip() in ("1", "true", "on"), now=state.clock()
-            )
-        except LookupError:
-            raise HTTPException(status_code=404, detail="no such saved filter") from None
-    return _back_to_settings(request)
-
-
-@actions.post("/settings/filters/{filter_id}/delete")
-def delete_saved_filter(request: Request, filter_id: int) -> Response:
-    with session_scope(_state(request).sessions) as session:
-        try:
-            saved_filters.delete(session, filter_id)
-        except LookupError:
-            raise HTTPException(status_code=404, detail="no such saved filter") from None
-    return _back_to_settings(request)
-
-
-@actions.post("/settings/color-blind")
-def set_color_blind(request: Request, color_blind: Annotated[str, Form()] = "") -> Response:
-    state = _state(request)
-    with session_scope(state.sessions) as session:
-        saved_filters.set_color_blind(
-            session, color_blind.strip() in ("1", "true", "on"), now=state.clock()
-        )
-    return _back_to_settings(request)
-
-
-@actions.post("/saved-filters/{filter_id}/viewed")
-def saved_filter_viewed(request: Request, filter_id: int) -> Response:
-    """Sent by static/app.js when a saved filter's button is clicked: its badge starts over."""
-    state = _state(request)
-    with session_scope(state.sessions) as session:
-        try:
-            saved_filters.mark_viewed(session, filter_id, now=state.clock())
-        except LookupError:
-            raise HTTPException(status_code=404, detail="no such saved filter") from None
-    return Response(status_code=204)
-
-
-def _back_to_settings(request: Request, fragment: str = "") -> Response:
-    if _htmx(request):
-        return Response(headers={"HX-Redirect": "/settings" + fragment})
-    return RedirectResponse("/settings" + fragment, status_code=303)
-
-
-# --- settings: secrets, test push, resume, profile (M6) ------------------------------------
-
-SECRET_STATES = {"env": "set in .env", "settings": "set here", "unset": "not set"}
-
-
-def _settings_with(
-    request: Request, session: Session, status_code: int, **extra: Any
-) -> HTMLResponse:
-    return _settings_page(
-        request, session, query=parse_query({}), status_code=status_code, extra=extra
+    stored = profile_db.get(session)
+    profile = (stored.profile or split(state.current().config)[1]).model_copy(update=update)
+    profile_db.save(
+        session,
+        profile,
+        now=state.clock(),
+        expected_revision=int(revision) if revision.isdigit() else -1,
+        onboarded=stored.onboarded,
     )
+
+
+# --- settings: notifications ----------------------------------------------------------------
 
 
 @actions.post("/settings/secrets/{name}", response_class=HTMLResponse)
 def save_secret(request: Request, name: str, value: Annotated[str, Form()] = "") -> Response:
     state = _state(request)
+    tab = SECRET_TABS.get(name, "notifications")
     with session_scope(state.sessions) as session:
         try:
             state.store.save(session, name, value, now=state.clock())
         except SecretError as exc:
             session.rollback()
-            return _settings_with(request, session, 400, secret_error=str(exc))
-    return _back_to_settings(request, "#notifications")
+            return _settings_error(request, session, tab, 400, notice=str(exc), notice_tone="error")
+    return _back_to_settings(request, tab)
 
 
 @actions.post("/settings/secrets/{name}/clear")
@@ -977,7 +925,27 @@ def clear_secret(request: Request, name: str) -> Response:
             state.store.clear(session, name)
         except SecretError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from None
-    return _back_to_settings(request, "#notifications")
+    return _back_to_settings(request, SECRET_TABS.get(name, "notifications"))
+
+
+@actions.post("/settings/channels", response_class=HTMLResponse)
+async def save_channels(request: Request) -> Response:
+    """Where pushes go: ntfy, Discord, both or neither."""
+    form = await request.form()
+    channels = [name for name in ("ntfy", "discord") if form.get(name) == "1"]
+    revision = str(form.get("revision", ""))
+    state = _state(request)
+    notify = state.current().config.notify.model_copy(update={"channels": channels})
+    with session_scope(state.sessions) as session:
+        try:
+            _save_profile_part(request, session, revision, {"notify": notify})
+        except StaleProfile as exc:
+            session.rollback()
+            return _settings_error(
+                request, session, "notifications", 409, notice=f"{exc}; try again.",
+                notice_tone="error",
+            )  # fmt: skip
+    return _back_to_settings(request, "notifications")
 
 
 @actions.post("/settings/notify/test", response_class=HTMLResponse)
@@ -993,7 +961,22 @@ async def test_push(request: Request) -> HTMLResponse:
         notice = f"Test push sent via {', '.join(names)}." if names else NO_CHANNEL
         tone = "success" if names else "error"
     with state.sessions() as session:
-        return _settings_with(request, session, status_code, notice=notice, notice_tone=tone)
+        return _settings_error(
+            request, session, "notifications", status_code, notice=notice, notice_tone=tone
+        )
+
+
+@actions.post("/settings/color-blind")
+def set_color_blind(request: Request, color_blind: Annotated[str, Form()] = "") -> Response:
+    state = _state(request)
+    with session_scope(state.sessions) as session:
+        saved_filters.set_color_blind(
+            session, color_blind.strip() in ("1", "true", "on"), now=state.clock()
+        )
+    return _back_to_settings(request, "notifications")
+
+
+# --- settings: job search (resume) ----------------------------------------------------------
 
 
 @actions.post("/settings/resume", response_class=HTMLResponse)
@@ -1010,7 +993,9 @@ async def upload_resume(request: Request, resume: Annotated[UploadFile, File()])
             raise ResumeFileError(f"no content lines found in {filename}: use bullets or sentences")
     except ResumeFileError as exc:
         with state.sessions() as session:
-            return _settings_with(request, session, 400, resume_error=str(exc))
+            return _settings_error(
+                request, session, "search", 400, notice=str(exc), notice_tone="error"
+            )
     with session_scope(state.sessions) as session:
         resume_db.put(
             session,
@@ -1020,7 +1005,7 @@ async def upload_resume(request: Request, resume: Annotated[UploadFile, File()])
             lines=lines,
             now=state.clock(),
         )
-    return _back_to_settings(request, "#resume")
+    return _back_to_settings(request, "search")
 
 
 @actions.post("/settings/resume/clear")
@@ -1031,7 +1016,175 @@ def clear_resume(request: Request) -> Response:
     with session_scope(state.sessions) as session:
         if resume_db.clear(session):
             restore_stack(session, rules=filter_rules(config), weights=scoring_weights(config))
-    return _back_to_settings(request, "#resume")
+    return _back_to_settings(request, "search")
+
+
+# --- settings: saved filters (made and edited from the dashboard's filter bar) --------------
+
+
+async def _filter_form(request: Request) -> tuple[str, int, dict[str, str], PostingQuery]:
+    """Label, color slot (-1 when unreadable) and filters from the dashboard's save form."""
+    form = await request.form()
+    values = {key: value for key, value in form.items() if isinstance(value, str)}
+    query = parse_query({key: value for key, value in values.items() if key != "view"})
+    slot_text = values.get("slot", "").strip()
+    slot = int(slot_text) if slot_text.isdigit() else -1
+    return values.get("label", ""), slot, filter_params(query), query
+
+
+def _saved_response(request: Request, query: PostingQuery) -> Response:
+    """Back to the dashboard, showing what the saved filter keeps."""
+    target = link(replace(query, status="New", sort="score", page=1))
+    if _htmx(request):
+        return Response(headers={"HX-Redirect": target})
+    return RedirectResponse(target, status_code=303)
+
+
+@actions.post("/settings/filters")
+async def create_saved_filter(request: Request) -> Response:
+    label, slot, params, query = await _filter_form(request)
+    state = _state(request)
+    with session_scope(state.sessions) as session:
+        try:
+            saved_filters.create(session, label=label, slot=slot, params=params, now=state.clock())
+        except SavedFilterError as exc:
+            session.rollback()
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+    return _saved_response(request, query)
+
+
+@actions.post("/settings/filters/{filter_id}")
+async def update_saved_filter(request: Request, filter_id: int) -> Response:
+    label, slot, params, query = await _filter_form(request)
+    state = _state(request)
+    with session_scope(state.sessions) as session:
+        if session.get(SavedFilter, filter_id) is None:
+            raise HTTPException(status_code=404, detail="no such saved filter")
+        try:
+            saved_filters.update(
+                session, filter_id, label=label, slot=slot, params=params, now=state.clock()
+            )
+        except SavedFilterError as exc:
+            session.rollback()
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+    return _saved_response(request, query)
+
+
+@actions.post("/settings/filters/{filter_id}/active")
+def switch_saved_filter(
+    request: Request, filter_id: int, active: Annotated[str, Form()] = ""
+) -> Response:
+    state = _state(request)
+    with session_scope(state.sessions) as session:
+        try:
+            saved_filters.set_active(
+                session, filter_id, active.strip() in ("1", "true", "on"), now=state.clock()
+            )
+        except LookupError:
+            raise HTTPException(status_code=404, detail="no such saved filter") from None
+    return _back_to_settings(request, "filters")
+
+
+@actions.post("/settings/filters/{filter_id}/delete")
+def delete_saved_filter(request: Request, filter_id: int) -> Response:
+    with session_scope(_state(request).sessions) as session:
+        try:
+            saved_filters.delete(session, filter_id)
+        except LookupError:
+            raise HTTPException(status_code=404, detail="no such saved filter") from None
+    return _back_to_settings(request, "filters")
+
+
+@actions.post("/saved-filters/{filter_id}/viewed")
+def saved_filter_viewed(request: Request, filter_id: int) -> Response:
+    """Sent by static/app.js when a saved filter's button is clicked: its badge starts over."""
+    state = _state(request)
+    with session_scope(state.sessions) as session:
+        try:
+            saved_filters.mark_viewed(session, filter_id, now=state.clock())
+        except LookupError:
+            raise HTTPException(status_code=404, detail="no such saved filter") from None
+    return Response(status_code=204)
+
+
+# --- settings: sources & schedule -----------------------------------------------------------
+
+SOURCE_SWITCHES = (
+    "linkedin_job_pages",
+    "simplify_feed",
+    "discovery",
+    "seed_updates",
+    "health_alerts",
+    "resume_matching",
+)
+
+
+@actions.post("/settings/sources", response_class=HTMLResponse)
+async def save_sources(request: Request) -> Response:
+    """Settings → Sources & schedule. The worker rebuilds its schedule within a minute."""
+    form = await request.form()
+    values: dict[str, Any] = {
+        name: value
+        for name, value in form.items()
+        if isinstance(value, str) and name in SourceSettings.model_fields
+    }
+    for name in SOURCE_SWITCHES:
+        values[name] = form.get(name) == "1"
+    state = _state(request)
+    with session_scope(state.sessions) as session:
+        try:
+            sources = SourceSettings.model_validate(values)
+            _save_profile_part(
+                request, session, str(form.get("revision", "")), {"sources": sources}
+            )
+        except ValidationError as exc:
+            session.rollback()
+            return _settings_error(
+                request, session, "sources", 400, errors=describe_errors(exc),
+                sources_form={**state.current().config.sources.model_dump(), **values},
+            )  # fmt: skip
+        except StaleProfile as exc:
+            session.rollback()
+            return _settings_error(
+                request, session, "sources", 409, notice=f"{exc}; try again.",
+                notice_tone="error",
+            )  # fmt: skip
+    return _back_to_settings(request, "sources")
+
+
+# --- settings: security ---------------------------------------------------------------------
+
+
+@actions.post("/settings/password", response_class=HTMLResponse)
+def save_password(
+    request: Request,
+    password: Annotated[str, Form()] = "",
+    confirm: Annotated[str, Form()] = "",
+) -> Response:
+    """Turn on (or change) the dashboard password. The browser asks for it from the next
+    page on; any user name works."""
+    state = _state(request)
+    with session_scope(state.sessions) as session:
+        try:
+            if password != confirm:
+                raise SecretError("the two passwords don't match")
+            set_password(session, password, now=state.clock())
+        except SecretError as exc:
+            session.rollback()
+            return _settings_error(
+                request, session, "security", 400, notice=str(exc), notice_tone="error"
+            )
+    return _back_to_settings(request, "security")
+
+
+@actions.post("/settings/password/clear")
+def remove_password(request: Request) -> Response:
+    with session_scope(_state(request).sessions) as session:
+        clear_password(session)
+    return _back_to_settings(request, "security")
+
+
+# --- settings: advanced (the profile as YAML) -----------------------------------------------
 
 
 @actions.post("/settings/profile", response_class=HTMLResponse)
@@ -1054,13 +1207,13 @@ def save_profile(
             )
         except ProfileError as exc:
             session.rollback()
-            return _settings_with(
-                request, session, 400, profile_text=profile, profile_errors=exc.errors
+            return _settings_error(
+                request, session, "advanced", 400, profile_text=profile, errors=exc.errors
             )
         except StaleProfile as exc:
             session.rollback()
             problem = FieldError("", f"{exc}. Copy your changes, reload, and make them again.")
-            return _settings_with(
-                request, session, 409, profile_text=profile, profile_errors=[problem]
+            return _settings_error(
+                request, session, "advanced", 409, profile_text=profile, errors=[problem]
             )
-    return _back_to_settings(request, "#profile")
+    return _back_to_settings(request, "advanced")

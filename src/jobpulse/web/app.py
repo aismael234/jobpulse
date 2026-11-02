@@ -18,12 +18,10 @@ from starlette.exceptions import HTTPException
 
 from jobpulse.config import InfraConfig
 from jobpulse.core.timeparse import utcnow
-from jobpulse.credentials import SecretStore
+from jobpulse.credentials import SecretStore, password_hash
 from jobpulse.httpclient import HttpClient
 from jobpulse.logging_setup import SecretRegistry
 from jobpulse.runtime import build_http
-from jobpulse.seed import REMOTE_TARGET
-from jobpulse.seed import SOURCE as SEED_SOURCE
 from jobpulse.sources.ats_detect import AtsDetector
 from jobpulse.web import onboarding, routes
 from jobpulse.web.security import (
@@ -79,34 +77,35 @@ def build_templates(secrets: Iterable[str] | SecretRegistry) -> Jinja2Templates:
 
 def create_app(
     *,
-    infra: InfraConfig,
     sessions: sessionmaker[Session],
-    credentials: tuple[str, str] | None = None,
+    infra: InfraConfig | None = None,
     store: SecretStore | None = None,
     http_factory: Callable[[], HttpClient] | None = None,
     clock: Callable[[], datetime] = utcnow,
     worker: Background | None = None,
 ) -> FastAPI:
-    """The dashboard. ``credentials`` (user, password) turn on basic auth; ``store`` resolves
-    the secrets Settings shows and saves, and its registry's values are masked in every
-    rendered value; ``http_factory`` builds the client the watchlist page detects boards
+    """The dashboard. ``infra`` is the base the profile's Sources & schedule settings apply
+    to (default: the fixed defaults); ``store`` resolves the secrets Settings shows and
+    saves, and its registry's values are masked in every rendered value; basic auth is on
+    while a dashboard password is saved (Settings → Security); ``http_factory`` builds the client the watchlist page detects boards
     with and test pushes go through (default: the same client the poller uses);
     ``worker`` starts with the app and stops with it (``jobpulse up``)."""
     store = store if store is not None else SecretStore()
-    store.registry.add(credentials[1:] if credentials else ())
     state = WebState(
-        infra=infra,
+        infra=infra or InfraConfig(),
         sessions=sessions,
         templates=build_templates(store.registry),
         clock=clock,
         store=store,
-        feeds=([("simplify", infra.simplify.name)] if infra.simplify.enabled else [])
-        + ([(SEED_SOURCE, REMOTE_TARGET)] if infra.seed.remote else []),
     )
+
+    def stored_password_hash() -> str | None:
+        with sessions() as session:
+            return password_hash(session)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        http = http_factory() if http_factory is not None else build_http(infra)
+        http = http_factory() if http_factory is not None else build_http(state.infra)
         state.http = http
         state.detector = AtsDetector(http)
         state._snapshot = None  # the first page sets the User-Agent from the profile
@@ -134,8 +133,7 @@ def create_app(
     # Innermost: the wizard redirect runs after auth and once the CSRF cookie is set.
     app.add_middleware(onboarding.OnboardingRedirect)
     app.add_middleware(CsrfCookieMiddleware)
-    if credentials is not None:
-        app.add_middleware(BasicAuthMiddleware, username=credentials[0], password=credentials[1])
+    app.add_middleware(BasicAuthMiddleware, password_hash=stored_password_hash)
     app.add_middleware(SecurityHeadersMiddleware)
     return app
 

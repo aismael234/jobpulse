@@ -51,7 +51,7 @@ def test_each_source_gets_its_own_cadence_from_config() -> None:
     cadences = cadences_from_config(config)
     assert cadences["watchlist"] == Cadence(1800, 120)
     assert cadences["simplify"] == Cadence(1200, 60)
-    assert cadences["job_boards"] == Cadence(4500, 900)
+    assert cadences["job_boards"] == Cadence(1800, 900)
 
 
 class FakeScheduler:
@@ -151,7 +151,7 @@ async def test_worker_jobs_follow_the_config() -> None:
     jobs = scheduled_jobs(config, run)
     assert set(jobs) == {"watchlist", "simplify", "job_boards"}
     assert jobs["job_boards"][0] == Cadence(3600, 600)
-    assert jobs["simplify"][0] == Cadence(1800, 120)
+    assert jobs["simplify"][0] == Cadence(1200, 120)
     for _, job in jobs.values():
         await job()
     assert ran == [

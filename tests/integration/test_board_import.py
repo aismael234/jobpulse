@@ -351,13 +351,9 @@ runner = CliRunner()
 
 
 def test_the_command_reports_each_board_and_a_summary(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, respx_mock: respx.MockRouter
+    tmp_path: Path, respx_mock: respx.MockRouter
 ) -> None:
-    db_url = f"sqlite:///{tmp_path / 'jobpulse.db'}"
-    monkeypatch.setenv("DATABASE_URL", db_url)
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text("", encoding="utf-8")  # no profile needed to import boards
-    base = ["--config", str(config_path), "--env-file", str(tmp_path / ".env")]
+    base = ["--data-dir", str(tmp_path)]  # no profile needed to import boards
     assert runner.invoke(app, [*base, "db", "upgrade"]).exit_code == 0
     respx_mock.get(GreenhouseAdapter.list_url("mixpanel")).respond(json=gh_board(120))
     respx_mock.post(WD_POSTMAN_API).mock(

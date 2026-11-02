@@ -22,8 +22,8 @@ DATE_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 
 class SecretRegistry:
-    """Every secret value this process knows, for redaction: ``.env``'s from the start, and
-    those saved on Settings as soon as they're read or saved. Values are only ever added, so
+    """Every secret value this process knows, for redaction: those saved on Settings, as
+    soon as they're read or saved. Values are only ever added, so
     a secret replaced on Settings stays masked; reading takes no lock."""
 
     def __init__(self, values: Iterable[str] = ()) -> None:

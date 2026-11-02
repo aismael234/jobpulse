@@ -169,7 +169,7 @@ def test_targets_that_are_no_longer_polled_are_marked(make_web: Callable[..., We
 
 
 def test_the_seed_sync_is_a_target_while_seed_remote_is_on(make_web: Callable[..., Web]) -> None:
-    web = make_web(config=make_config(seed={"remote": True}))
+    web = make_web(config=make_config(sources={"seed_updates": True}))  # Sources & schedule
     page = web.page("/health")
     assert "never run" in row(page, "seed", "remote")
     run(web, "seed", "remote", NOW - timedelta(hours=2), fetched_count=350, new_count=3)

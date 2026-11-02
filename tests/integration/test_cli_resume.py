@@ -20,7 +20,7 @@ Experience
 • Built Python services on Postgres for a payments team
 • Led a React rewrite of the billing dashboard
 """
-# Preferences as an old config.yaml had them, brought in with `profile import`.
+# The profile, restored with `profile import`.
 PROFILE = """contact_email: dev@example.com
 filters:
   description:
@@ -34,13 +34,10 @@ def base(
     tmp_path: Path, time_machine: time_machine.TimeMachineFixture, monkeypatch: pytest.MonkeyPatch
 ) -> list[str]:
     time_machine.move_to(NOW, tick=False)
-    db_url = f"sqlite:///{tmp_path / 'jobpulse.db'}"
-    monkeypatch.setenv("DATABASE_URL", db_url)
-    config = tmp_path / "config.yaml"
-    config.write_text("", encoding="utf-8")
+    monkeypatch.setenv("TEST_DATABASE_URL", f"sqlite:///{tmp_path / 'jobpulse.db'}")
     profile = tmp_path / "profile.yaml"
     profile.write_text(PROFILE, encoding="utf-8")
-    args = ["--config", str(config), "--env-file", str(tmp_path / ".env")]
+    args = ["--data-dir", str(tmp_path)]
     upgraded = runner.invoke(cli.app, [*args, "db", "upgrade"])
     assert upgraded.exit_code == 0, upgraded.output
     imported = runner.invoke(cli.app, [*args, "profile", "import", str(profile)])
@@ -51,7 +48,7 @@ def base(
 def sessions() -> Any:
     import os
 
-    return make_session_factory(create_engine_for(os.environ["DATABASE_URL"]))
+    return make_session_factory(create_engine_for(os.environ["TEST_DATABASE_URL"]))
 
 
 @pytest.fixture

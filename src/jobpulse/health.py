@@ -1,7 +1,7 @@
 """Source health: alert once when a target keeps failing or a busy target goes quiet, and send
 one recovery message when it's back.
 
-Rules (``health`` in config.yaml), per (source, target):
+Rules (``InfraConfig.health``; on/off on Settings), per (source, target):
 - ``consecutive_failures`` failed runs in a row (3) open a "failing" incident. JobSpy board
   errors are failed runs too, and a 304 counts as a success.
 - A busy target, whose successful runs in the last ``busy_window_days`` have a median

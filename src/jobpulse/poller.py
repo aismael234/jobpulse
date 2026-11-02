@@ -93,10 +93,7 @@ from jobpulse.sources.maintenance import Sleep
 log = logging.getLogger(__name__)
 
 Inserted = tuple[int, Posting, str]  # (row id, posting, fingerprint)
-NOT_ONBOARDED = (
-    "no profile yet: answer the setup questions on the dashboard (/setup), run `jobpulse "
-    "profile import`, or save one on Settings"
-)
+NOT_ONBOARDED = "no profile yet: answer the setup questions on the dashboard (/setup)"
 LLM_CAP_WINDOW = timedelta(hours=24)  # llm.max_calls_per_day counts calls in this window
 PUSH_CAP_WINDOW = timedelta(hours=24)  # notify.saved_filters.max_per_day counts this window
 
@@ -827,7 +824,7 @@ class Poller:
             report.llm_would_ask = len(fresh)
             return decided
         if not llm.can_ask:
-            report.llm_stopped = llm.stopped or "no LLM client (LLM_API_KEY)"
+            report.llm_stopped = llm.stopped or "no LLM client (no Anthropic API key on Settings)"
             return decided
         to_ask = fresh[: max(0, llm.max_calls_per_day - used)]
         report.llm_over_limit = len(fresh) - len(to_ask)

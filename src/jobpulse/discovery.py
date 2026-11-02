@@ -9,7 +9,7 @@ fetches and validations are capped per cycle, best candidates first (boards with
 matching posting, then the most referenced), and misses are remembered for a while so they
 aren't retried every cycle.
 
-Narrowing (``discovery`` in config.yaml): with ``require_match`` a board is considered only
+Narrowing (``InfraConfig.discovery``; on/off and the cap on Settings): with ``require_match`` a board is considered only
 when one of its postings passes your title and location filters; boards with more than
 ``max_board_jobs`` open jobs are skipped; and no more than ``max_auto_companies``
 discovered companies are polled at once. Blocked companies and boards are never added.

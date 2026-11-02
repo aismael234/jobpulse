@@ -78,7 +78,8 @@ def test_contract_work_shown_hidden_or_alone(web: Web) -> None:
 def test_every_filter_is_visible_without_a_fold(web: Web) -> None:
     web.add()
     page = web.page("/")
-    assert "<details" not in page
+    filter_bar = page[page.index('<form class="filters"') : page.index("</form>")]
+    assert "<details" not in filter_bar
     assert "More filters" not in page
     for name in (
         "q",

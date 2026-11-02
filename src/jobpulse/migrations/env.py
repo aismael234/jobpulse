@@ -1,4 +1,5 @@
-"""Alembic environment. The database URL is resolved exactly as the app resolves it."""
+"""Alembic environment. jobpulse passes the database URL in code (``db.migrate``); the
+``alembic`` command (autogenerate) uses ./data/jobpulse.db, as the app does by default."""
 
 import logging
 from logging.config import fileConfig
@@ -7,13 +8,8 @@ from typing import Any, Literal
 from alembic import context
 from alembic.autogenerate.api import AutogenContext
 
-from jobpulse.config import (
-    DEFAULT_ENV_FILE,
-    load_settings,
-    read_config_lenient,
-    resolve_config_path,
-)
-from jobpulse.db.session import create_engine_for, resolve_database_url
+from jobpulse.db.session import DEFAULT_DATA_DIR, create_engine_for
+from jobpulse.db.session import database_url as default_database_url
 from jobpulse.db.tables import Base
 from jobpulse.db.types import UTCDateTime
 
@@ -29,10 +25,7 @@ def database_url() -> str:
     explicit = config.attributes.get("database_url") or config.get_main_option("sqlalchemy.url")
     if explicit:
         return str(explicit)
-    settings = load_settings(DEFAULT_ENV_FILE)
-    # Lenient: an old config.yaml with preferences still upgrades (M6 moved them to the DB).
-    infra = read_config_lenient(resolve_config_path(None, settings))
-    return resolve_database_url(settings, infra)
+    return default_database_url(DEFAULT_DATA_DIR)
 
 
 def render_item(type_: str, obj: Any, autogen_context: AutogenContext) -> str | Literal[False]:

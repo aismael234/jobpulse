@@ -6,9 +6,8 @@ from datetime import timedelta
 
 import pytest
 import respx
-from pydantic import SecretStr
 
-from jobpulse.config import NotifyConfig, Settings
+from jobpulse.config import NotifyConfig
 from jobpulse.credentials import SecretStore
 from jobpulse.notify.base import NotifierError
 from jobpulse.notify.live import NO_CHANNEL, TEST_MESSAGE, LiveNotifier, channel_notifiers
@@ -22,8 +21,12 @@ OLD = NOW - timedelta(days=3)
 FRESH = NOW - timedelta(minutes=25)
 
 
-def live(env: Env, settings: Settings | None = None) -> SecretStore:
-    store = SecretStore(settings or Settings(_env_file=None))
+def live(env: Env, *, topic: str | None = None) -> SecretStore:
+    store = SecretStore()
+    if topic is not None:
+        with env.sessions() as session:
+            store.save(session, "ntfy_topic", topic, now=NOW)
+            session.commit()
     env.notifier = LiveNotifier(env.http, env.sessions, store)
     return store
 
@@ -52,7 +55,7 @@ async def test_with_no_channel_a_match_waits_and_goes_out_once_one_is_saved(
 
 
 async def test_the_profile_names_the_channels(env: Env) -> None:
-    store = live(env, Settings(_env_file=None, ntfy_topic=SecretStr(TOPIC)))
+    store = live(env, topic=TOPIC)
     assert isinstance(env.notifier, LiveNotifier)
     env.reconfigure(notify=NotifyConfig(channels=[]))
     assert env.notifier.channels() == []
@@ -67,7 +70,7 @@ async def test_the_profile_names_the_channels(env: Env) -> None:
 
 
 def test_channels_need_their_secret(env: Env) -> None:
-    store = SecretStore(Settings(_env_file=None))
+    store = SecretStore()
     with env.sessions() as session:
         secrets = store.resolve(session)
     notify = NotifyConfig(channels=["ntfy", "discord"])

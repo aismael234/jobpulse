@@ -65,13 +65,11 @@ def test_literals_match_case_insensitively(tmp_path: Path) -> None:
     assert found == [export_public.Finding(Path("notes.md"), 1, "private pattern 1")]
 
 
-def test_literals_come_from_the_patterns_file_and_env_secrets(tmp_path: Path) -> None:
+def test_literals_come_from_the_patterns_file(tmp_path: Path) -> None:
     patterns = tmp_path / "patterns"
-    patterns.write_text("# a comment\n\nJane Q. Private\n", encoding="utf-8")
-    env = tmp_path / ".env"
-    env.write_text(f"NTFY_TOPIC={TOPIC}\nLOG_LEVEL=DEBUG\nDASHBOARD_PASSWORD=\n", encoding="utf-8")
-    assert export_public.literals(patterns, env) == ("Jane Q. Private", TOPIC)
-    assert export_public.literals(tmp_path / "missing", tmp_path / "missing.env") == ()
+    patterns.write_text(f"# a comment\n\nJane Q. Private\n{TOPIC}\n", encoding="utf-8")
+    assert export_public.literals(patterns) == ("Jane Q. Private", TOPIC)
+    assert export_public.literals(tmp_path / "missing") == ()
 
 
 def test_export_copies_the_commit_without_export_ignored_files(tmp_path: Path) -> None:

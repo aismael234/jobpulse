@@ -1,8 +1,0 @@
-# Infrastructure for the recorded scenarios; the preferences and the watchlist are in
-# import.yaml, brought into the database with `jobpulse profile import` (see there).
-discovery:
-  max_validations_per_cycle: 1   # the recorded routes answer for Delta's board only
-  max_page_fetches_per_cycle: 0
-linkedin:
-  delay_min_seconds: 0           # recorded responses: nothing to be polite to
-  delay_max_seconds: 0

@@ -5,16 +5,18 @@ import logging
 import signal
 from collections.abc import Awaitable, Callable, Collection
 from datetime import timedelta
+from pathlib import Path
 
 import httpx
 from sqlalchemy import inspect
 from sqlalchemy.orm import Session, sessionmaker
 
-from jobpulse.config import AppConfig, InfraConfig, location_aliases
+from jobpulse.config import AppConfig, InfraConfig, infra_for, location_aliases
 from jobpulse.core.locations import merge_aliases
 from jobpulse.core.timeparse import utcnow
 from jobpulse.credentials import SecretStore
 from jobpulse.db import lease, migrate
+from jobpulse.db import profile as profile_db
 from jobpulse.db.session import (
     create_engine_for,
     display_url,
@@ -55,6 +57,7 @@ FEED_SOURCES: tuple[str, ...] = ("simplify",)
 BOARD_SOURCES: tuple[str, ...] = ("indeed", "linkedin")
 KNOWN_SOURCES: tuple[str, ...] = WATCHLIST_SOURCES + FEED_SOURCES + BOARD_SOURCES
 IDLE_RECHECK_SECONDS = 60.0  # until a profile is onboarded, each job checks again this soon
+SETTINGS_CHECK_SECONDS = 30.0  # how soon a Sources & schedule change reaches the worker
 
 
 class DatabaseNotReady(Exception):
@@ -85,6 +88,19 @@ def open_database(url: str) -> sessionmaker[Session]:
             "run `jobpulse db upgrade` first"
         )
     return make_session_factory(engine)
+
+
+def stored_infra(
+    sessions: sessionmaker[Session],
+    *,
+    data_dir: Path | None = None,
+    base: InfraConfig | None = None,
+) -> InfraConfig:
+    """How the worker runs for the stored profile (its Sources & schedule settings); the
+    defaults before onboarding."""
+    with sessions() as session:
+        profile = profile_db.get(session).profile
+    return infra_for(profile, data_dir=data_dir, base=base)
 
 
 def build_http(
@@ -407,66 +423,123 @@ def _llm_lines(report: CycleReport) -> list[str]:
 
 async def run_worker(
     *,
-    infra: InfraConfig,
     store: SecretStore,
     database_url: str,
+    data_dir: Path | None = None,
+    base: InfraConfig | None = None,
     stop: asyncio.Event | None = None,
     holder: lease.Holder | None = None,
+    settings_check_seconds: float = SETTINGS_CHECK_SECONDS,
 ) -> None:
     """Poll each source on its own jittered schedule until ``stop`` is set (by default, until
     SIGINT or SIGTERM). Raises ``LeaseHeld`` when another worker polls this database, and
     ``WorkerStalled`` when a source stops finishing runs. Cycles wait (and say so) until a
     profile is onboarded, checking again every minute; secrets are read at send time, so
-    none is needed to start."""
+    none is needed to start. When Settings → Sources & schedule changes how it should run,
+    the schedule is rebuilt within ``settings_check_seconds``; a cycle in flight is cut short
+    and runs again on the new schedule."""
     sessions = open_database(database_url)
     me = holder or lease.Holder.here()
     with session_scope(sessions) as session:
         lease.acquire(session, me, now=utcnow())
     llm = LlmSource(store)
+    if stop is None:
+        stop = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(signum, stop.set)
+    stopped = asyncio.create_task(stop.wait())
+    renewing = asyncio.create_task(_keep_lease(sessions, me))
     try:
-        async with build_http(infra) as http:
-            poller = build_poller(http, infra, sessions, store, llm=llm)
-
-            async def run(job: str, sources: tuple[str, ...]) -> float | None:
-                return await run_scheduled_cycle(poller, job, sources)
-
-            jobs = scheduled_jobs(infra, run)
-            worker = Worker(jobs)
-            if stop is None:
-                stop = asyncio.Event()
-                loop = asyncio.get_running_loop()
-                for signum in (signal.SIGINT, signal.SIGTERM):
-                    loop.add_signal_handler(signum, stop.set)
-            worker.start()
-            log.info(
-                "worker started: %s",
-                "; ".join(_describe(name, s) for name, (s, _) in jobs.items()),
+        while True:
+            infra = stored_infra(sessions, data_dir=data_dir, base=base)
+            changed = await _run_schedule(
+                infra,
+                sessions,
+                store,
+                llm,
+                stopped=stopped,
+                renewing=renewing,
+                settings_changed=_settings_changed(
+                    sessions, infra, data_dir=data_dir, base=base, every=settings_check_seconds
+                ),
             )
-            watchdog = asyncio.create_task(worker.watch())
-            stopped = asyncio.create_task(stop.wait())
-            renewing = asyncio.create_task(_keep_lease(sessions, me))
-            try:
-                await asyncio.wait(
-                    {watchdog, stopped, renewing}, return_when=asyncio.FIRST_COMPLETED
-                )
-            finally:
-                worker.shutdown()
-                for task in (watchdog, stopped, renewing):
-                    task.cancel()
-                log.info("worker stopped")
-            if renewing.done() and not renewing.cancelled():
-                renewing.result()  # raises LeaseLost
-            if watchdog.done() and not watchdog.cancelled():
-                limit = worker.watchdog_limit or 0
-                raise WorkerStalled(
-                    f"no run of {', '.join(watchdog.result())} finished in {_interval(limit)} "
-                    f"({WATCHDOG_FACTOR:.0f}x the longest interval); exiting so the worker is "
-                    "restarted"
-                )
+            if not changed:
+                break
+            log.info("Sources & schedule changed on Settings: rebuilding the schedule")
+        if renewing.done() and not renewing.cancelled():
+            renewing.result()  # raises LeaseLost
     finally:
+        for task in (stopped, renewing):
+            task.cancel()
         await llm.aclose()
         with session_scope(sessions) as session:
             lease.release(session, me)
+
+
+async def _run_schedule(
+    infra: InfraConfig,
+    sessions: sessionmaker[Session],
+    store: SecretStore,
+    llm: LlmSource,
+    *,
+    stopped: "asyncio.Task[object]",
+    renewing: "asyncio.Task[None]",
+    settings_changed: Awaitable[None],
+) -> bool:
+    """Run the scheduled jobs for ``infra`` until stopped, the lease is lost, a source
+    stalls (``WorkerStalled``) or the settings change; True for the last."""
+    changed = asyncio.ensure_future(settings_changed)
+    async with build_http(infra) as http:
+        poller = build_poller(http, infra, sessions, store, llm=llm)
+
+        async def run(job: str, sources: tuple[str, ...]) -> float | None:
+            return await run_scheduled_cycle(poller, job, sources)
+
+        jobs = scheduled_jobs(infra, run)
+        worker = Worker(jobs)
+        worker.start()
+        log.info(
+            "worker started: %s", "; ".join(_describe(name, s) for name, (s, _) in jobs.items())
+        )
+        watchdog = asyncio.create_task(worker.watch())
+        try:
+            await asyncio.wait(
+                {watchdog, stopped, renewing, changed}, return_when=asyncio.FIRST_COMPLETED
+            )
+        finally:
+            worker.shutdown()
+            for task in (watchdog, changed):
+                task.cancel()
+            log.info("worker stopped")
+    if watchdog.done() and not watchdog.cancelled():
+        limit = worker.watchdog_limit or 0
+        raise WorkerStalled(
+            f"no run of {', '.join(watchdog.result())} finished in {_interval(limit)} "
+            f"({WATCHDOG_FACTOR:.0f}x the longest interval); exiting so the worker is restarted"
+        )
+    return changed.done() and not changed.cancelled() and not stopped.done()
+
+
+async def _settings_changed(
+    sessions: sessionmaker[Session],
+    running: InfraConfig,
+    *,
+    data_dir: Path | None,
+    base: InfraConfig | None,
+    every: float,
+    sleep: Sleep = asyncio.sleep,
+) -> None:
+    """Return once the stored profile asks for a different ``InfraConfig`` than ``running``."""
+    while True:
+        await sleep(every)
+        try:
+            wanted = stored_infra(sessions, data_dir=data_dir, base=base)
+        except Exception as exc:  # a locked or briefly unreadable database: look again later
+            log.warning("couldn't read the settings: %s", exc)
+            continue
+        if wanted != running:
+            return
 
 
 async def run_scheduled_cycle(poller: Poller, job: str, sources: tuple[str, ...]) -> float | None:
@@ -526,10 +599,8 @@ def _describe(name: str, schedule: Cadence) -> str:
     return f"{name} every {_interval(schedule.interval_seconds)} ± {schedule.jitter_seconds:.0f} s"
 
 
-async def send_test_notification(
-    *, infra: InfraConfig, store: SecretStore, database_url: str
-) -> list[str]:
+async def send_test_notification(*, store: SecretStore, database_url: str) -> list[str]:
     """One test push through every channel that's set up; their names (none: nothing sent)."""
     sessions = open_database(database_url)
-    async with build_http(infra) as http:
+    async with build_http(stored_infra(sessions)) as http:
         return await send_test(LiveNotifier(http, sessions, store))
