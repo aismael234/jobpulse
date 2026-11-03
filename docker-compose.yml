@@ -10,6 +10,7 @@
 
 services:
   jobpulse:
+    container_name: jobpulse
     image: ghcr.io/aismael234/jobpulse:latest
     build: .
     command: ["jobpulse", "--data-dir", "/app/data", "up", "--host", "0.0.0.0"]
