@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -5,6 +6,15 @@ from typer.testing import CliRunner
 from jobpulse.cli import app
 
 runner = CliRunner()
+ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def help_text(*args: str) -> str:
+    """The help as plain text: Rich colors it where it detects CI (GITHUB_ACTIONS), and the
+    escape codes split option names such as --data-dir."""
+    result = runner.invoke(app, [*args, "--help"])
+    assert result.exit_code == 0, result.output
+    return ANSI.sub("", result.output)
 
 
 def write(path: Path, text: str) -> Path:
@@ -13,17 +23,15 @@ def write(path: Path, text: str) -> Path:
 
 
 def test_help_lists_every_command() -> None:
-    result = runner.invoke(app, ["--help"])
-    assert result.exit_code == 0, result.output
+    output = help_text()
     for name in ("up", "poll", "companies", "db", "profile", "resume", "password", "--data-dir"):
-        assert name in result.output
-    assert "digest" not in result.output  # every match is pushed; there's no digest
+        assert name in output
+    assert "digest" not in output  # every match is pushed; there's no digest
     for gone in ("worker", "web ", "config", "--env-file"):
-        assert gone not in result.output
+        assert gone not in output
 
 
 def test_up_takes_a_host_and_port() -> None:
-    result = runner.invoke(app, ["up", "--help"])
-    assert result.exit_code == 0, result.output
-    assert "--host" in result.output
-    assert "--port" in result.output
+    output = help_text("up")
+    assert "--host" in output
+    assert "--port" in output
