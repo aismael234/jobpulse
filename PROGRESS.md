@@ -221,7 +221,8 @@ The full plan, with decisions, code facts and a data snapshot, is in `/Users/ala
   - [x] container test in OrbStack (your OK): fresh volume → wizard → seed (362 boards) → one watchlist cycle; restart; 0005 → 0011 with a backup; compose healthy;
   - [x] committed as `5311b8d` (your OK, 2026-11-02);
   - [x] publish, part 1 (each with your OK, 2026-11-02/03): gh installed and signed in; `aismael234/jobpulse` created public and pushed (export of 951f3eb, then the CI test fix 4ba2b21); CI green;
-  - [ ] publish, part 2: tag `v1.0.0` (the release builds the GHCR image), make the package public, then daily seed updates on by default.
+  - [x] publish, part 2: `v1.0.0` tagged (2026-11-03); `ghcr.io/aismael234/jobpulse` built for amd64 and arm64, public (it took the repository's visibility), anonymous pull checked;
+  - [ ] daily seed updates on by default (the raw boards.json answers now), and on in your install.
 
 - [ ] **M10 — Settings only: no config.yaml, no .env** (your request, 2026-11-02, after M9's commit). Your answers: about 10 plain-language settings, the rest fixed, your values as the new defaults; SQLite only; one process (`up`), `worker`/`web` removed; Settings in tabs, the saved-filter editor on the dashboard.
   - [x] `Profile.sources` (Settings → Sources & schedule) and `config.infra_for`; `InfraConfig` is internal (no `database_url`, no `dashboard`), defaults = your old config.yaml (20/20/30 min, LinkedIn 15–30 s, 1,500 discovered companies, 20 validations a cycle);
