@@ -1,0 +1,73 @@
+# Lint, types and tests on every push and pull request; the release workflow runs it first too.
+# Actions are pinned to commit SHAs (the tag is in the comment).
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.13.5"
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync --locked
+      - run: scripts/check.sh
+
+  # A pull request that adds boards to the seed: each must answer on its ATS and not be an agency.
+  seed:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: changed
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          if git diff --quiet "origin/$BASE_REF...HEAD" -- src/jobpulse/data/seed/boards.json; then
+            echo "seed=false" >> "$GITHUB_OUTPUT"
+          else
+            git show "origin/$BASE_REF:src/jobpulse/data/seed/boards.json" > "$RUNNER_TEMP/base.json" || true
+            echo "seed=true" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.changed.outputs.seed == 'true'
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.13.5"
+          python-version: "3.12"
+          enable-cache: true
+      - if: steps.changed.outputs.seed == 'true'
+        run: uv run --locked --no-dev python -m jobpulse.devtools.seed_check --base "$RUNNER_TEMP/base.json"
+
+  # The image still builds (amd64 only here; the release builds both architectures).
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

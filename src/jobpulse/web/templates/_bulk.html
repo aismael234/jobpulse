@@ -1,0 +1,14 @@
+<div class="notice success bulk-done">
+  <p>{{ status }} {{ moved }} posting{{ "" if moved == 1 else "s" }}.</p>
+  {% if moved %}
+  <form class="undo bulk" method="post" action="/postings/bulk-status" hx-post="/postings/bulk-status">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="ids" value="{{ ids }}">
+    <input type="hidden" name="status" value="{{ previous }}">
+    <input type="hidden" name="return_to" value="{{ return_to }}">
+    <button type="submit">Undo</button>
+  </form>
+  {% endif %}
+</div>
+<div class="summary" id="summary" hx-swap-oob="true"></div>
+{% include "_counts.html" %}

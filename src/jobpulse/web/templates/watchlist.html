@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block title %}Watchlist · jobpulse{% endblock %}
+{% block content %}
+<h1>Watchlist</h1>
+
+<section class="paste">
+  <h2>Add a board</h2>
+  <form class="detect" method="post" action="/watchlist/detect" hx-post="/watchlist/detect" hx-target="#detect-result" hx-swap="innerHTML">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="url" name="url" required placeholder="https://jobs.lever.co/… or any careers page" aria-label="Careers page or job board URL">
+    <button type="submit">Detect</button>
+  </form>
+  <p class="hint">Greenhouse, Lever, Ashby and Workday boards are recognized from the URL. For any other page, jobpulse reads it once to find a board, then checks the board with one API call before you add it.</p>
+  <div id="detect-result">
+    {% if detection %}{% include "_detect.html" %}{% endif %}
+    {% if added %}<p class="notice success">Added {{ added }}. Its first poll stores the jobs it has now without notifying you.</p>{% endif %}
+  </div>
+</section>
+
+<div class="table-wrap">
+<table class="companies">
+  <thead>
+    <tr><th>Company</th><th>Board</th><th>Priority</th><th>Status</th><th>Added by</th><th>Baseline</th><th>Open</th></tr>
+  </thead>
+  <tbody id="companies">
+    {% for entry in companies %}
+    {% with company = entry.company, blocked = entry.blocked %}{% include "_company.html" %}{% endwith %}
+    {% else %}
+    <tr><td colspan="7" class="empty">No companies yet. Paste a URL above, or let discovery find boards.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+
+<section class="blocked">
+  <h2>Blocked companies</h2>
+  <p class="hint">Their postings are never pushed and are hidden everywhere but Applied; their boards aren't polled or discovered.</p>
+  {% if config_blocked or dashboard_blocked %}
+  <ul>
+    {% for name in config_blocked %}
+    <li>{{ name }} <span class="muted small">in your profile (Settings)</span></li>
+    {% endfor %}
+    {% for blocked in dashboard_blocked %}
+    <li>{{ blocked.name }} <span class="muted small">blocked {{ blocked.created_at|ago }}</span>
+      <form class="inline" method="post" action="/companies/unblock">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="company" value="{{ blocked.name }}">
+        <input type="hidden" name="return_to" value="/watchlist">
+        <button type="submit">Unblock</button>
+      </form>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="empty">None. Block a company from any posting's card.</p>
+  {% endif %}
+</section>
+
+{% if marked_agencies is defined %}
+<section class="blocked">
+  <h2>Staffing agencies you marked</h2>
+  <p class="hint">{% if hide_agencies %}Hidden like the built-in agency list while “Hide staffing agencies” is on (Settings).{% else %}Not hidden right now: “Hide staffing agencies” is off (hide_agencies on Settings).{% endif %}</p>
+  {% if marked_agencies %}
+  <ul>
+    {% for marked in marked_agencies %}
+    <li>{{ marked.name }} <span class="muted small">marked {{ marked.created_at|ago }}</span>
+      <form class="inline" method="post" action="/companies/unblock">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="company" value="{{ marked.name }}">
+        <input type="hidden" name="return_to" value="/watchlist">
+        <button type="submit">Not an agency</button>
+      </form>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="empty">None. When you block a company from its card, you're asked whether it's an agency.</p>
+  {% endif %}
+</section>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,113 @@
+[project]
+name = "jobpulse"
+version = "1.0.0"
+description = "Self-hosted job-posting watcher: polls company job boards and feeds, scores fresh postings against your roles and resume, and pushes them to your phone."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
+authors = [{ name = "aismael234" }]
+keywords = ["jobs", "job-search", "greenhouse", "lever", "ashby", "workday", "ntfy", "self-hosted"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Web Environment",
+    "Framework :: FastAPI",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Office/Business",
+]
+dependencies = [
+    "alembic>=1.14",
+    "anthropic>=1.15,<2",
+    "apscheduler>=3.11,<4",
+    "fastapi==0.150.0",
+    "fastembed>=0.9.0",
+    "httpx>=0.28,<1",
+    "jinja2>=3.1",
+    "pandas>=2.2,<3.1",
+    "pydantic>=2.10,<3",
+    "pydantic-settings>=2.6",
+    "pypdf>=6.21.1",
+    "python-jobspy==1.4.0",
+    "python-multipart>=0.0.20",
+    "pyyaml>=6.0",
+    "sqlalchemy>=2.1",
+    "typer>=0.15",
+    "tzdata>=2024.1",
+    "uvicorn>=0.30",
+]
+
+[project.urls]
+Homepage = "https://github.com/aismael234/jobpulse"
+Issues = "https://github.com/aismael234/jobpulse/issues"
+
+[project.scripts]
+jobpulse = "jobpulse.cli:app"
+
+[build-system]
+requires = ["uv_build>=0.13,<0.14"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "mypy==2.4.0",
+    "pytest==9.1.1",
+    "pytest-asyncio==1.4.0",
+    "pytest-socket==0.8.1",
+    "respx==0.23.1",
+    "ruff==0.17.1",
+    "time-machine==3.5.1",
+    "types-pyyaml==6.0.12.20260906",
+]
+
+[tool.uv]
+# Resolve as of this date so the lock never picks up a release that is only hours old.
+# To take newer releases, move it forward (keep it a few days back) and run `uv lock --upgrade`.
+exclude-newer = "2026-10-20T00:00:00Z"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "DTZ", "ASYNC", "PT"]
+ignore = ["E501"]
+allowed-confusables = ["·", "–", "—", "’"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["jobpulse"]
+
+[tool.mypy]
+python_version = "3.12"
+plugins = ["pydantic.mypy"]
+mypy_path = "src"
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+check_untyped_defs = true
+
+# `strict` is global-only in mypy, so the strict flag set is spelled out for core.
+[[tool.mypy.overrides]]
+module = ["jobpulse.core", "jobpulse.core.*"]
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+disallow_untyped_calls = true
+disallow_untyped_decorators = true
+disallow_any_generics = true
+disallow_subclassing_any = true
+warn_return_any = true
+no_implicit_reexport = true
+strict_equality = true
+extra_checks = true
+
+[[tool.mypy.overrides]]
+module = ["apscheduler.*", "pandas"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = ["-ra", "--strict-markers", "--strict-config", "--disable-socket", "--allow-unix-socket"]
+markers = ["live: hits the real network; skipped unless JOBPULSE_LIVE=1"]

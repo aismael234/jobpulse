@@ -1,0 +1,36 @@
+# jobpulse with Docker Compose: one container runs the dashboard and the scheduler.
+#
+#   docker compose up -d
+#   docker compose logs -f jobpulse
+#
+# Then open http://127.0.0.1:8000/ and follow the setup wizard; everything else is on the
+# dashboard's Settings page. The database (with your profile, resume and saved secrets) lives
+# in the jobpulse-data volume. The dashboard is published on 127.0.0.1 only; reach it
+# remotely through a VPN such as Tailscale, or set a password on Settings → Security first.
+
+services:
+  jobpulse:
+    image: ghcr.io/aismael234/jobpulse:latest
+    build: .
+    command: ["jobpulse", "--data-dir", "/app/data", "up", "--host", "0.0.0.0"]
+    # The watchdog exits non-zero when a source stops finishing runs; this starts it again.
+    restart: unless-stopped
+    # The scheduler may be inside a LinkedIn request: give it time to finish and release its lease.
+    stop_grace_period: 60s
+    volumes:
+      - jobpulse-data:/app/data
+    ports:
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  jobpulse-data:

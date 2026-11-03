@@ -1,0 +1,49 @@
+[
+  {
+    "additionalPlain": "Delta is an equal opportunity employer.",
+    "additional": "<div>Delta is an equal opportunity employer.</div>",
+    "categories": {
+      "commitment": "Full-time",
+      "department": "Engineering",
+      "location": "San Francisco, CA",
+      "team": "Core Services",
+      "allLocations": ["San Francisco, CA", "New York, NY"]
+    },
+    "createdAt": 1792713600000,
+    "descriptionPlain": "Delta runs payroll for small clinics.\n\nThe Role\nYou will build the services behind our scheduling API.",
+    "description": "<div>Delta runs payroll for small clinics.</div><div><b>The Role</b></div><div>You will build the services behind our scheduling API.</div>",
+    "id": "98959f08-1d1b-4b75-919e-833f825394b0",
+    "lists": [
+      {
+        "text": "What you bring",
+        "content": "<li>A degree in computer science or equivalent experience</li><li>Some Python or Go</li>"
+      }
+    ],
+    "text": "Software Engineer, Backend (New Grad)",
+    "country": "US",
+    "workplaceType": "onsite",
+    "hostedUrl": "https://jobs.lever.co/delta/98959f08-1d1b-4b75-919e-833f825394b0",
+    "applyUrl": "https://jobs.lever.co/delta/98959f08-1d1b-4b75-919e-833f825394b0/apply"
+  },
+  {
+    "additionalPlain": "Delta is an equal opportunity employer.",
+    "additional": "<div>Delta is an equal opportunity employer.</div>",
+    "categories": {
+      "commitment": "Full-time",
+      "department": "Sales",
+      "location": "New York, NY",
+      "team": "Sales",
+      "allLocations": ["New York, NY"]
+    },
+    "createdAt": 1790960400000,
+    "descriptionPlain": "Delta runs payroll for small clinics.\n\nThe Role\nYou will grow our clinic accounts.",
+    "description": "<div>Delta runs payroll for small clinics.</div>",
+    "id": "2c4e6a8b-0d1f-4a3c-9e5b-7d9f1b3d5f7a",
+    "lists": [],
+    "text": "Account Executive",
+    "country": "US",
+    "workplaceType": "hybrid",
+    "hostedUrl": "https://jobs.lever.co/delta/2c4e6a8b-0d1f-4a3c-9e5b-7d9f1b3d5f7a",
+    "applyUrl": "https://jobs.lever.co/delta/2c4e6a8b-0d1f-4a3c-9e5b-7d9f1b3d5f7a/apply"
+  }
+]

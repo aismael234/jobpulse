@@ -1,0 +1,223 @@
+{% extends "base.html" %}
+{% block title %}Settings · jobpulse{% endblock %}
+{% block content %}
+<h1>Settings</h1>
+<nav class="tabs" aria-label="Settings">
+  {% for name, label in tabs %}
+  <a href="/settings/{{ name }}"{% if tab == name %} aria-current="page"{% endif %}>{{ label }}</a>
+  {% endfor %}
+</nav>
+{% if notice %}<p class="notice {{ notice_tone }}" role="status">{{ notice }}</p>{% endif %}
+{% if errors %}
+<div class="notice error">
+  <p>Nothing was saved:</p>
+  <ul>{% for error in errors %}<li>{% if error.field %}<code>{{ error.field }}</code>: {% endif %}{{ error.message }}</li>{% endfor %}</ul>
+</div>
+{% endif %}
+
+{% macro secret_list(rows) %}
+<ul class="saved-list secret-list">
+  {% for secret in rows %}
+  <li>
+    <span class="name">{{ secret.label }}</span>
+    <span class="badge{% if secret.source == "unset" %} warn{% endif %}">{{ secret.state }}</span>
+    <span class="controls">
+      <form method="post" action="/settings/secrets/{{ secret.name }}" class="inline">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="password" name="value" autocomplete="off" required aria-label="New {{ secret.label }}" placeholder="{{ "Replace" if secret.source == "settings" else "Set" }} it">
+        <button type="submit">Save</button>
+      </form>
+      {% if secret.source == "settings" %}
+      <form method="post" action="/settings/secrets/{{ secret.name }}/clear">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit" class="link status-dismissed">Clear</button>
+      </form>
+      {% endif %}
+    </span>
+  </li>
+  {% endfor %}
+</ul>
+{% endmacro %}
+
+{% if tab == "notifications" %}
+<section class="settings-block">
+  <h2>Where pushes go</h2>
+  <form method="post" action="/settings/channels" class="stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="revision" value="{{ profile_revision }}">
+    <label class="check"><input type="checkbox" name="ntfy" value="1"{% if "ntfy" in channels %} checked{% endif %}> ntfy: the ntfy app on your phone, or a browser</label>
+    <label class="check"><input type="checkbox" name="discord" value="1"{% if "discord" in channels %} checked{% endif %}> Discord: a channel's webhook</label>
+    <div><button type="submit">Save</button></div>
+  </form>
+  {% if not channels %}<p class="hint">Nothing is pushed; matches still land on the dashboard.</p>{% endif %}
+</section>
+<section class="settings-block">
+  <h2>Topic and webhook</h2>
+  {{ secret_list(notify_secrets) }}
+  <form method="post" action="/settings/notify/test" class="inline test-push">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button type="submit">Send a test push</button>
+  </form>
+  <p class="hint">Values are stored in the database and never shown again or logged. The access token is only for a self-hosted ntfy server.</p>
+</section>
+<section class="settings-block">
+  <h2>Display</h2>
+  <form method="post" action="/settings/color-blind" class="inline">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label class="check"><input type="checkbox" name="color_blind" value="1"{% if color_blind %} checked{% endif %}> Color-blind mode: stronger colors, and a shape for each saved filter</label>
+    <button type="submit">Save</button>
+  </form>
+</section>
+
+{% elif tab == "search" %}
+<section class="settings-block" id="setup">
+  <h2>What you're looking for</h2>
+  {% if setup_answers %}
+  <p>Roles, skills, level, locations, pay and companies come from your setup answers. <a href="/setup">Change your answers</a></p>
+  {% if setup_answers.custom %}
+  <p class="hint">Edited by hand under Advanced, so kept as they are when your answers change: {% for path in setup_answers.custom %}<code>{{ path }}</code>{% if not loop.last %}, {% endif %}{% endfor %}.</p>
+  {% endif %}
+  {% elif setup_onboarded %}
+  <p class="hint">Your profile was imported or written by hand, so it's edited under Advanced.</p>
+  {% else %}
+  <p>No profile yet. <a href="/setup">Answer the setup questions</a> to start.</p>
+  {% endif %}
+</section>
+<section class="settings-block" id="resume">
+  <h2>Resume</h2>
+  {% if resume %}
+  <p>{{ resume.filename }}, uploaded {{ resume.uploaded_at|local }}: {{ resume.lines|length }} content lines. {% if resume.embed_model %}Matches are scored against it.{% else %}Matches are scored against it from the next check on.{% endif %}</p>
+  <details class="resume-lines">
+    <summary>The lines postings are compared with</summary>
+    <ol>{% for line in resume.lines %}<li>{{ line }}</li>{% endfor %}</ol>
+  </details>
+  {% else %}
+  <p class="hint">No resume yet, so matches are scored on skill keywords. Upload one and postings with a description are scored by how close they are to it.</p>
+  {% endif %}
+  <form method="post" action="/settings/resume" enctype="multipart/form-data" class="inline">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="file" name="resume" accept=".pdf,.docx,.txt,.md" required aria-label="Resume file">
+    <button type="submit">{{ "Replace" if resume else "Upload" }}</button>
+  </form>
+  {% if resume %}
+  <form method="post" action="/settings/resume/clear" class="inline">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button type="submit" class="link status-dismissed">Delete the resume</button>
+  </form>
+  {% endif %}
+  <p class="hint">PDF, DOCX, TXT or Markdown, at most 2 MB. It stays on this machine; headings and contact details are left out of the comparison.</p>
+</section>
+
+{% elif tab == "filters" %}
+<section class="settings-block">
+  {% set active_count = filters|selectattr("row.active")|list|length %}
+  <p class="notice mode">
+    {% if not filters %}No saved filters: every match is pushed, one message per check.
+    {% elif not active_count %}Every saved filter is off: nothing is pushed. Delete them all to go back to one message per check.
+    {% else %}Only matches that fit an active saved filter are pushed, one message each. Matches that fit none still land in New.
+    {% endif %}
+  </p>
+  {% if filters %}
+  <ul class="saved-list">
+    {% for saved in filters %}
+    <li{% if not saved.row.active %} class="paused"{% endif %}>
+      <span class="name">{% with slot = saved.row.slot, label = saved.row.label %}{% include "_bullet.html" %}{% endwith %} {{ saved.row.label }}</span>
+      {% if saved.query is none %}
+      <span class="badge bad" title="{{ saved.error }}">no longer valid</span>
+      <span class="hint">{{ saved.error }}: skipped until you save it again.</span>
+      {% else %}
+      <span class="hint">{{ summaries[saved.row.id] }}</span>
+      {% endif %}
+      <span class="controls">
+        <form method="post" action="/settings/filters/{{ saved.row.id }}/active">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="active" value="{{ "0" if saved.row.active else "1" }}">
+          <button type="submit" class="link">{{ "Turn off" if saved.row.active else "Turn on" }}</button>
+        </form>
+        {% if saved.row.id in edit_links %}<a href="{{ edit_links[saved.row.id] }}">Edit</a>{% endif %}
+        <form method="post" action="/settings/filters/{{ saved.row.id }}/delete" hx-post="/settings/filters/{{ saved.row.id }}/delete" hx-confirm="Delete {{ saved.row.label }}?">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="link status-dismissed">Delete</button>
+        </form>
+      </span>
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+  <p class="hint">To add one, set the filters on the <a href="/">dashboard</a> and press "Save these filters". A saved filter pushes only postings found after you save it; at most {{ per_cycle }} go out on their own per check, the rest in one summary.</p>
+</section>
+
+{% elif tab == "sources" %}
+<form method="post" action="/settings/sources" class="settings-form">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <input type="hidden" name="revision" value="{{ profile_revision }}">
+  <fieldset class="choices">
+    <legend>How often</legend>
+    <label class="field-row">Check company boards and the feed every <input type="number" name="check_every_minutes" min="5" max="240" value="{{ sources_form.check_every_minutes }}" required> minutes</label>
+    <label class="field-row">Search LinkedIn and Indeed every <input type="number" name="search_every_minutes" min="15" max="240" value="{{ sources_form.search_every_minutes }}" required> minutes</label>
+    <label class="field-row">Only push postings younger than <input type="number" name="freshness_hours" min="24" max="168" value="{{ sources_form.freshness_hours }}" required> hours</label>
+  </fieldset>
+  <fieldset class="choices">
+    <legend>Where postings come from</legend>
+    <label class="check"><input type="checkbox" name="simplify_feed" value="1"{% if sources_form.simplify_feed %} checked{% endif %}> The SimplifyJobs New-Grad list</label>
+    <label class="check"><input type="checkbox" name="discovery" value="1"{% if sources_form.discovery %} checked{% endif %}> Add company boards found in postings automatically, up to</label>
+    <label class="field-row indent"><input type="number" name="discovery_max_companies" min="0" max="10000" value="{{ sources_form.discovery_max_companies }}" required> companies</label>
+    <label class="check"><input type="checkbox" name="seed_updates" value="1"{% if sources_form.seed_updates %} checked{% endif %}> Add new boards from the shared jobpulse list once a day</label>
+    <p class="hint">Search terms and the boards you watch are set by your setup answers and on the Watchlist page.</p>
+  </fieldset>
+  <fieldset class="choices">
+    <legend>LinkedIn</legend>
+    <label class="field-row">Pause between requests: <input type="number" name="linkedin_pause_min_seconds" min="2" max="300" value="{{ sources_form.linkedin_pause_min_seconds }}" required aria-label="Shortest pause in seconds"> to <input type="number" name="linkedin_pause_max_seconds" min="2" max="300" value="{{ sources_form.linkedin_pause_max_seconds }}" required aria-label="Longest pause in seconds"> seconds</label>
+    <label class="check"><input type="checkbox" name="linkedin_job_pages" value="1"{% if sources_form.linkedin_job_pages %} checked{% endif %}> Read each match's LinkedIn page (description, applicant count), at most</label>
+    <label class="field-row indent"><input type="number" name="linkedin_job_pages_per_hour" min="1" max="200" value="{{ sources_form.linkedin_job_pages_per_hour }}" required> pages an hour</label>
+    <p class="hint">Slower is safer: LinkedIn rate-limits busy addresses.</p>
+  </fieldset>
+  <fieldset class="choices">
+    <legend>Other</legend>
+    <label class="check"><input type="checkbox" name="health_alerts" value="1"{% if sources_form.health_alerts %} checked{% endif %}> Tell me when a source keeps failing, and when it recovers</label>
+    <label class="check"><input type="checkbox" name="resume_matching" value="1"{% if sources_form.resume_matching %} checked{% endif %}> Score postings against my resume (a local model, about 200 MB of memory)</label>
+  </fieldset>
+  <div class="wizard-buttons"><button type="submit">Save</button><span class="hint">Applied within a minute.</span></div>
+</form>
+
+{% elif tab == "security" %}
+<section class="settings-block">
+  <h2>Dashboard password</h2>
+  {% if password_set %}
+  <p>On: your browser asks for it (any user name works).</p>
+  {% else %}
+  <p class="hint">Off: anyone who can reach this page can use it. Keep it on your own machine or network, or set a password.</p>
+  {% endif %}
+  <form method="post" action="/settings/password" class="stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label class="field-row">New password <input type="password" name="password" autocomplete="new-password" minlength="{{ min_password }}" required></label>
+    <label class="field-row">Again <input type="password" name="confirm" autocomplete="new-password" minlength="{{ min_password }}" required></label>
+    <div><button type="submit">{{ "Change it" if password_set else "Turn it on" }}</button></div>
+  </form>
+  {% if password_set %}
+  <form method="post" action="/settings/password/clear" class="inline">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button type="submit" class="link status-dismissed">Turn the password off</button>
+  </form>
+  {% endif %}
+  <p class="hint">Forgot it? Run <code>jobpulse password clear</code> on the machine jobpulse runs on.</p>
+</section>
+
+{% elif tab == "advanced" %}
+<section class="settings-block">
+  <h2>LLM second opinion</h2>
+  <p class="hint">Optional: with <code>llm.enabled</code> on in the profile below, matches near the threshold are read by Claude against your resume, which is then sent to Anthropic's API.</p>
+  {{ secret_list(advanced_secrets) }}
+</section>
+<section class="settings-block" id="profile">
+  <h2>Profile</h2>
+  <p class="hint">Every preference as YAML: filters, scoring weights, searches, the blocklist, the LLM layer and more. Saved changes apply at the next check, and new weights or rules re-score open matches.</p>
+  <form method="post" action="/settings/profile" class="profile-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="revision" value="{{ profile_revision }}">
+    <textarea name="profile" rows="24" spellcheck="false" autocapitalize="off" aria-label="Profile as YAML">{{ profile_text }}</textarea>
+    <button type="submit">Save profile</button>
+  </form>
+</section>
+{% endif %}
+{% endblock %}

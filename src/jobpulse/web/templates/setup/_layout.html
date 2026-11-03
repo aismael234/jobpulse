@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>{% block title %}Setup{% endblock %} · jobpulse</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body class="setup">
+  <header class="top">
+    <span class="brand">jobpulse</span>
+    <nav aria-label="Setup steps">
+      {% for name, label in steps %}
+      <a href="/setup/{{ name }}"{% if name == step %} aria-current="step"{% endif %}>{{ loop.index }}. {{ label }}</a>
+      {% endfor %}
+      {% if editing %}<a href="/settings#setup">Back to Settings</a>{% endif %}
+    </nav>
+  </header>
+  <main class="wizard">
+    {% if error %}<p class="notice error" role="alert">{{ error }}</p>{% endif %}
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

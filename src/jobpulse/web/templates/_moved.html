@@ -1,0 +1,11 @@
+<article class="posting moved" id="posting-{{ row.id }}">
+  <p>Moved to {{ row.status }}: <span class="company">{{ row.company_name }}</span> · {{ row.title }}</p>
+  <form class="undo" method="post" action="/postings/{{ row.id }}/status" hx-post="/postings/{{ row.id }}/status" hx-target="#posting-{{ row.id }}" hx-swap="outerHTML">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="view" value="{{ view }}">
+    <input type="hidden" name="return_to" value="{{ return_to }}">
+    <input type="hidden" name="status" value="{{ previous }}">
+    <button type="submit">Undo</button>
+  </form>
+</article>
+{% include "_counts.html" %}

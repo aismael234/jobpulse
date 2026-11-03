@@ -1,0 +1,25 @@
+{
+  "jobPostingInfo": {
+    "id": "4e1f0c2d9a8b7c6d5e4f3a2b1c0d9e8f",
+    "title": "Software Engineer - New Grad",
+    "jobDescription": "<p><b>About the team</b></p><p>Omega builds payment rails.</p><ul><li>Build Python services on Postgres</li><li>3+ years of experience is a plus, not a must</li></ul>",
+    "location": "US, WA, Seattle",
+    "additionalLocations": ["US, CA, San Jose"],
+    "postedOn": "Posted Yesterday",
+    "startDate": "2026-10-22",
+    "timeType": "Full time",
+    "remoteType": "Flex",
+    "jobReqId": "R0012345",
+    "jobPostingId": "Software-Engineer---New-Grad_R0012345",
+    "jobPostingSiteId": "External",
+    "country": {"descriptor": "United States of America", "id": "bc33aa3152ec42d4995f4791a106ed09"},
+    "canApply": true,
+    "posted": true,
+    "includeResumeParsing": true,
+    "externalUrl": "https://omega.wd5.myworkdayjobs.com/External/job/Seattle-WA/Software-Engineer---New-Grad_R0012345",
+    "questionnaireId": "0a1b2c3d4e5f"
+  },
+  "hiringOrganization": {"name": "Omega Systems, Inc.", "url": ""},
+  "similarJobs": [],
+  "userAuthenticated": false
+}

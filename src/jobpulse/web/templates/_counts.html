@@ -1,0 +1,5 @@
+{% if oob_counts is defined and oob_counts %}
+{% for status in statuses %}
+<span class="count" id="count-{{ status }}" hx-swap-oob="true">{{ counts[status] }}</span>
+{% endfor %}
+{% endif %}

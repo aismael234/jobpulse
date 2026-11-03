@@ -1,0 +1,25 @@
+{% extends "setup/_layout.html" %}
+{% block title %}Pay and companies{% endblock %}
+{% block content %}
+<h1>Pay and companies</h1>
+<form method="post" action="/setup/goals" class="wizard-form">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <label class="field">Lowest pay you'd take, in thousands of US dollars a year
+    <input type="text" name="min_pay" inputmode="numeric" value="{{ answers.min_pay if answers.min_pay is not none else "" }}" placeholder="120 for $120K">
+  </label>
+  <p class="hint">Postings listing US-dollar pay whose top is under this are hidden. Postings that don't list pay are kept.</p>
+  <label class="field">Dream companies, one per line
+    <textarea name="dream" rows="4" placeholder="Stripe">{{ answers.dream|join("\n") }}</textarea>
+  </label>
+  <p class="hint">Their postings score as your top priority, from any source.</p>
+  <label class="field">Companies to avoid, one per line
+    <textarea name="avoid" rows="4">{{ answers.avoid|join("\n") }}</textarea>
+  </label>
+  <p class="hint">Never shown or pushed. You can block more from any posting later.</p>
+  <label class="check"><input type="checkbox" name="hide_agencies" value="1"{% if answers.hide_agencies %} checked{% endif %}> Hide staffing and recruiting agencies</label>
+  <p class="hint">{{ agencies|join(", ") }}, and any company you mark as an agency when you block it.</p>
+  <label class="check"><input type="checkbox" name="job_boards" value="1"{% if answers.job_boards is not defined or answers.job_boards %} checked{% endif %}> Also search LinkedIn and Indeed</label>
+  <p class="hint">Their public results, read slowly as a guest. Their terms restrict automated access and they may rate-limit your IP address; without them jobpulse watches company boards and the SimplifyJobs feed only.</p>
+  <div class="wizard-buttons"><button type="submit">Continue</button></div>
+</form>
+{% endblock %}

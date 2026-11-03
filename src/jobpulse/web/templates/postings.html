@@ -1,0 +1,121 @@
+{% extends "base.html" %}
+{% block title %}{{ view }} · jobpulse{% endblock %}
+{% block content %}
+{% if saved_buttons %}
+<section class="saved" aria-label="Saved filters">
+  {% for button in saved_buttons %}
+  <a class="saved-filter{% if button.current %} current{% endif %}{% if not button.saved.row.active %} paused{% endif %}" href="{{ button.href }}" data-viewed="/saved-filters/{{ button.saved.row.id }}/viewed"{% if button.current %} aria-current="true"{% endif %}{% if not button.saved.row.active %} title="Off: not pushed"{% endif %}>{% with slot = button.saved.row.slot, label = button.saved.row.label %}{% include "_bullet.html" %}{% endwith %} {{ button.saved.row.label }}{% if button.count %} <span class="badge-count" title="{{ button.count }} new since you last opened it">{{ button.count }}</span>{% endif %}</a>
+  {% endfor %}
+</section>
+{% endif %}
+<form class="filters" method="get" action="/">
+  <input type="hidden" name="view" value="{{ view|lower }}">
+  <div class="row">
+    <input type="search" name="q" value="{{ query.text }}" placeholder="Search title, company, description" aria-label="Search">
+    {% with places = page.places %}{% include "_place_select.html" %}{% endwith %}
+    <select name="pushed" aria-label="Pushed" title="When jobpulse pushed the posting, or first saw it if it never pushed it">
+      <option value="">Pushed any time</option>
+      {% for value, label in pushed_choices %}
+      <option value="{{ value }}"{% if query.pushed == value %} selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+    <select name="sort" aria-label="Sort">
+      <option value="score"{% if query.sort == "score" %} selected{% endif %}>Best score</option>
+      <option value="fresh"{% if query.sort == "fresh" %} selected{% endif %}>Newest</option>
+      <option value="pushed"{% if query.sort == "pushed" %} selected{% endif %}>Recently pushed</option>
+      <option value="resume"{% if query.sort == "resume" %} selected{% endif %}>Best resume match</option>
+      {% if moved_sort %}
+      <option value="moved"{% if query.sort == "moved" %} selected{% endif %}>{{ moved_sort }}</option>
+      {% endif %}
+    </select>
+    <button type="submit">Filter</button>
+    <a class="reset" href="/?view={{ view|lower }}">Clear</a>
+  </div>
+  <div class="row">
+    {% include "_filter_fields.html" %}
+  </div>
+</form>
+{% if save_form is defined %}
+<details class="save-filters"{% if save_form.editing %} open{% endif %}>
+  <summary>{% if save_form.editing %}Editing the saved filter {{ save_form.editing.label }}{% else %}Save these filters{% endif %}</summary>
+  {% if save_form.full %}
+  <p class="hint">You have {{ save_form.max }} saved filters, one per color. Delete one on Settings to add another.</p>
+  {% else %}
+  <form class="save-filters-form" method="post" action="{{ save_form.action }}" hx-post="{{ save_form.action }}" hx-swap="none">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    {% for name, value in save_form.params.items() %}<input type="hidden" name="{{ name }}" value="{{ value }}">{% endfor %}
+    <input type="text" name="label" value="{{ save_form.label }}" placeholder="Name, e.g. Austin backend" aria-label="Name" maxlength="60" required>
+    <fieldset class="colors">
+      <legend>Color</legend>
+      {% for swatch in swatches %}
+      {% set index = loop.index0 %}
+      {% if index in save_form.free_slots %}
+      <label class="color-choice"><input type="radio" name="slot" value="{{ index }}"{% if save_form.slot == index %} checked{% endif %}>{% with label = swatch.name %}{% with slot = index %}{% include "_bullet.html" %}{% endwith %}{% endwith %}</label>
+      {% endif %}
+      {% endfor %}
+    </fieldset>
+    <button type="submit">{% if save_form.editing %}Save changes{% else %}Save{% endif %}</button>
+    {% if save_form.editing %}<a class="reset" href="/settings/filters">Cancel</a>{% endif %}
+  </form>
+  <p class="hint">It keeps the filters above (change them first, then save). Once you have a saved filter, only matches that fit one are pushed, one message each.</p>
+  {% endif %}
+</details>
+{% endif %}
+
+<div class="summary" id="summary">
+  <p>{{ page.total }} posting{{ "" if page.total == 1 else "s" }}{% if page.total > page.page_size %}, page {{ page.page }}{% endif %}</p>
+  {% if page.total %}
+  <a href="{{ export_url }}" download>Export CSV</a>
+  {% if view in bulk_views %}
+  <form class="bulk" method="post" action="/postings/bulk-status" hx-post="/postings/bulk-status" hx-target="#postings" hx-swap="innerHTML" hx-confirm="Dismiss all {{ page.total }} postings these filters show? Undo stays on screen afterwards.">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="status" value="Dismissed">
+    <input type="hidden" name="filters" value="{{ filters }}">
+    <input type="hidden" name="as_of" value="{{ as_of }}">
+    <input type="hidden" name="return_to" value="{{ return_to }}">
+    <button type="submit" class="link status-dismissed">Dismiss all {{ page.total }}</button>
+  </form>
+  {% endif %}
+  {% endif %}
+</div>
+
+<section class="postings" id="postings">
+{% for row in page.rows %}
+{% include "_posting.html" %}
+{% else %}
+{% if progress is defined and progress and not progress.boards_checked and not progress.last_check %}
+<div class="empty on-the-way">
+  <p><strong>Postings are on the way.</strong> jobpulse watches {{ progress.boards }} company board{{ "" if progress.boards == 1 else "s" }}{% if progress.searches %} and {{ progress.searches }} LinkedIn and Indeed search{{ "" if progress.searches == 1 else "es" }}{% endif %}. The first check of each stores what's there now without pushing it, so only postings that go up from here on reach you.</p>
+  <p class="hint">No check has finished yet; the first starts within a minute of setup.</p>
+</div>
+{% elif progress is defined and progress and progress.boards_checked < progress.boards %}
+<div class="empty on-the-way">
+  <p><strong>Postings are on the way.</strong> {{ progress.boards_checked }} of {{ progress.boards }} boards checked{% if progress.searches %}, {{ progress.searches }} search{{ "" if progress.searches == 1 else "es" }} running{% endif %}. Their first check is silent; new postings after it land here and on your phone.</p>
+  <p class="hint">{% if progress.last_check %}Last check {{ progress.last_check|ago }}{% endif %}{% if next_check %}; next around {{ next_check|local }}{% endif %}.</p>
+</div>
+{% else %}
+<p class="empty">{% if query.filtered %}No postings match these filters.{% elif view == "New" %}Nothing new to look at. Every match is pushed and lands here.{% if progress is defined and progress and progress.last_check %} Last check {{ progress.last_check|ago }}{% if next_check %}, next around {{ next_check|local }}{% endif %}.{% endif %}{% else %}No {{ view|lower }} postings.{% endif %}</p>
+{% endif %}
+{% endfor %}
+</section>
+
+<dialog id="block-dialog" class="block-dialog" aria-labelledby="block-dialog-title">
+  <form method="dialog">
+    <h2 id="block-dialog-title">Block <span data-company></span>?</h2>
+    <p>Its postings are hidden here (Applied aside) and never pushed again. Is it a staffing or recruiting agency?</p>
+    <p class="hint">Agencies go on your agency list, hidden while “Hide staffing agencies” is on, instead of your block list.</p>
+    <div class="wizard-buttons">
+      <button type="submit" value="agency">Yes, an agency</button>
+      <button type="submit" value="company">No, block the company</button>
+      <button type="submit" value="cancel" class="link">Cancel</button>
+    </div>
+  </form>
+</dialog>
+
+{% if page.has_previous or page.has_next %}
+<nav class="pager" aria-label="Pages">
+  {% if page.has_previous %}<a href="{{ link(query, page=page.page - 1) }}" rel="prev">← Previous page</a>{% endif %}
+  {% if page.has_next %}<a href="{{ link(query, page=page.page + 1) }}" rel="next">Next page →</a>{% endif %}
+</nav>
+{% endif %}
+{% endblock %}

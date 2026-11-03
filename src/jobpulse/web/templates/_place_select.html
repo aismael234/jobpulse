@@ -1,0 +1,10 @@
+<select name="place" aria-label="Location">
+  <option value="">Any location</option>
+  {% for group in places %}
+  <optgroup label="{{ group.label }}">
+    {% for option in group.options %}
+    <option value="{{ option.key }}"{% if query.place and query.place|lower == option.key|lower %} selected{% endif %}>{{ option.label }} ({{ option.count }})</option>
+    {% endfor %}
+  </optgroup>
+  {% endfor %}
+</select>

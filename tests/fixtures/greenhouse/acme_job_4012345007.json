@@ -1,0 +1,59 @@
+{
+  "absolute_url": "https://job-boards.greenhouse.io/acme/jobs/4012345007",
+  "ai_disclaimer": null,
+  "ai_opt_out_request_url": null,
+  "application_deadline": null,
+  "company_name": "Acme",
+  "content": "&lt;h2&gt;About the role&lt;/h2&gt;&lt;p&gt;You will build payment APIs in Python and Go on PostgreSQL.&lt;/p&gt;&lt;ul&gt;&lt;li&gt;3+ years of professional backend experience&lt;/li&gt;&lt;li&gt;Kubernetes&amp;nbsp;experience is a plus&lt;/li&gt;&lt;/ul&gt;&lt;p&gt;Benefits &amp;amp; perks&lt;/p&gt;",
+  "data_compliance": [
+    {
+      "type": "gdpr",
+      "requires_consent": false,
+      "requires_processing_consent": false,
+      "requires_retention_consent": false,
+      "retention_period": null,
+      "demographic_data_consent_applies": false
+    }
+  ],
+  "departments": [
+    {
+      "id": 81946,
+      "name": "Engineering",
+      "child_ids": [
+        81950
+      ],
+      "parent_id": null
+    }
+  ],
+  "education": "education_optional",
+  "first_published": "2026-10-23T09:35:00-04:00",
+  "id": 4012345007,
+  "include_ai_disclaimer": false,
+  "internal_job_id": 3537001,
+  "language": "en",
+  "location": {
+    "name": "San Francisco, CA; New York, NY"
+  },
+  "metadata": null,
+  "offices": [
+    {
+      "id": 87011,
+      "name": "San Francisco",
+      "location": "San Francisco, CA",
+      "child_ids": [],
+      "parent_id": null
+    }
+  ],
+  "pay_input_ranges": [
+    {
+      "min_cents": 18000000,
+      "max_cents": 24000000,
+      "currency_type": "USD",
+      "title": "US base salary",
+      "blurb": "Final offers depend on location."
+    }
+  ],
+  "requisition_id": "ENG-101",
+  "title": "Backend Engineer, Payments",
+  "updated_at": "2026-10-23T11:02:51-04:00"
+}
